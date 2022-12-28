@@ -206,15 +206,20 @@ namespace PSMF
      *
      * @tparam Functor a functor which is applied on each patch
      * @tparam VectorType
+     * @tparam Functor_inv a functor which is applied on each patch
      * @param func
      * @param src
      * @param dst
+     * @param func_inv
      */
-    template <typename Functor, typename VectorType>
+    template <typename Functor,
+              typename VectorType,
+              typename Functor_inv = Functor>
     void
-    patch_loop(const Functor    &func,
-               const VectorType &src,
-               VectorType       &dst) const;
+    patch_loop(const Functor     &func,
+               const VectorType  &src,
+               VectorType        &dst,
+               const Functor_inv &func_inv = Functor_inv()) const;
 
     /**
      * @brief Initializes the tensor product matrix.
@@ -251,6 +256,17 @@ namespace PSMF
     patch_loop_fused(const Functor    &func,
                      const VectorType &src,
                      VectorType       &dst) const;
+
+    /**
+     * Helper function. Loop over all the patches and apply the functor on
+     * each element in parallel. SEPERATE kernel.
+     */
+    template <typename Functor, typename Functor_inv, typename VectorType>
+    void
+    patch_loop_seperate(const Functor     &func,
+                        const Functor_inv &func_inv,
+                        const VectorType  &src,
+                        VectorType        &dst) const;
 
     /**
      * Helper function. Implement multiple red-black coloring.
@@ -313,11 +329,17 @@ namespace PSMF
      * dimensions are used to launch the CUDA kernels.
      */
     std::vector<dim3> block_dim;
+    std::vector<dim3> block_dim_inv;
 
     /**
      * Number of patches per thread block.
      */
     unsigned int patch_per_block;
+
+    /**
+     * Auxiliary vector.
+     */
+    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> tmp;
 
 
     /**

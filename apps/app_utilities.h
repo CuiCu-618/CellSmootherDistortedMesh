@@ -50,9 +50,15 @@ namespace Util
     else
       AssertThrow(false, ExcMessage("Invalid Vcycle number type."));
 
-    const auto str_smooth_variant = SmootherToString(CT::KERNEL_TYPE_);
-    const auto str_dof_layout     = DoFLayoutToString(CT::DOF_LAYOUT_);
-    const auto str_granularity    = GranularityToString(CT::GRANULARITY_);
+    std::string str_smooth_variant = "";
+
+    for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
+      {
+        str_smooth_variant += SmootherToString(CT::KERNEL_TYPE_[k]);
+        str_smooth_variant += "_";
+      }
+    const auto str_dof_layout  = DoFLayoutToString(CT::DOF_LAYOUT_);
+    const auto str_granularity = GranularityToString(CT::GRANULARITY_);
 
     oss << "poisson";
     oss << std::scientific << std::setprecision(2);
@@ -60,7 +66,7 @@ namespace Util
     oss << "_" << str_dof_layout;
     oss << CT::FE_DEGREE_;
     oss << "_" << str_smooth_variant;
-    oss << "_" << str_granularity;
+    oss << str_granularity;
     oss << "_" << value_type;
 
     return oss.str();
@@ -108,9 +114,11 @@ namespace Util
         << "DoF Layout:                     "
         << DoFLayoutToString(CT::DOF_LAYOUT_) << std::endl
         << "Number type for V-cycle:        " << value_type << std::endl
-        << "Smoother Variant:               "
-        << SmootherToString(CT::KERNEL_TYPE_) << std::endl
-        << "Granularity Scheme:             "
+        << "Smoother Variant:               ";
+    for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
+      oss << SmootherToString(CT::KERNEL_TYPE_[k]) << " ";
+    oss << std::endl;
+    oss << "Granularity Scheme:             "
         << GranularityToString(CT::GRANULARITY_) << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
         << "Number of MG cycles in V-cycle: " << 1 << std::endl

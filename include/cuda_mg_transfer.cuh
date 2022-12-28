@@ -22,9 +22,9 @@
 #include <deal.II/multigrid/mg_transfer.h>
 #include <deal.II/multigrid/mg_transfer_internal.h>
 
-#include "utilities.cuh"
 #include "cuda_vector.cuh"
 #include "patch_base.cuh"
+#include "utilities.cuh"
 
 using namespace dealii;
 

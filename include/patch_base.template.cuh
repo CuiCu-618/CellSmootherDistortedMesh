@@ -74,6 +74,8 @@ namespace PSMF
     dof_handler = &matrix_free->get_dof_handler();
     level       = matrix_free->get_mg_level();
 
+    if (kernel == SmootherVariant::SEPERATE)
+      matrix_free->initialize_dof_vector(tmp);
 
     switch (granularity_scheme)
       {
@@ -132,17 +134,21 @@ namespace PSMF
   }
 
   template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  template <typename Functor, typename VectorType>
+  template <typename Functor, typename VectorType, typename Functor_inv>
   void
   LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::Q>::patch_loop(
-    const Functor    &func,
-    const VectorType &src,
-    VectorType       &dst) const
+    const Functor     &func,
+    const VectorType  &src,
+    VectorType        &dst,
+    const Functor_inv &func_inv) const
   {
     switch (kernel)
       {
         case SmootherVariant::FUSED:
           patch_loop_fused(func, src, dst);
+          break;
+        case SmootherVariant::SEPERATE:
+          patch_loop_seperate(func, func_inv, src, dst);
           break;
         default:
           AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
@@ -202,6 +208,93 @@ namespace PSMF
       }
 
     AssertCudaKernel();
+  }
+
+  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <typename Functor, typename Functor_inv, typename VectorType>
+  void
+  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::Q>::
+    patch_loop_seperate(const Functor     &func,
+                        const Functor_inv &func_inv,
+                        const VectorType  &src,
+                        VectorType        &dst) const
+  {
+    auto shared_mem = [&]() {
+      std::size_t mem = 0;
+
+      const unsigned int n_dofs_1d = 2 * fe_degree + 1;
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst, local_residual
+      mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_mass, local_derivative
+      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
+      // temp
+      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+
+      return mem;
+    };
+
+    auto shared_mem_inv = [&]() {
+      std::size_t mem = 0;
+
+      const unsigned int n_dofs_1d = 2 * fe_degree - 1;
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst, local_residual
+      mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_eigenvectors, local_eigenvalues
+      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
+      // temp
+      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+
+      return mem;
+    };
+
+
+    AssertCuda(cudaFuncSetAttribute(loop_kernel_seperate<dim,
+                                                         fe_degree,
+                                                         Number,
+                                                         kernel,
+                                                         Functor,
+                                                         DoFLayout::Q>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    shared_mem()));
+
+    AssertCuda(cudaFuncSetAttribute(loop_kernel_seperate_inv<dim,
+                                                             fe_degree,
+                                                             Number,
+                                                             kernel,
+                                                             Functor,
+                                                             DoFLayout::Q>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    shared_mem_inv()));
+
+    // loop over all patches
+    for (unsigned int i = 0; i < n_colors; ++i)
+      if (n_patches[i] > 0)
+        {
+          loop_kernel_seperate<dim,
+                               fe_degree,
+                               Number,
+                               kernel,
+                               Functor,
+                               DoFLayout::Q>
+            <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
+                                                          src.get_values(),
+                                                          dst.get_values(),
+                                                          tmp.get_values(),
+                                                          get_data(i));
+          AssertCudaKernel();
+
+          loop_kernel_seperate_inv<dim,
+                                   fe_degree,
+                                   Number,
+                                   kernel,
+                                   Functor_inv,
+                                   DoFLayout::Q>
+            <<<grid_dim[i], block_dim_inv[i], shared_mem_inv()>>>(
+              func_inv, tmp.get_values(), dst.get_values(), get_data(i));
+          AssertCudaKernel();
+        }
   }
 
   template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
@@ -451,6 +544,7 @@ namespace PSMF
     this->n_patches.resize(n_colors);
     this->grid_dim.resize(n_colors);
     this->block_dim.resize(n_colors);
+    this->block_dim_inv.resize(n_colors);
     this->first_dof.resize(n_colors);
     this->patch_id.resize(n_colors);
   }
@@ -471,20 +565,22 @@ namespace PSMF
 
     grid_dim[color] = dim3(apply_n_blocks);
 
-    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
-    if (dim == 2)
-      block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
-    else if (dim == 3 && fe_degree > 0)
-      block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
-    else if (dim == 3 && fe_degree < 5)
-      block_dim[color] = dim3(1 * n_dofs_1d, n_dofs_1d, n_dofs_1d);
-    else
-      Assert(false, ExcNotImplemented());
+    constexpr unsigned int n_dofs_1d     = 2 * fe_degree + 1;
+    constexpr unsigned int n_dofs_1d_inv = 2 * fe_degree - 1;
 
     switch (kernel)
       {
         case SmootherVariant::FUSED:
           block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+          break;
+        case SmootherVariant::SEPERATE:
+          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+          block_dim_inv[color] =
+            dim3(patch_per_block * n_dofs_1d_inv, n_dofs_1d_inv);
+          break;
+        case SmootherVariant::GLOBAL:
+          block_dim_inv[color] =
+            dim3(patch_per_block * n_dofs_1d_inv, n_dofs_1d_inv);
           break;
         default:
           AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
@@ -555,7 +651,7 @@ namespace PSMF
 
 } // namespace PSMF
 
-/**
- * \page patch_base.template
- * \include patch_base.template.cuh
- */
+  /**
+   * \page patch_base.template
+   * \include patch_base.template.cuh
+   */

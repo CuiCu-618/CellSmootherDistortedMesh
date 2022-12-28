@@ -103,13 +103,14 @@ namespace Step64
     DoFHandler<dim>    dof_handler;
     MappingQ1<dim>     mapping;
     double             setup_time;
-    ConvergenceTable   convergence_table;
+
+    std::vector<ConvergenceTable> info_table;
 
     std::fstream                        fout;
     std::shared_ptr<ConditionalOStream> pcout;
 
-    MGLevelObject<MatrixTypeDP>                             matrix_dp;
-    PSMF::MGTransferCUDA<dim, full_number, CT::DOF_LAYOUT_> transfer;
+    MGLevelObject<MatrixTypeDP> matrix_dp;
+    MGConstrainedDoFs           mg_constrained_dofs;
   };
 
   template <int dim, int fe_degree>
@@ -123,6 +124,8 @@ namespace Step64
     const auto filename = Util::get_filename();
     fout.open(filename + ".log", std::ios_base::out);
     pcout = std::make_shared<ConditionalOStream>(fout, true);
+
+    info_table.resize(CT::KERNEL_TYPE_.size());
   }
 
   template <int dim, int fe_degree>
@@ -158,8 +161,6 @@ namespace Step64
   void
   LaplaceProblem<dim, fe_degree>::assemble_mg()
   {
-    MGConstrainedDoFs mg_constrained_dofs;
-
     // Initialization of Dirichlet boundaries
     std::set<types::boundary_id> dirichlet_boundary;
     dirichlet_boundary.insert(0);
@@ -211,93 +212,122 @@ namespace Step64
 
     *pcout << "Matrix-free setup time: " << time.wall_time() << "s"
            << std::endl;
-
-    time.restart();
-    transfer.initialize_constraints(mg_constrained_dofs);
-    transfer.build(dof_handler);
-
-    *pcout << "MG transfer setup time: " << time.wall_time() << "s"
-           << std::endl;
   }
   template <int dim, int fe_degree>
   void
   LaplaceProblem<dim, fe_degree>::solve_mg(unsigned int n_mg_cycles)
   {
-    auto do_solve = [&]()
-    {};
-    
-    PSMF::MultigridSolver<dim,
-                          fe_degree,
-                          CT::DOF_LAYOUT_,
-                          double,
-                          CT::KERNEL_TYPE_,
-                          CT::VCYCLE_NUMBER_>
-      solver(dof_handler,
-             matrix_dp,
-             transfer,
-             Functions::ZeroFunction<dim, double>(),
-             Functions::ConstantFunction<dim, double>(1.),
-             pcout,
-             n_mg_cycles);
+    Timer time;
 
+    PSMF::MGTransferCUDA<dim, full_number, CT::DOF_LAYOUT_> transfer;
+    transfer.initialize_constraints(mg_constrained_dofs);
+    transfer.build(dof_handler);
 
-    *pcout << std::endl;
-
-    convergence_table.add_value("level", triangulation.n_global_levels());
-    convergence_table.add_value("cells", triangulation.n_global_active_cells());
-    convergence_table.add_value("dofs", dof_handler.n_dofs());
+    *pcout << "MG transfer setup time: " << time.wall_time() << "s"
+           << std::endl;
 
     static unsigned int call_count = 0;
 
-    std::vector<PSMF::SolverData> comp_data = solver.static_comp();
-    for (auto &data : comp_data)
+    auto do_solver = [&](auto solver, unsigned int k) {
+      *pcout << "\nMG with smooth variant ["
+             << SmootherToString(CT::KERNEL_TYPE_[k]) << "]\n";
+
+      info_table[k].add_value("level", triangulation.n_global_levels());
+      info_table[k].add_value("cells", triangulation.n_global_active_cells());
+      info_table[k].add_value("dofs", dof_handler.n_dofs());
+
+      std::vector<PSMF::SolverData> comp_data = solver.static_comp();
+      for (auto &data : comp_data)
+        {
+          *pcout << data.print_comp();
+
+          auto times = data.solver_name + "[s]";
+          auto perfs = data.solver_name + "Perf[Dof/s]";
+
+          info_table[k].add_value(times, data.timing);
+          info_table[k].add_value(perfs, data.perf);
+
+          if (call_count == 0)
+            {
+              info_table[k].set_scientific(times, true);
+              info_table[k].set_precision(times, 3);
+              info_table[k].set_scientific(perfs, true);
+              info_table[k].set_precision(perfs, 3);
+
+              info_table[k].add_column_to_supercolumn(times, data.solver_name);
+              info_table[k].add_column_to_supercolumn(perfs, data.solver_name);
+            }
+        }
+
+      *pcout << std::endl;
+
+      std::vector<PSMF::SolverData> solver_data = solver.solve();
+      for (auto &data : solver_data)
+        {
+          *pcout << data.print_solver();
+
+          auto it    = data.solver_name + "it";
+          auto times = data.solver_name + "[s]";
+          auto mem   = data.solver_name + "Mem Usage[MB]";
+
+          info_table[k].add_value(it, data.n_iteration);
+          info_table[k].add_value(times, data.timing);
+          info_table[k].add_value(mem, data.mem_usage);
+
+          if (call_count == 0)
+            {
+              info_table[k].set_scientific(times, true);
+              info_table[k].set_precision(times, 3);
+
+              info_table[k].add_column_to_supercolumn(it, data.solver_name);
+              info_table[k].add_column_to_supercolumn(times, data.solver_name);
+              info_table[k].add_column_to_supercolumn(mem, data.solver_name);
+            }
+        }
+    };
+
+    for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
       {
-        *pcout << data.print_comp();
-
-        auto times = data.solver_name + "[s]";
-        auto perfs = data.solver_name + "Perf[Dof/s]";
-
-        convergence_table.add_value(times, data.timing);
-        convergence_table.add_value(perfs, data.perf);
-
-        if (call_count == 0)
+        switch (CT::KERNEL_TYPE_[k])
           {
-            convergence_table.set_scientific(times, true);
-            convergence_table.set_precision(times, 3);
-            convergence_table.set_scientific(perfs, true);
-            convergence_table.set_precision(perfs, 3);
-
-            convergence_table.add_column_to_supercolumn(times,
-                                                        data.solver_name);
-            convergence_table.add_column_to_supercolumn(perfs,
-                                                        data.solver_name);
-          }
-      }
-
-    *pcout << std::endl;
-
-    std::vector<PSMF::SolverData> solver_data = solver.solve();
-    for (auto &data : solver_data)
-      {
-        *pcout << data.print_solver();
-
-        auto it    = data.solver_name + "it";
-        auto times = data.solver_name + "[s]";
-        auto mem   = data.solver_name + "Mem Usage[MB]";
-
-        convergence_table.add_value(it, data.n_iteration);
-        convergence_table.add_value(times, data.timing);
-        convergence_table.add_value(mem, data.mem_usage);
-
-        if (call_count == 0)
-          {
-            convergence_table.set_scientific(times, true);
-            convergence_table.set_precision(times, 3);
-
-            convergence_table.add_column_to_supercolumn(it, data.solver_name);
-            convergence_table.add_column_to_supercolumn(times,
-                                                        data.solver_name);
-            convergence_table.add_column_to_supercolumn(mem, data.solver_name);
+            case PSMF::SmootherVariant::FUSED:
+              {
+                PSMF::MultigridSolver<dim,
+                                      fe_degree,
+                                      CT::DOF_LAYOUT_,
+                                      double,
+                                      PSMF::SmootherVariant::FUSED,
+                                      CT::VCYCLE_NUMBER_>
+                  solver(dof_handler,
+                         matrix_dp,
+                         transfer,
+                         Functions::ZeroFunction<dim, double>(),
+                         Functions::ConstantFunction<dim, double>(1.),
+                         pcout,
+                         n_mg_cycles);
+                do_solver(solver, k);
+              }
+              break;
+            case PSMF::SmootherVariant::SEPERATE:
+              {
+                PSMF::MultigridSolver<dim,
+                                      fe_degree,
+                                      CT::DOF_LAYOUT_,
+                                      double,
+                                      PSMF::SmootherVariant::SEPERATE,
+                                      CT::VCYCLE_NUMBER_>
+                  solver(dof_handler,
+                         matrix_dp,
+                         transfer,
+                         Functions::ZeroFunction<dim, double>(),
+                         Functions::ConstantFunction<dim, double>(1.),
+                         pcout,
+                         n_mg_cycles);
+                do_solver(solver, k);
+              }
+              break;
+            default:
+              AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
           }
       }
 
@@ -325,9 +355,15 @@ namespace Step64
             *pcout << "Max size reached, terminating." << std::endl;
             *pcout << std::endl;
 
-            std::ostringstream oss;
-            convergence_table.write_text(oss);
-            *pcout << oss.str() << std::endl;
+            for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
+              {
+                std::ostringstream oss;
+
+                oss << "\n[" << SmootherToString(CT::KERNEL_TYPE_[k]) << "]\n";
+                info_table[k].write_text(oss);
+
+                *pcout << oss.str() << std::endl;
+              }
 
             return;
           }

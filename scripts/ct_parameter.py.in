@@ -73,6 +73,7 @@ def parse_args():
     )
     parser.add_argument('-K','--kernel_type',
                         default='FUSED',
+                        nargs='+',
                         choices=['GLOBAL','SEPERATE','FUSED'],
                         help="variant of the Schwarz smoother kernel"
     )
@@ -124,12 +125,19 @@ class Parameter:
 
     def smoother_prm(self,variant):
         """translate the variant into parameters"""
-        if variant.startswith('F'):
-            self.kernel_type = ('constexpr auto', r'PSMF::SmootherVariant::FUSED')
-        elif variant.startswith('G'):
-            self.kernel_type = ('constexpr auto', r'PSMF::SmootherVariant::GLOBAL')
-        elif variant.startswith('S'):
-            self.kernel_type = ('constexpr auto', r'PSMF::SmootherVariant::SEPERATE')
+        kernel_str = '{'
+        count = 0
+        for kernel in variant:
+            if kernel.startswith('F'):
+                kernel_str += r'PSMF::SmootherVariant::FUSED, '
+                count += 1
+            elif kernel.startswith('GLO'):
+                kernel_str += r'PSMF::SmootherVariant::GLOBAL, '
+                count += 1
+            elif kernel.startswith('SEP'):
+                kernel_str += r'PSMF::SmootherVariant::SEPERATE, '
+                count += 1
+        self.kernel_type = ('constexpr std::array<PSMF::SmootherVariant, ' + str(count) + '>', kernel_str + '}')
 
     def granularity_prm(self,variant):
         """translate the variant into parameters"""

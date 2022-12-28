@@ -196,7 +196,28 @@ namespace PSMF
 
     LocalSmoother<dim, fe_degree, Number, kernel, dof_layout> local_smoother(
       n_dofs_per_dim);
-    level_vertex_patch.patch_loop(local_smoother, src, dst);
+
+    switch (kernel)
+      {
+        case SmootherVariant::FUSED:
+          {
+            level_vertex_patch.patch_loop(local_smoother, src, dst);
+            break;
+          }
+        case SmootherVariant::SEPERATE:
+          {
+            LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother_inverse(n_dofs_per_dim);
+            level_vertex_patch.patch_loop(local_smoother,
+                                          src,
+                                          dst,
+                                          local_smoother_inverse);
+            break;
+          }
+        default:
+          AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
+          break;
+      }
   }
 
   template <typename MatrixType,
