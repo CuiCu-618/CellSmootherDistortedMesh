@@ -1,0 +1,126 @@
+/**
+ * @file app_utilities.h
+ * @author Cu Cui (cu.cui@iwr.uni-heidelberg.de)
+ * @brief collection of helper functions for apps
+ * @version 1.0
+ * @date 2022-12-27
+ *
+ * @copyright Copyright (c) 2022
+ *
+ */
+
+#ifndef APP_UTILITIES_H
+#define APP_UTILITIES_H
+
+#include <helper_cuda.h>
+
+#include "ct_parameter.h"
+#include "git_version.h"
+
+#define ENUM_MACRO(name, v1, v2, v3)               \
+  enum class name                                  \
+  {                                                \
+    v1,                                            \
+    v2,                                            \
+    v3,                                            \
+  };                                               \
+  const char *name##Strings[] = {#v1, #v2, #v3};   \
+  template <typename T>                            \
+  constexpr const char *name##ToString(T value)    \
+  {                                                \
+    return name##Strings[static_cast<int>(value)]; \
+  }
+
+ENUM_MACRO(Smoother, FUSED, SEPERATE, GLOBAL);
+ENUM_MACRO(DoFLayout, DGQ, Q, RT);
+ENUM_MACRO(Granularity, none, user_define, multiple);
+
+namespace Util
+{
+  std::string
+  get_filename()
+  {
+    std::ostringstream oss;
+
+    std::string value_type = "";
+    if (std::is_same_v<float, CT::VCYCLE_NUMBER_>)
+      value_type = "float";
+    else if (std::is_same_v<double, CT::VCYCLE_NUMBER_>)
+      value_type = "double";
+    else
+      AssertThrow(false, ExcMessage("Invalid Vcycle number type."));
+
+    const auto str_smooth_variant = SmootherToString(CT::KERNEL_TYPE_);
+    const auto str_dof_layout     = DoFLayoutToString(CT::DOF_LAYOUT_);
+    const auto str_granularity    = GranularityToString(CT::GRANULARITY_);
+
+    oss << "poisson";
+    oss << std::scientific << std::setprecision(2);
+    oss << "_" << CT::DIMENSION_ << "D";
+    oss << "_" << str_dof_layout;
+    oss << CT::FE_DEGREE_;
+    oss << "_" << str_smooth_variant;
+    oss << "_" << str_granularity;
+    oss << "_" << value_type;
+
+    return oss.str();
+  }
+
+  std::string
+  generic_info_to_fstring()
+  {
+    std::string value_type = "";
+    if (std::is_same_v<float, CT::VCYCLE_NUMBER_>)
+      value_type = "float";
+    else if (std::is_same_v<double, CT::VCYCLE_NUMBER_>)
+      value_type = "double";
+    else
+      AssertThrow(false, ExcMessage("Invalid Vcycle number type."));
+
+    int            devID;
+    cudaDeviceProp deviceProp;
+    // get number of SMs on this GPU
+    AssertCuda(cudaGetDevice(&devID));
+    AssertCuda(cudaGetDeviceProperties(&deviceProp, devID));
+
+    auto mps   = deviceProp.multiProcessorCount;
+    auto cores = _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor);
+
+
+    std::ostringstream oss;
+
+    oss << "Date: " << Utilities::System::get_date() << std::endl
+        << "Time: " << Utilities::System::get_time() << std::endl
+        << "Git - GPUTPS version: " << GIT_COMMIT_HASH << std::endl
+        << "Git - GPUTPS branch: " << GIT_BRANCH << std::endl
+        << std::endl;
+
+    oss << "> Device " << devID << ": " << deviceProp.name << std::endl
+        << "> SM Capability " << deviceProp.major << "." << deviceProp.minor
+        << " detected:" << std::endl
+        << "> " << deviceProp.name << " has " << mps << " MP(s) x " << cores
+        << " (Cores/MP) = " << mps * cores << " (Cores)" << std::endl
+        << std::endl;
+
+    oss << "Settings of parameters: " << std::endl
+        << "Dimension:                      " << CT::DIMENSION_ << std::endl
+        << "Polynomial degree:              " << CT::FE_DEGREE_ << std::endl
+        << "DoF Layout:                     "
+        << DoFLayoutToString(CT::DOF_LAYOUT_) << std::endl
+        << "Number type for V-cycle:        " << value_type << std::endl
+        << "Smoother Variant:               "
+        << SmootherToString(CT::KERNEL_TYPE_) << std::endl
+        << "Granularity Scheme:             "
+        << GranularityToString(CT::GRANULARITY_) << std::endl
+        << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
+        << "Number of MG cycles in V-cycle: " << 1 << std::endl
+        << std::endl;
+
+
+    return oss.str();
+  }
+
+} // namespace Util
+
+
+#endif // APP_UTILITIES_H
