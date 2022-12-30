@@ -713,7 +713,7 @@ namespace PSMF
      * The smoother object
      */
     using SmootherType =
-      PatchSmoother<MatrixType, dim, fe_degree, smooth_kernel, CT::DOF_LAYOUT_>;
+      PatchSmoother<MatrixType, dim, fe_degree, smooth_kernel, dof_layout>;
 
     MGLevelObject<SmootherType> smooth;
 

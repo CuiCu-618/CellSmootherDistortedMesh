@@ -141,7 +141,7 @@ namespace PSMF
                                  threadIdx.y * n_dofs_1d + local_tid_x;
 
             unsigned int global_dof_indices =
-              (z + 1) * func.get_ndofs() * func.get_ndofs() +
+              (z + dim - 2) * func.get_ndofs() * func.get_ndofs() +
               (threadIdx.y + 1) * func.get_ndofs() + local_tid_x + 1 +
               gpu_data.first_dof[patch];
 
@@ -160,7 +160,7 @@ namespace PSMF
                                  threadIdx.y * n_dofs_1d + local_tid_x;
 
             unsigned int global_dof_indices =
-              (z + 1) * func.get_ndofs() * func.get_ndofs() +
+              (z + dim - 2) * func.get_ndofs() * func.get_ndofs() +
               (threadIdx.y + 1) * func.get_ndofs() + local_tid_x + 1 +
               gpu_data.first_dof[patch];
 

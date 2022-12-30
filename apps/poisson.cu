@@ -81,7 +81,8 @@ namespace Step64
   class LaplaceProblem
   {
   public:
-    using full_number = double;
+    using full_number   = double;
+    using vcycle_number = CT::VCYCLE_NUMBER_;
     using MatrixTypeDP =
       PSMF::LaplaceOperator<dim, fe_degree, full_number, CT::DOF_LAYOUT_>;
 
@@ -98,11 +99,11 @@ namespace Step64
     void
     solve_mg(unsigned int n_mg_cycles);
 
-    Triangulation<dim> triangulation;
-    FE_Q<dim>          fe;
-    DoFHandler<dim>    dof_handler;
-    MappingQ1<dim>     mapping;
-    double             setup_time;
+    Triangulation<dim>                  triangulation;
+    std::shared_ptr<FiniteElement<dim>> fe;
+    DoFHandler<dim>                     dof_handler;
+    MappingQ1<dim>                      mapping;
+    double                              setup_time;
 
     std::vector<ConvergenceTable> info_table;
 
@@ -116,7 +117,13 @@ namespace Step64
   template <int dim, int fe_degree>
   LaplaceProblem<dim, fe_degree>::LaplaceProblem()
     : triangulation(Triangulation<dim>::limit_level_difference_at_vertices)
-    , fe(fe_degree)
+    , fe([&]() -> std::shared_ptr<FiniteElement<dim>> {
+      if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::Q)
+        return std::make_shared<FE_Q<dim>>(fe_degree);
+      else if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::DGQ)
+        return std::make_shared<FE_DGQ<dim>>(fe_degree);
+      return std::shared_ptr<FiniteElement<dim>>();
+    }())
     , dof_handler(triangulation)
     , setup_time(0.)
     , pcout(std::make_shared<ConditionalOStream>(std::cout, false))
@@ -141,7 +148,7 @@ namespace Step64
     Timer time;
     setup_time = 0;
 
-    dof_handler.distribute_dofs(fe);
+    dof_handler.distribute_dofs(*fe);
     dof_handler.distribute_mg_dofs();
     const unsigned int nlevels = triangulation.n_global_levels();
     for (unsigned int level = 0; level < nlevels; ++level)
@@ -150,8 +157,8 @@ namespace Step64
 
     *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = ("
            << ((int)std::pow(dof_handler.n_dofs() * 1.0000001, 1. / dim) - 1) /
-                fe.degree
-           << " x " << fe.degree << " + 1)^" << dim << std::endl;
+                fe->degree
+           << " x " << fe->degree << " + 1)^" << dim << std::endl;
 
     setup_time += time.wall_time();
 
@@ -295,14 +302,14 @@ namespace Step64
                 PSMF::MultigridSolver<dim,
                                       fe_degree,
                                       CT::DOF_LAYOUT_,
-                                      double,
+                                      full_number,
                                       PSMF::SmootherVariant::FUSED,
-                                      CT::VCYCLE_NUMBER_>
+                                      vcycle_number>
                   solver(dof_handler,
                          matrix_dp,
                          transfer,
-                         Functions::ZeroFunction<dim, double>(),
-                         Functions::ConstantFunction<dim, double>(1.),
+                         Functions::ZeroFunction<dim, full_number>(),
+                         Functions::ConstantFunction<dim, full_number>(1.),
                          pcout,
                          n_mg_cycles);
                 do_solver(solver, k);
@@ -313,14 +320,32 @@ namespace Step64
                 PSMF::MultigridSolver<dim,
                                       fe_degree,
                                       CT::DOF_LAYOUT_,
-                                      double,
+                                      full_number,
                                       PSMF::SmootherVariant::SEPERATE,
-                                      CT::VCYCLE_NUMBER_>
+                                      vcycle_number>
                   solver(dof_handler,
                          matrix_dp,
                          transfer,
-                         Functions::ZeroFunction<dim, double>(),
-                         Functions::ConstantFunction<dim, double>(1.),
+                         Functions::ZeroFunction<dim, full_number>(),
+                         Functions::ConstantFunction<dim, full_number>(1.),
+                         pcout,
+                         n_mg_cycles);
+                do_solver(solver, k);
+              }
+              break;
+            case PSMF::SmootherVariant::GLOBAL:
+              {
+                PSMF::MultigridSolver<dim,
+                                      fe_degree,
+                                      CT::DOF_LAYOUT_,
+                                      full_number,
+                                      PSMF::SmootherVariant::GLOBAL,
+                                      vcycle_number>
+                  solver(dof_handler,
+                         matrix_dp,
+                         transfer,
+                         Functions::ZeroFunction<dim, full_number>(),
+                         Functions::ConstantFunction<dim, full_number>(1.),
                          pcout,
                          n_mg_cycles);
                 do_solver(solver, k);

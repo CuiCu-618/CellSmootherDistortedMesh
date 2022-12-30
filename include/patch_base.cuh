@@ -222,6 +222,17 @@ namespace PSMF
                const Functor_inv &func_inv = Functor_inv()) const;
 
     /**
+     * Helper function. Loop over all the patches and apply the functor on
+     * each element in parallel. GLOBAL kernel.
+     */
+    template <typename MatrixType, typename Functor_inv, typename VectorType>
+    void
+    patch_loop_global(const MatrixType  &A,
+                      const Functor_inv &func_inv,
+                      const VectorType  &src,
+                      VectorType        &dst) const;
+
+    /**
      * @brief Initializes the tensor product matrix.
      */
     void

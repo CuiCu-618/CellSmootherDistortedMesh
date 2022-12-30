@@ -194,24 +194,37 @@ namespace PSMF
     const unsigned int n_patches_1d =
       (1 << (A->get_matrix_free()->get_mg_level())) - 1;
 
-    LocalSmoother<dim, fe_degree, Number, kernel, dof_layout> local_smoother(
-      n_dofs_per_dim);
-
     switch (kernel)
       {
         case SmootherVariant::FUSED:
           {
+            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother(n_dofs_per_dim);
+
             level_vertex_patch.patch_loop(local_smoother, src, dst);
             break;
           }
         case SmootherVariant::SEPERATE:
           {
+            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother(n_dofs_per_dim);
+
             LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
               local_smoother_inverse(n_dofs_per_dim);
             level_vertex_patch.patch_loop(local_smoother,
                                           src,
                                           dst,
                                           local_smoother_inverse);
+            break;
+          }
+        case SmootherVariant::GLOBAL:
+          {
+            LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother_inverse(n_dofs_per_dim);
+            level_vertex_patch.patch_loop_global(A,
+                                                 local_smoother_inverse,
+                                                 src,
+                                                 dst);
             break;
           }
         default:

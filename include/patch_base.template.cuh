@@ -74,7 +74,8 @@ namespace PSMF
     dof_handler = &matrix_free->get_dof_handler();
     level       = matrix_free->get_mg_level();
 
-    if (kernel == SmootherVariant::SEPERATE)
+    if (kernel == SmootherVariant::SEPERATE ||
+        kernel == SmootherVariant::GLOBAL)
       matrix_free->initialize_dof_vector(tmp);
 
     switch (granularity_scheme)
@@ -244,7 +245,7 @@ namespace PSMF
       // local_eigenvectors, local_eigenvalues
       mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
       // temp
-      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+      mem += patch_per_block * local_dim * sizeof(Number);
 
       return mem;
     };
@@ -263,7 +264,7 @@ namespace PSMF
                                                              fe_degree,
                                                              Number,
                                                              kernel,
-                                                             Functor,
+                                                             Functor_inv,
                                                              DoFLayout::Q>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     shared_mem_inv()));
@@ -284,6 +285,58 @@ namespace PSMF
                                                           tmp.get_values(),
                                                           get_data(i));
           AssertCudaKernel();
+
+          loop_kernel_seperate_inv<dim,
+                                   fe_degree,
+                                   Number,
+                                   kernel,
+                                   Functor_inv,
+                                   DoFLayout::Q>
+            <<<grid_dim[i], block_dim_inv[i], shared_mem_inv()>>>(
+              func_inv, tmp.get_values(), dst.get_values(), get_data(i));
+          AssertCudaKernel();
+        }
+  }
+
+  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <typename MatrixType, typename Functor_inv, typename VectorType>
+  void
+  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::Q>::
+    patch_loop_global(const MatrixType  &A,
+                      const Functor_inv &func_inv,
+                      const VectorType  &src,
+                      VectorType        &dst) const
+  {
+    auto shared_mem_inv = [&]() {
+      std::size_t mem = 0;
+
+      const unsigned int n_dofs_1d = 2 * fe_degree - 1;
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst, local_residual
+      mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_eigenvectors, local_eigenvalues
+      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
+      // temp
+      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+
+      return mem;
+    };
+
+    AssertCuda(cudaFuncSetAttribute(loop_kernel_seperate_inv<dim,
+                                                             fe_degree,
+                                                             Number,
+                                                             kernel,
+                                                             Functor_inv,
+                                                             DoFLayout::Q>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    shared_mem_inv()));
+
+    // loop over all patches
+    for (unsigned int i = 0; i < n_colors; ++i)
+      if (n_patches[i] > 0)
+        {
+          A->vmult(tmp, dst);
+          tmp.sadd(-1., src);
 
           loop_kernel_seperate_inv<dim,
                                    fe_degree,
@@ -396,7 +449,7 @@ namespace PSMF
     tensor_product.get_eigenvalues(eigenval);
     tensor_product.get_eigenvectors(eigenvec);
 
-    constexpr unsigned n_dofs_1d = 2 * fe_degree + 1;
+    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
 
     auto *mass    = new Number[n_dofs_1d * n_dofs_1d * dim];
     auto *laplace = new Number[n_dofs_1d * n_dofs_1d * dim];
@@ -651,7 +704,7 @@ namespace PSMF
 
 } // namespace PSMF
 
-  /**
-   * \page patch_base.template
-   * \include patch_base.template.cuh
-   */
+/**
+ * \page patch_base.template
+ * \include patch_base.template.cuh
+ */
