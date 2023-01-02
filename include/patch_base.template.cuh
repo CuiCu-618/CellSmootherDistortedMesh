@@ -145,11 +145,20 @@ namespace PSMF
   {
     switch (kernel)
       {
-        case SmootherVariant::FUSED:
-          patch_loop_fused(func, src, dst);
-          break;
         case SmootherVariant::SEPERATE:
           patch_loop_seperate(func, func_inv, src, dst);
+          break;
+        case SmootherVariant::FUSED_BASE:
+          patch_loop_fused(func, src, dst);
+          break;
+        case SmootherVariant::FUSED_L:
+          patch_loop_fused(func, src, dst);
+          break;
+        case SmootherVariant::FUSED_3D:
+          patch_loop_fused(func, src, dst);
+          break;
+        case SmootherVariant::FUSED_CF:
+          patch_loop_fused(func, src, dst);
           break;
         default:
           AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
@@ -180,25 +189,96 @@ namespace PSMF
       return mem;
     };
 
-
-    AssertCuda(cudaFuncSetAttribute(
-      loop_kernel_fused<dim, fe_degree, Number, kernel, Functor, DoFLayout::Q>,
-      cudaFuncAttributeMaxDynamicSharedMemorySize,
-      shared_mem()));
-
-
     // loop over all patches
     switch (kernel)
       {
-        case SmootherVariant::FUSED:
+        case SmootherVariant::FUSED_BASE:
+          AssertCuda(
+            cudaFuncSetAttribute(loop_kernel_fused_base<dim,
+                                                        fe_degree,
+                                                        Number,
+                                                        kernel,
+                                                        Functor,
+                                                        DoFLayout::Q>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 shared_mem()));
           for (unsigned int i = 0; i < n_colors; ++i)
             if (n_patches[i] > 0)
-              loop_kernel_fused<dim,
-                                fe_degree,
-                                Number,
-                                kernel,
-                                Functor,
-                                DoFLayout::Q>
+              loop_kernel_fused_base<dim,
+                                     fe_degree,
+                                     Number,
+                                     kernel,
+                                     Functor,
+                                     DoFLayout::Q>
+                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
+                                                              src.get_values(),
+                                                              dst.get_values(),
+                                                              get_data(i));
+          break;
+        case SmootherVariant::FUSED_L:
+          AssertCuda(
+            cudaFuncSetAttribute(loop_kernel_fused_l<dim,
+                                                     fe_degree,
+                                                     Number,
+                                                     kernel,
+                                                     Functor,
+                                                     DoFLayout::Q>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 shared_mem()));
+          for (unsigned int i = 0; i < n_colors; ++i)
+            if (n_patches[i] > 0)
+              loop_kernel_fused_l<dim,
+                                  fe_degree,
+                                  Number,
+                                  kernel,
+                                  Functor,
+                                  DoFLayout::Q>
+                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
+                                                              src.get_values(),
+                                                              dst.get_values(),
+                                                              get_data(i));
+          break;
+        case SmootherVariant::FUSED_3D:
+          AssertCuda(
+            cudaFuncSetAttribute(loop_kernel_fused_3d<dim,
+                                                      fe_degree,
+                                                      Number,
+                                                      kernel,
+                                                      Functor,
+                                                      DoFLayout::Q>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 shared_mem()));
+          for (unsigned int i = 0; i < n_colors; ++i)
+            if (n_patches[i] > 0)
+              loop_kernel_fused_3d<dim,
+                                   fe_degree,
+                                   Number,
+                                   kernel,
+                                   Functor,
+                                   DoFLayout::Q>
+                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
+                                                              src.get_values(),
+                                                              dst.get_values(),
+                                                              get_data(i));
+          break;
+        case SmootherVariant::FUSED_CF:
+          AssertCuda(
+            cudaFuncSetAttribute(loop_kernel_fused_cf<dim,
+                                                      fe_degree,
+                                                      Number,
+                                                      kernel,
+                                                      Functor,
+                                                      DoFLayout::Q>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 shared_mem()));
+          for (unsigned int i = 0; i < n_colors; ++i)
+            if (n_patches[i] > 0)
+              loop_kernel_fused_cf<dim,
+                                   fe_degree,
+                                   Number,
+                                   kernel,
+                                   Functor,
+                                   DoFLayout::Q>
                 <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
                                                               src.get_values(),
                                                               dst.get_values(),
@@ -623,7 +703,20 @@ namespace PSMF
 
     switch (kernel)
       {
-        case SmootherVariant::FUSED:
+        case SmootherVariant::FUSED_BASE:
+          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+          break;
+        case SmootherVariant::FUSED_L:
+          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+          break;
+        case SmootherVariant::FUSED_3D:
+          Assert(fe_degree < 5, ExcNotImplemented());
+          AssertDimension(dim, 3);
+          block_dim[color] =
+            dim3(patch_per_block * n_dofs_1d, n_dofs_1d, n_dofs_1d);
+          break;
+        case SmootherVariant::FUSED_CF:
+          Assert(dim == 2 || fe_degree < 8, ExcNotImplemented());
           block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
           break;
         case SmootherVariant::SEPERATE:
@@ -704,7 +797,7 @@ namespace PSMF
 
 } // namespace PSMF
 
-/**
- * \page patch_base.template
- * \include patch_base.template.cuh
- */
+  /**
+   * \page patch_base.template
+   * \include patch_base.template.cuh
+   */

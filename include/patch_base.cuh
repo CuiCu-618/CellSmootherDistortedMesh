@@ -20,14 +20,43 @@ namespace PSMF
 {
 
   /**
-   * Smoother Variant: kernel type for
+   * @brief Smoother Variant: kernel type for
    * Multiplicative Schwarz Smoother.
    */
   enum class SmootherVariant
   {
-    FUSED,
+    /**
+     * Compute the residual globally, i.e.
+     * r = b - Ax, where A is the system matrix.
+     */
+    GLOBAL,
+
+    /**
+     * Compute the residual locally, using two kernels.
+     */
     SEPERATE,
-    GLOBAL
+
+    /**
+     * Compute the residual locally, combining two kernels into one.
+     */
+    FUSED_BASE,
+
+    /**
+     * Same as above, but with linear thread indicex instead of tmasking
+     * boundary threads for local solver.
+     */
+    FUSED_L,
+
+    /**
+     * Same as above, using 3D thread-block for lower order degree in 3D
+     * instread of 2D thread-block used above.
+     */
+    FUSED_3D,
+
+    /**
+     * A conflict-free implementation by restructuring shared memory access.
+     */
+    FUSED_CF
   };
 
 

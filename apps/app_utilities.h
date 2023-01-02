@@ -17,6 +17,23 @@
 #include "ct_parameter.h"
 #include "git_version.h"
 
+#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6)                 \
+  enum class name                                               \
+  {                                                             \
+    v1,                                                         \
+    v2,                                                         \
+    v3,                                                         \
+    v4,                                                         \
+    v5,                                                         \
+    v6,                                                         \
+  };                                                            \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6}; \
+  template <typename T>                                         \
+  constexpr const char *name##ToString(T value)                 \
+  {                                                             \
+    return name##Strings[static_cast<int>(value)];              \
+  }
+
 #define ENUM_MACRO(name, v1, v2, v3)               \
   enum class name                                  \
   {                                                \
@@ -31,7 +48,7 @@
     return name##Strings[static_cast<int>(value)]; \
   }
 
-ENUM_MACRO(Smoother, FUSED, SEPERATE, GLOBAL);
+SMO_MACRO(Smoother, GLOBAL, SEPERATE, FUSED_BASE, FUSED_L, FUSED_3D, FUSED_CF);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);
 
@@ -44,7 +61,7 @@ namespace Util
 
     std::string value_type = "";
     if (std::is_same_v<float, CT::VCYCLE_NUMBER_>)
-      value_type = "float";
+      value_type = "mixed";
     else if (std::is_same_v<double, CT::VCYCLE_NUMBER_>)
       value_type = "double";
     else

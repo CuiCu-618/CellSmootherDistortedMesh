@@ -196,12 +196,14 @@ namespace PSMF
 
     switch (kernel)
       {
-        case SmootherVariant::FUSED:
+        case SmootherVariant::GLOBAL:
           {
-            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother(n_dofs_per_dim);
-
-            level_vertex_patch.patch_loop(local_smoother, src, dst);
+            LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother_inverse(n_dofs_per_dim);
+            level_vertex_patch.patch_loop_global(A,
+                                                 local_smoother_inverse,
+                                                 src,
+                                                 dst);
             break;
           }
         case SmootherVariant::SEPERATE:
@@ -217,14 +219,36 @@ namespace PSMF
                                           local_smoother_inverse);
             break;
           }
-        case SmootherVariant::GLOBAL:
+        case SmootherVariant::FUSED_BASE:
           {
-            LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother_inverse(n_dofs_per_dim);
-            level_vertex_patch.patch_loop_global(A,
-                                                 local_smoother_inverse,
-                                                 src,
-                                                 dst);
+            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother(n_dofs_per_dim);
+
+            level_vertex_patch.patch_loop(local_smoother, src, dst);
+            break;
+          }
+        case SmootherVariant::FUSED_L:
+          {
+            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother(n_dofs_per_dim);
+
+            level_vertex_patch.patch_loop(local_smoother, src, dst);
+            break;
+          }
+        case SmootherVariant::FUSED_3D:
+          {
+            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother(n_dofs_per_dim);
+
+            level_vertex_patch.patch_loop(local_smoother, src, dst);
+            break;
+          }
+        case SmootherVariant::FUSED_CF:
+          {
+            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
+              local_smoother(n_dofs_per_dim);
+
+            level_vertex_patch.patch_loop(local_smoother, src, dst);
             break;
           }
         default:

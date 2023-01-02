@@ -47,7 +47,7 @@ def parse_args():
                         help="spatial dimension of the domain"
     )
     parser.add_argument('-REDUCE','--reduce',
-                        default=1e-8,
+                        default=1e-9,
                         type=float,
                         help="desired reduction factor"                    
     )
@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument('-DLY','--dof-layout',
                         default='Q',
                         type=str,
-                        choices=['DGQ','Q','RT'],
+                        choices=['Q','DGQ','RT'],
                         help="dof layout of finite element method"
     )
     parser.add_argument('-LOG','--log-directory',
@@ -72,9 +72,9 @@ def parse_args():
                         help="directory of the log file"
     )
     parser.add_argument('-K','--kernel_type',
-                        default='FUSED',
+                        default='F',
                         nargs='+',
-                        choices=['GLOBAL','SEPERATE','FUSED'],
+                        choices=['GLOBAL','SEPERATE','FUSED_BASE','FUSED_L','FUSED_3D','FUSED_CF'],
                         help="variant of the Schwarz smoother kernel"
     )
     parser.add_argument('-G','--granularity',
@@ -128,14 +128,23 @@ class Parameter:
         kernel_str = '{'
         count = 0
         for kernel in variant:
-            if kernel.startswith('F'):
-                kernel_str += r'PSMF::SmootherVariant::FUSED, '
-                count += 1
-            elif kernel.startswith('GLO'):
+            if kernel.startswith('GLO'):
                 kernel_str += r'PSMF::SmootherVariant::GLOBAL, '
                 count += 1
             elif kernel.startswith('SEP'):
                 kernel_str += r'PSMF::SmootherVariant::SEPERATE, '
+                count += 1
+            elif kernel.endswith('BASE'):
+                kernel_str += r'PSMF::SmootherVariant::FUSED_BASE, '
+                count += 1    
+            elif kernel.endswith('_L'):
+                kernel_str += r'PSMF::SmootherVariant::FUSED_L, '
+                count += 1
+            elif kernel.endswith('_3D'):
+                kernel_str += r'PSMF::SmootherVariant::FUSED_3D, '
+                count += 1    
+            elif kernel.endswith('F'):
+                kernel_str += r'PSMF::SmootherVariant::FUSED_CF, '
                 count += 1
         self.kernel_type = ('constexpr std::array<PSMF::SmootherVariant, ' + str(count) + '>', kernel_str + '}')
 
