@@ -17,6 +17,34 @@
 namespace PSMF
 {
 
+  /**
+   * Shared data for laplace operator kernel.
+   * We have to use the following thing to avoid
+   * a compile time error since @tparam Number
+   * could be double and float at same time.
+   */
+  extern __shared__ double data_d[];
+  extern __shared__ float  data_f[];
+
+  template <typename Number>
+  __device__ inline Number *
+  get_shared_data_ptr();
+
+  template <>
+  __device__ inline double *
+  get_shared_data_ptr()
+  {
+    return data_d;
+  }
+
+  template <>
+  __device__ inline float *
+  get_shared_data_ptr()
+  {
+    return data_f;
+  }
+
+
   template <int dim,
             int fe_degree,
             typename Number,
@@ -35,8 +63,6 @@ namespace PSMF
                                     kernel,
                                     dof_layout>::Data gpu_data)
   {
-    extern __shared__ Number data[];
-
     constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
@@ -46,10 +72,8 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(data,
-                                                   patch_per_block,
-                                                   n_dofs_1d,
-                                                   local_dim);
+    SharedMemData<dim, Number, kernel> shared_data(
+      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -111,8 +135,6 @@ namespace PSMF
                                     kernel,
                                     dof_layout>::Data gpu_data)
   {
-    extern __shared__ Number data[];
-
     constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
@@ -122,10 +144,8 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(data,
-                                                   patch_per_block,
-                                                   n_dofs_1d,
-                                                   local_dim);
+    SharedMemData<dim, Number, kernel> shared_data(
+      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -187,8 +207,6 @@ namespace PSMF
                                     kernel,
                                     dof_layout>::Data gpu_data)
   {
-    extern __shared__ Number data[];
-
     constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
@@ -198,10 +216,8 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(data,
-                                                   patch_per_block,
-                                                   n_dofs_1d,
-                                                   local_dim);
+    SharedMemData<dim, Number, kernel> shared_data(
+      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -283,8 +299,6 @@ namespace PSMF
                                     kernel,
                                     dof_layout>::Data gpu_data)
   {
-    extern __shared__ Number data[];
-
     constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
@@ -294,10 +308,8 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(data,
-                                                   patch_per_block,
-                                                   n_dofs_1d,
-                                                   local_dim);
+    SharedMemData<dim, Number, kernel> shared_data(
+      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -387,8 +399,6 @@ namespace PSMF
                                     kernel,
                                     dof_layout>::Data gpu_data)
   {
-    extern __shared__ Number data[];
-
     constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
 
@@ -397,10 +407,8 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(data,
-                                                   patch_per_block,
-                                                   n_dofs_1d,
-                                                   local_dim);
+    SharedMemData<dim, Number, kernel> shared_data(
+      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -467,8 +475,6 @@ namespace PSMF
                                     kernel,
                                     dof_layout>::Data gpu_data)
   {
-    extern __shared__ Number data[];
-
     constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
@@ -478,10 +484,8 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(data,
-                                                   patch_per_block,
-                                                   n_dofs_1d,
-                                                   local_dim);
+    SharedMemData<dim, Number, kernel> shared_data(
+      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
 
     if (patch < gpu_data.n_patches)
       {

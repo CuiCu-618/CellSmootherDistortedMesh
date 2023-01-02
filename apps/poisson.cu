@@ -185,7 +185,7 @@ namespace Step64
     unsigned int maxlevel = triangulation.n_global_levels() - 1;
 
     matrix_dp.resize(1, maxlevel);
-    
+
     if (std::is_same_v<vcycle_number, float>)
       matrix.resize(1, maxlevel);
 

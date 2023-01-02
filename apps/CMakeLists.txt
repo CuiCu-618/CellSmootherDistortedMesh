@@ -12,6 +12,7 @@ INCLUDE_DIRECTORIES(
 
 SET( SOURCE_FILES
         poisson.cu
+        benchmark_mg.cu
         )
 
 FOREACH ( sourcefile ${SOURCE_FILES} )
