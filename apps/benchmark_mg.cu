@@ -109,6 +109,10 @@ private:
   double base_time_dp;
   double base_time_sp;
 
+  unsigned int N;
+  unsigned int n_mv;
+  unsigned int n_dofs;
+
   std::fstream                        fout;
   std::shared_ptr<ConditionalOStream> pcout;
 
@@ -145,6 +149,15 @@ LaplaceProblem<dim, fe_degree>::setup_system()
 {
   dof_handler.distribute_dofs(*fe);
   dof_handler.distribute_mg_dofs();
+
+  n_dofs = dof_handler.n_dofs();
+  N      = 1;
+  n_mv   = 1; // dof_handler.n_dofs() < 10000000 ? 100 : 20;
+
+  const unsigned int nlevels = triangulation.n_global_levels();
+  for (unsigned int level = 0; level < nlevels; ++level)
+    Util::Lexicographic(dof_handler, level);
+  Util::Lexicographic(dof_handler);
 
   *pcout << "Setting up dofs...\n";
   *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = ("
@@ -228,13 +241,9 @@ LaplaceProblem<dim, fe_degree>::bench_Ax()
 {
   *pcout << "Benchmarking Mat-vec in double precision...\n";
 
-  const unsigned int n_dofs = dof_handler.n_dofs();
-  const unsigned int n_mv   = n_dofs < 10000000 ? 100 : 20;
-
-  Timer              time;
-  const unsigned int N          = 5;
-  double             best_time  = 1e10;
-  double             best_time2 = 1e10;
+  Timer  time;
+  double best_time  = 1e10;
+  double best_time2 = 1e10;
 
   for (unsigned int i = 0; i < N; ++i)
     {
@@ -274,8 +283,7 @@ template <int dim, int fe_degree>
 void
 LaplaceProblem<dim, fe_degree>::bench_transfer()
 {
-  const unsigned int n_dofs = dof_handler.n_dofs();
-  const unsigned int n_mv   = n_dofs < 10000000 ? 100 : 20;
+  *pcout << "Benchmarking Transfer in double precision...\n";
 
   unsigned int max_level = triangulation.n_levels() - 1;
   VectorTypeDP u_coarse(dof_handler.n_dofs(max_level - 1));
@@ -283,16 +291,13 @@ LaplaceProblem<dim, fe_degree>::bench_transfer()
   u_coarse  = 1.;
   u_coarse_ = 1.;
 
-  *pcout << "Benchmarking Transfer in double precision...\n";
-
   PSMF::MGTransferCUDA<dim, full_number, CT::DOF_LAYOUT_> mg_transfer(
     mg_constrained_dofs);
   mg_transfer.build(dof_handler);
 
-  Timer              time;
-  const unsigned int N          = 5;
-  double             best_time  = 1e10;
-  double             best_time2 = 1e10;
+  Timer  time;
+  double best_time  = 1e10;
+  double best_time2 = 1e10;
 
   for (unsigned int i = 0; i < N; ++i)
     {
@@ -342,9 +347,6 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
 {
   *pcout << "Benchmarking Smoother in double precision...\n";
 
-  const unsigned int n_dofs = dof_handler.n_dofs();
-  const unsigned int n_mv   = n_dofs < 10000000 ? 100 : 20;
-
   // DP
   using SmootherTypeDP =
     PSMF::PatchSmoother<MatrixTypeDP, dim, fe_degree, kernel, CT::DOF_LAYOUT_>;
@@ -354,10 +356,9 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
   additional_data.granularity_scheme = CT::GRANULARITY_;
   smooth_dp.initialize(system_matrix, additional_data);
 
-  Timer              time;
-  const unsigned int N          = 5;
-  double             best_time  = 1e10;
-  double             best_time2 = 1e10;
+  Timer  time;
+  double best_time  = 1e10;
+  double best_time2 = 1e10;
 
   for (unsigned int i = 0; i < N; ++i)
     {
@@ -370,7 +371,8 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
       best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
-  info_table[2].add_value("Name", SmootherToString(kernel));
+  info_table[2].add_value("Name",
+                          std::string(SmootherToString(kernel)) + "_DP");
   info_table[2].add_value("Time[s]", best_time);
   info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time);
   if (kernel == PSMF::SmootherVariant::GLOBAL)
@@ -405,7 +407,8 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
       best_time2 = std::min(time.wall_time() / n_mv, best_time2);
     }
 
-  info_table[3].add_value("Name", SmootherToString(kernel));
+  info_table[3].add_value("Name",
+                          std::string(SmootherToString(kernel)) + "_SP");
   info_table[3].add_value("Time[s]", best_time2);
   info_table[3].add_value("Perf[Dof/s]", n_dofs / best_time2);
   if (kernel == PSMF::SmootherVariant::GLOBAL)
