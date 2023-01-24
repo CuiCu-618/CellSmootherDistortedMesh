@@ -173,21 +173,18 @@ namespace PSMF
     using MatrixType  = LaplaceOperator<dim, fe_degree, Number, dof_layout>;
     using MatrixType2 = LaplaceOperator<dim, fe_degree, Number2, dof_layout>;
 
-    MultigridSolver(
-      const DoFHandler<dim>                          &dof_handler,
-      const MGLevelObject<MatrixType>                &matrix_dp,
-      const MGLevelObject<MatrixType2>               &matrix,
-      const MGTransferCUDA<dim, Number, dof_layout>  &mg_transfer_no_boundary,
-      const MGTransferCUDA<dim, Number2, dof_layout> &transfer,
-      const Function<dim, Number>                    &boundary_values,
-      const Function<dim, Number>                    &right_hand_side,
-      std::shared_ptr<ConditionalOStream>             pcout,
-      const unsigned int                              n_cycles = 1)
+    MultigridSolver(const DoFHandler<dim>                          &dof_handler,
+                    const MGLevelObject<MatrixType>                &matrix_dp,
+                    const MGLevelObject<MatrixType2>               &matrix,
+                    const MGTransferCUDA<dim, Number2, dof_layout> &transfer,
+                    const Function<dim, Number>        &boundary_values,
+                    const Function<dim, Number>        &right_hand_side,
+                    std::shared_ptr<ConditionalOStream> pcout,
+                    const unsigned int                  n_cycles = 1)
       : dof_handler(&dof_handler)
       , matrix_dp(&matrix_dp)
       , matrix(&matrix)
       , transfer(&transfer)
-      , mg_transfer_no_boundary(&mg_transfer_no_boundary)
       , minlevel(1)
       , maxlevel(dof_handler.get_triangulation().n_global_levels() - 1)
       , solution(minlevel, maxlevel)
@@ -211,9 +208,12 @@ namespace PSMF
           t[level].reinit(defect[level]);
           solution_update[level].reinit(defect[level]);
 
-          matrix_dp[level].initialize_dof_vector(solution[level]);
-          rhs[level].reinit(solution[level]);
-          residual[level].reinit(solution[level]);
+          if (level == maxlevel)
+            {
+              matrix_dp[level].initialize_dof_vector(solution[level]);
+              rhs[level].reinit(solution[level]);
+              residual[level].reinit(solution[level]);
+            }
         }
 
       // Timer time;
@@ -268,25 +268,20 @@ namespace PSMF
                     }
           }
 
-      for (int level = maxlevel; level >= minlevel; --level)
-        {
-          // evaluate the right hand side in the equation, including the
-          // residual from the inhomogeneous boundary conditions
-          set_inhomogeneous_bc<false>(level);
-          rhs[level] = 0.;
-          if (level == maxlevel)
-            if (CT::SETS_ == "error_analysis")
-              matrix_dp[level].compute_residual(rhs[level],
-                                                solution[level],
-                                                right_hand_side,
-                                                level);
-            else
-              rhs[level] = 1.;
-          else
-            mg_transfer_no_boundary.restrict_and_add(level + 1,
-                                                     rhs[level],
-                                                     rhs[level + 1]);
-        }
+      {
+        // evaluate the right hand side in the equation, including the
+        // residual from the inhomogeneous boundary conditions
+        set_inhomogeneous_bc<false>(maxlevel);
+        rhs[maxlevel] = 0.;
+        if (CT::SETS_ == "error_analysis")
+          matrix_dp[maxlevel].compute_residual(rhs[maxlevel],
+                                               solution[maxlevel],
+                                               right_hand_side,
+                                               maxlevel);
+        else
+          rhs[maxlevel] = 1.;
+      }
+
       float gpu_time = 0.0f;
 
       cudaEventRecord(start);
@@ -858,8 +853,6 @@ namespace PSMF
     const SmartPointer<const MGLevelObject<MatrixType>>  matrix_dp;
     const SmartPointer<const MGLevelObject<MatrixType2>> matrix;
 
-    const SmartPointer<const MGTransferCUDA<dim, Number, dof_layout>>
-      mg_transfer_no_boundary;
     const SmartPointer<const MGTransferCUDA<dim, Number2, dof_layout>> transfer;
 
     std::vector<std::map<unsigned int, Number>> inhomogeneous_bc;
@@ -964,7 +957,6 @@ namespace PSMF
                     const MGLevelObject<MatrixType> &matrix_dp,
                     const MGLevelObject<MatrixType> &,
                     const MGTransferCUDA<dim, Number, dof_layout> &transfer_dp,
-                    const MGTransferCUDA<dim, Number, dof_layout> &,
                     const Function<dim, Number>        &boundary_values,
                     const Function<dim, Number>        &right_hand_side,
                     std::shared_ptr<ConditionalOStream> pcout,
@@ -1230,7 +1222,7 @@ namespace PSMF
             &src) const
     {
       defect[maxlevel] = src;
-      v_cycle(maxlevel, 1);
+      v_cycle(maxlevel, 0);
       dst = solution[maxlevel];
     }
 

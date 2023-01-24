@@ -257,22 +257,10 @@ namespace Step64
   {
     Timer time;
 
-    PSMF::MGTransferCUDA<dim, full_number, CT::DOF_LAYOUT_>   transfer_dp;
     PSMF::MGTransferCUDA<dim, vcycle_number, CT::DOF_LAYOUT_> transfer;
 
-    if (std::is_same_v<vcycle_number, float>)
-      {
-        transfer_dp.build(dof_handler);
-        transfer.initialize_constraints(mg_constrained_dofs);
-        transfer.build(dof_handler);
-      }
-    else if (std::is_same_v<vcycle_number, double>)
-      {
-        transfer_dp.initialize_constraints(mg_constrained_dofs);
-        transfer_dp.build(dof_handler);
-      }
-    else
-      AssertThrow(false, ExcMessage("Invalid V-cycle number type."));
+    transfer.initialize_constraints(mg_constrained_dofs);
+    transfer.build(dof_handler);
 
     *pcout << "MG transfer setup time: " << time.wall_time() << "s"
            << std::endl;
@@ -352,7 +340,6 @@ namespace Step64
                   solver(dof_handler,
                          matrix_dp,
                          matrix,
-                         transfer_dp,
                          transfer,
                          Functions::ZeroFunction<dim, full_number>(),
                          Functions::ConstantFunction<dim, full_number>(1.),
@@ -372,7 +359,6 @@ namespace Step64
                   solver(dof_handler,
                          matrix_dp,
                          matrix,
-                         transfer_dp,
                          transfer,
                          Functions::ZeroFunction<dim, full_number>(),
                          Functions::ConstantFunction<dim, full_number>(1.),
@@ -392,7 +378,6 @@ namespace Step64
                   solver(dof_handler,
                          matrix_dp,
                          matrix,
-                         transfer_dp,
                          transfer,
                          Functions::ZeroFunction<dim, full_number>(),
                          Functions::ConstantFunction<dim, full_number>(1.),
@@ -412,7 +397,6 @@ namespace Step64
                   solver(dof_handler,
                          matrix_dp,
                          matrix,
-                         transfer_dp,
                          transfer,
                          Functions::ZeroFunction<dim, full_number>(),
                          Functions::ConstantFunction<dim, full_number>(1.),
@@ -432,7 +416,6 @@ namespace Step64
                   solver(dof_handler,
                          matrix_dp,
                          matrix,
-                         transfer_dp,
                          transfer,
                          Functions::ZeroFunction<dim, full_number>(),
                          Functions::ConstantFunction<dim, full_number>(1.),
@@ -452,7 +435,6 @@ namespace Step64
                   solver(dof_handler,
                          matrix_dp,
                          matrix,
-                         transfer_dp,
                          transfer,
                          Functions::ZeroFunction<dim, full_number>(),
                          Functions::ConstantFunction<dim, full_number>(1.),
