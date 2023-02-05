@@ -1,5 +1,12 @@
 /**
- * Created by Cu Cui on 2022/12/25.
+ * @file laplace_operator.cuh
+ * @author Cu Cui (cu.cui@iwr.uni-heidelberg.de)
+ * @brief Implementation of the Laplace operations.
+ * @version 1.0
+ * @date 2023-02-02
+ *
+ * @copyright Copyright (c) 2023
+ *
  */
 
 #ifndef LAPLACE_OPERATOR_CUH
@@ -8,80 +15,52 @@
 #include <deal.II/matrix_free/matrix_free.h>
 #include <deal.II/matrix_free/operators.h>
 
-#include "dealii/cuda_fee.cuh"
-#include "dealii/cuda_mf.cuh"
+#include "evaluate_kernel.cuh"
+#include "patch_base.cuh"
 
 using namespace dealii;
 
 namespace PSMF
 {
 
-  template <int dim, int fe_degree, typename Number>
-  class LaplaceOperatorQuad
-  {
-  public:
-    __device__
-    LaplaceOperatorQuad()
-    {}
-    __device__ void
-    operator()(
-      FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> *fe_eval) const
-    {
-      fe_eval->submit_gradient(fe_eval->get_gradient());
-    }
-  };
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalLaplaceOperator
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    const unsigned int dofs_per_dim;
-
-    LocalLaplaceOperator(const unsigned int dofs_per_dim)
-      : dofs_per_dim(dofs_per_dim)
-    {}
-
-    __device__ void
-    operator()(const unsigned int                            cell,
-               const typename MatrixFree<dim, Number>::Data *gpu_data,
-               SharedDataCuda<dim, Number>                  *shared_data,
-               const Number                                 *src,
-               Number                                       *dst) const
-    {
-      const unsigned int pos =
-        local_q_point_id<dim, Number>(cell, gpu_data, n_dofs_1d, n_q_points);
-      FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data, dofs_per_dim);
-      fe_eval.read_dof_values(src);
-      fe_eval.evaluate(false, true);
-      fe_eval.apply_for_each_quad_point(
-        LaplaceOperatorQuad<dim, fe_degree, Number>());
-      fe_eval.integrate(false, true);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-  template <int dim, int fe_degree, typename Number, DoFLayout dof_layout>
+  template <int dim,
+            int fe_degree,
+            typename Number,
+            SmootherVariant kernel,
+            DoFLayout       dof_layout>
   class LaplaceOperator;
 
-  template <int dim, int fe_degree, typename Number>
-  class LaplaceOperator<dim, fe_degree, Number, DoFLayout::Q>
+  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  class LaplaceOperator<dim, fe_degree, Number, kernel, DoFLayout::DGQ>
     : public Subscriptor
   {
   public:
     using value_type = Number;
+    using LevelVertexPatch =
+      LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>;
+    using AdditionalData = typename LevelVertexPatch::AdditionalData;
 
     LaplaceOperator()
     {}
 
     void
-    initialize(std::shared_ptr<const PSMF::MatrixFree<dim, Number>> data_)
+    initialize(const DoFHandler<dim> &mg_dof,
+               const unsigned int     level,
+               const AdditionalData  &additional_data_in = AdditionalData())
     {
-      mf_data = data_;
+      dof_handler = &mg_dof;
+      mg_level    = level;
+
+      AdditionalData additional_data;
+
+      additional_data.relaxation      = additional_data_in.relaxation;
+      additional_data.use_coloring    = additional_data_in.use_coloring;
+      additional_data.patch_per_block = additional_data_in.patch_per_block;
+      additional_data.granularity_scheme =
+        additional_data_in.granularity_scheme;
+
+      level_vertex_patch.reinit(*dof_handler, mg_level, additional_data);
+      level_vertex_patch.reinit_tensor_product_laplace();
     }
 
     void
@@ -91,14 +70,13 @@ namespace PSMF
     {
       dst = 0.;
 
-      unsigned int level          = mf_data->get_mg_level();
-      unsigned int n_dofs_per_dim = (1 << level) * fe_degree + 1;
+      const unsigned int n_dofs_per_dim = (1 << mg_level) * (fe_degree + 2);
 
-      LocalLaplaceOperator<dim, fe_degree, Number> Laplace_operator(
-        n_dofs_per_dim);
+      LocalLaplace<dim, fe_degree, Number, kernel, DoFLayout::DGQ>
+        local_laplace(n_dofs_per_dim);
 
-      mf_data->cell_loop(Laplace_operator, src, dst);
-      mf_data->copy_constrained_values(src, dst);
+      level_vertex_patch.cell_loop(local_laplace, src, dst);
+      // mf_data->copy_constrained_values(src, dst);
     }
 
     void
@@ -106,17 +84,15 @@ namespace PSMF
            const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
              &src) const
     {
-      dst = 0.;
-      LocalLaplaceOperator<dim, fe_degree, Number> Laplace_operator;
-      mf_data->cell_loop(Laplace_operator, src, dst);
-      mf_data->copy_constrained_values(src, dst);
+      vmult(dst, src);
     }
 
     void
     initialize_dof_vector(
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &vec) const
     {
-      mf_data->initialize_dof_vector(vec);
+      const unsigned int n_dofs = dof_handler->n_dofs(mg_level);
+      vec.reinit(n_dofs);
     }
 
     void
@@ -124,6 +100,7 @@ namespace PSMF
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src,
       const Function<dim, Number> &rhs_function,
+      const Function<dim, Number> &exact_solution,
       const unsigned int           mg_level) const
     {
       dst = 0.;
@@ -138,43 +115,106 @@ namespace PSMF
 
       LinearAlgebra::ReadWriteVector<Number> rw_vector(n_dofs);
 
+      MappingQ1<dim>            mapping;
       AffineConstraints<Number> constraints;
+      constraints.clear();
+      DoFTools::make_hanging_node_constraints(*dof_handler, constraints);
+      VectorTools::interpolate_boundary_values(
+        mapping,
+        *dof_handler,
+        0,
+        Functions::ZeroFunction<dim, Number>(),
+        constraints);
       constraints.close();
 
-      const QGauss<dim>  quadrature_formula(fe_degree + 1);
-      FEValues<dim>      fe_values(mf_data->get_dof_handler().get_fe(),
-                              quadrature_formula,
-                              update_values | update_quadrature_points |
-                                update_JxW_values);
-      const unsigned int dofs_per_cell =
-        mf_data->get_dof_handler().get_fe().n_dofs_per_cell();
-      const unsigned int        n_q_points = quadrature_formula.size();
-      Vector<Number>            cell_rhs(dofs_per_cell);
-      std::vector<unsigned int> local_dof_indices(dofs_per_cell);
-      std::vector<Number>       rhs_values(n_q_points);
+      typename MatrixFree<dim, Number>::AdditionalData additional_data;
+      additional_data.tasks_parallel_scheme =
+        MatrixFree<dim, Number>::AdditionalData::none;
+      additional_data.mapping_update_flags =
+        (update_gradients | update_JxW_values | update_quadrature_points);
+      additional_data.mapping_update_flags_inner_faces =
+        (update_gradients | update_JxW_values | update_normal_vectors);
+      additional_data.mapping_update_flags_boundary_faces =
+        (update_gradients | update_JxW_values | update_normal_vectors |
+         update_quadrature_points);
+      MatrixFree<dim, Number> mf_data;
+      mf_data.reinit(mapping,
+                     *dof_handler,
+                     constraints,
+                     QGauss<1>(fe_degree + 1),
+                     additional_data);
+      FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> phi(mf_data);
 
-      auto begin = mf_data->get_dof_handler().begin_mg(mg_level);
-      auto end   = mf_data->get_dof_handler().end_mg(mg_level);
+      for (unsigned int cell = 0; cell < mf_data.n_cell_batches(); ++cell)
+        {
+          phi.reinit(cell);
+          for (unsigned int q = 0; q < phi.n_q_points; ++q)
+            {
+              VectorizedArray<Number> rhs_val = VectorizedArray<Number>();
+              Point<dim, VectorizedArray<Number>> point_batch =
+                phi.quadrature_point(q);
+              for (unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v)
+                {
+                  Point<dim> single_point;
+                  for (unsigned int d = 0; d < dim; ++d)
+                    single_point[d] = point_batch[d][v];
+                  rhs_val[v] = rhs_function.value(single_point);
+                }
+              phi.submit_value(rhs_val, q);
+            }
+          phi.integrate_scatter(EvaluationFlags::values, system_rhs_host);
+        }
 
-      for (auto cell = begin; cell != end; ++cell)
-        if (cell->is_locally_owned_on_level())
-          {
-            cell_rhs = 0;
-            fe_values.reinit(cell);
-            rhs_function.value_list(fe_values.get_quadrature_points(),
-                                    rhs_values);
+      const Number penalty_factor = 1.0 * fe_degree * (fe_degree + 1);
+      FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> phi_face(
+        mf_data, true);
+      for (unsigned int face = mf_data.n_inner_face_batches();
+           face <
+           mf_data.n_inner_face_batches() + mf_data.n_boundary_face_batches();
+           ++face)
+        {
+          phi_face.reinit(face);
 
-            for (unsigned int q_index = 0; q_index < n_q_points; ++q_index)
-              {
-                for (unsigned int i = 0; i < dofs_per_cell; ++i)
-                  cell_rhs(i) += (fe_values.shape_value(i, q_index) *
-                                  rhs_values[q_index] * fe_values.JxW(q_index));
-              }
-            cell->get_mg_dof_indices(local_dof_indices);
-            constraints.distribute_local_to_global(cell_rhs,
-                                                   local_dof_indices,
-                                                   system_rhs_host);
-          }
+          const VectorizedArray<Number> inverse_length_normal_to_face =
+            std::abs((phi_face.get_normal_vector(0) *
+                      phi_face.inverse_jacobian(0))[dim - 1]);
+          const VectorizedArray<Number> sigma =
+            inverse_length_normal_to_face * penalty_factor;
+
+          for (unsigned int q = 0; q < phi_face.n_q_points; ++q)
+            {
+              VectorizedArray<Number> test_value = VectorizedArray<Number>(),
+                                      test_normal_derivative =
+                                        VectorizedArray<Number>();
+              Point<dim, VectorizedArray<Number>> point_batch =
+                phi_face.quadrature_point(q);
+
+              for (unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v)
+                {
+                  Point<dim> single_point;
+                  for (unsigned int d = 0; d < dim; ++d)
+                    single_point[d] = point_batch[d][v];
+
+                  if (mf_data.get_boundary_id(face) == 0)
+                    test_value[v] = 2.0 * exact_solution.value(single_point);
+                  else
+                    {
+                      Assert(false, ExcNotImplemented());
+                      Tensor<1, dim> normal;
+                      for (unsigned int d = 0; d < dim; ++d)
+                        normal[d] = phi_face.get_normal_vector(q)[d][v];
+                      test_normal_derivative[v] =
+                        -normal * exact_solution.gradient(single_point);
+                    }
+                }
+              phi_face.submit_value(test_value * sigma - test_normal_derivative,
+                                    q);
+              phi_face.submit_normal_derivative(-0.5 * test_value, q);
+            }
+          phi_face.integrate_scatter(EvaluationFlags::values |
+                                       EvaluationFlags::gradients,
+                                     system_rhs_host);
+        }
 
       system_rhs_host.compress(VectorOperation::add);
       rw_vector.import(system_rhs_host, VectorOperation::insert);
@@ -184,28 +224,30 @@ namespace PSMF
       dst.sadd(-1., system_rhs_dev);
     }
 
-    void
-    clear()
+    unsigned int
+    get_mg_level() const
     {
-      mf_data.reset();
+      return mg_level;
     }
 
-    std::shared_ptr<const PSMF::MatrixFree<dim, Number>>
-    get_matrix_free() const
+    const DoFHandler<dim> *
+    get_dof_handler() const
     {
-      return mf_data;
+      return dof_handler;
     }
 
     std::size_t
     memory_consumption() const
     {
       std::size_t result = sizeof(*this);
-      result += mf_data->memory_consumption();
+      result += level_vertex_patch.memory_consumption();
       return result;
     }
 
   private:
-    std::shared_ptr<const PSMF::MatrixFree<dim, Number>> mf_data;
+    const DoFHandler<dim> *dof_handler;
+    LevelVertexPatch       level_vertex_patch;
+    unsigned int           mg_level;
   };
 } // namespace PSMF
 

@@ -1,6 +1,12 @@
 /**
  * @file patch_base.cuh
- * Created by Cu Cui on 2022/12/25.
+ * @author Cu Cui (cu.cui@iwr.uni-heidelberg.de)
+ * @brief This class collects all the data that is stored for the matrix free implementation.
+ * @version 1.0
+ * @date 2023-02-02
+ *
+ * @copyright Copyright (c) 2023
+ *
  */
 
 #ifndef PATCH_BASE_CUH
@@ -112,12 +118,15 @@ namespace PSMF
    * @tparam kernel kernel type
    */
   template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  class LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::Q>
+  class LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>
     : public Subscriptor
   {
   public:
-    using CellFilter =
-      FilteredIterator<typename DoFHandler<dim>::level_cell_iterator>;
+    using CellIterator = typename DoFHandler<dim>::level_cell_iterator;
+    using PatchIterator =
+      typename std::vector<std::vector<CellIterator>>::const_iterator;
+
+    static constexpr unsigned int regular_vpatch_size = 1 << dim;
 
     /**
      * Standardized data struct to pipe additional data to LevelVertexPatch.
@@ -129,9 +138,11 @@ namespace PSMF
        */
       AdditionalData(
         const Number            relaxation         = 1.,
+        const bool              use_coloring       = true,
         const unsigned int      patch_per_block    = 1,
         const GranularityScheme granularity_scheme = GranularityScheme::none)
         : relaxation(relaxation)
+        , use_coloring(use_coloring)
         , patch_per_block(patch_per_block)
         , granularity_scheme(granularity_scheme)
       {}
@@ -140,6 +151,13 @@ namespace PSMF
        * Relaxation parameter.
        */
       Number relaxation;
+
+      /**
+       * If true, use coloring. Otherwise, use atomic operations.
+       * Coloring ensures bitwise reproducibility but is slower on Pascal and
+       * newer architectures (need to be checked).
+       */
+      bool use_coloring;
 
       /**
        * Number of patches per thread block.
@@ -174,15 +192,31 @@ namespace PSMF
 
       /**
        * Pointer to the the first degree of freedom in each patch.
-       * @note Lexicographic ordering is needed.
+       * @note Need Lexicographic ordering degree of freedoms.
+       * @note For DG case, the first degree of freedom index of
+       *       four cells in a patch is stored consecutively.
        */
       unsigned int *first_dof;
 
       /**
-       * Pointer to the patch id.
-       * @note Lexicographic ordering is needed.
+       * Pointer to the patch cell ordering type.
        */
       unsigned int *patch_id;
+
+      /**
+       * Pointer to the patch type. left, middle, right
+       */
+      unsigned int *patch_type;
+
+      /**
+       * Pointer to mapping from l to h
+       */
+      unsigned int *l_to_h;
+
+      /**
+       * Pointer to mapping from l to h
+       */
+      unsigned int *h_to_l;
 
       /**
        * Pointer to 1D global mass matrix.
@@ -224,10 +258,10 @@ namespace PSMF
     /**
      * Extracts the information needed to perform loops over cells.
      */
-    template <typename MatrixFreeType>
     void
-    reinit(const MatrixFreeType &matrix_free,
-           const AdditionalData &additional_data = AdditionalData());
+    reinit(const DoFHandler<dim> &dof_handler,
+           const unsigned int     mg_level,
+           const AdditionalData  &additional_data = AdditionalData());
 
     /**
      * @brief This method runs the loop over all patches and apply the local operation on
@@ -262,16 +296,29 @@ namespace PSMF
                       VectorType        &dst) const;
 
     /**
-     * @brief Initializes the tensor product matrix.
+     * This method runs the loop over all cells and compute tensor product on
+     * each element in parallel for global mat-vec operation.
+     * We call it 'cell loop' because although patches are used as a unit, only
+     * some of the cells are updated, thus avoiding the duplication of face
+     * integrals.
      */
+    template <typename Functor, typename VectorType>
     void
-    reinit_tensor_product() const;
+    cell_loop(const Functor    &func,
+              const VectorType &src,
+              VectorType       &dst) const;
 
     /**
-     * Return the remaining patches after coloring.
+     * @brief Initializes the tensor product matrix for local smoothing.
      */
-    const std::set<unsigned int>
-    get_colored_graph_left() const;
+    void
+    reinit_tensor_product_smoother() const;
+
+    /**
+     * @brief Initializes the tensor product matrix for local laplace.
+     */
+    void
+    reinit_tensor_product_laplace() const;
 
     /**
      * Free all the memory allocated.
@@ -309,15 +356,8 @@ namespace PSMF
                         VectorType        &dst) const;
 
     /**
-     * Helper function. Implement multiple red-black coloring.
-     */
-    void
-    rb_coloring();
-
-    /**
      * Helper function. Setup color arrays for collecting data.
      */
-
     void
     setup_color_arrays(const unsigned int n_colors);
 
@@ -331,7 +371,23 @@ namespace PSMF
      * Helper function. Get tensor product data for each patch.
      */
     void
-    get_patch_data(const unsigned int patch);
+    get_patch_data(const PatchIterator &patch, const unsigned int patch_id);
+
+    /**
+     * Gathering the locally owned and ghost cells attached to a common
+     * vertex as the collection of cell iterators (patch). The
+     * successive distribution of the collections with ghost cells
+     * follows the logic:
+     *
+     * 1.) if one mpi-proc owns more than half of the cells (locally owned)
+     * of the vertex patch the mpi-proc takes ownership
+     *
+     * 2.) for the remaining ghost patches the mpi-proc with the cell of
+     * the lowest CellId (see dealii::Triangulation) takes ownership
+     */
+    std::vector<std::vector<CellIterator>>
+    gather_vertex_patches(const DoFHandler<dim> &dof_handler,
+                          const unsigned int     level) const;
 
     /**
      * Allocate an array to the device.
@@ -354,6 +410,13 @@ namespace PSMF
      * Relaxation parameter.
      */
     Number relaxation;
+
+    /**
+     * If true, use coloring. Otherwise, use atomic operations.
+     * Coloring ensures bitwise reproducibility but is slower on Pascal and
+     * newer architectures.
+     */
+    bool use_coloring;
 
 
     GranularityScheme granularity_scheme;
@@ -390,7 +453,7 @@ namespace PSMF
     /**
      * Colored graphed of locally owned active patches.
      */
-    std::vector<std::vector<CellFilter>> graph_ptr;
+    std::vector<std::vector<PatchIterator>> graph_ptr;
 
     /**
      * Number of patches in each color.
@@ -403,17 +466,71 @@ namespace PSMF
     const DoFHandler<dim> *dof_handler;
 
     /**
-     * Vector of pointer to the the first degree of freedom in each patch of
-     * each color.
+     * Vector of pointer to the the first degree of freedom
+     * in each patch of each color.
      * @note Need Lexicographic ordering degree of freedoms.
+     * @note For DG case, the first degree of freedom index of
+     *       four cells in a patch is stored consecutively.
      */
     std::vector<unsigned int *> first_dof;
 
     /**
-     * Vector of pointer to the patch id of each color.
-     * @note Need Lexicographic ordering patches.
+     * Vector of the the first degree of freedom
+     * in each patch of a single color.
+     * Initialize on host and copy to device later.
+     */
+    std::vector<unsigned int> first_dof_host;
+
+    /**
+     * Vector of pointer to patch type: left, middle, right.
+     */
+    std::vector<unsigned int *> patch_type;
+
+    /**
+     * Vector of patch type: left, middle, right.
+     * Initialize on host and copy to device later.
+     */
+    std::vector<unsigned int> patch_type_host;
+
+    /**
+     * Vector of pointer to the local cell ordering type for each patch.
      */
     std::vector<unsigned int *> patch_id;
+
+    /**
+     * Vector of patch cell ordering type.
+     * Initialize on host and copy to device later.
+     */
+    std::vector<unsigned int> patch_id_host;
+
+    /**
+     * Mapping from cell ordering to type id.
+     */
+    std::unordered_map<unsigned int, unsigned int> ordering_to_type;
+
+    /**
+     * Categories of ordering types.
+     */
+    unsigned int ordering_types;
+
+    /**
+     * Lookup table
+     */
+    std::unordered_map<unsigned int, std::array<unsigned int, 3>> lookup_table;
+
+    /**
+     * Pointer to mapping from l to h
+     */
+    unsigned int *l_to_h;
+
+    std::vector<unsigned int> l_to_h_host;
+
+    /**
+     * Pointer to mapping from l to h
+     */
+    unsigned int *h_to_l;
+
+    std::vector<unsigned int> h_to_l_host;
 
     /**
      * Pointer to 1D global mass matrix.
@@ -455,8 +572,11 @@ namespace PSMF
       local_dst = local_src + n_buff * local_dim;
 
       local_mass       = local_dst + n_buff * local_dim;
-      local_derivative = local_mass + 1 * n_dofs_1d * n_dofs_1d * 1;
-      temp             = local_derivative + 1 * n_dofs_1d * n_dofs_1d * 1;
+      local_derivative = local_mass + n_buff * n_dofs_1d * n_dofs_1d * dim;
+      temp = local_derivative + n_buff * n_dofs_1d * n_dofs_1d * dim;
+
+      global_dof_indices =
+        (unsigned int *)(temp + n_buff * local_dim * (dim - 1));
     }
 
 
@@ -499,6 +619,11 @@ namespace PSMF
      * Shared memory for internal buffer.
      */
     Number *temp;
+
+    /**
+     * Shared memory for local to global dof indices with l ordoring.
+     */
+    unsigned int *global_dof_indices;
   };
 
   /**

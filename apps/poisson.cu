@@ -1,5 +1,12 @@
 /**
- * Created by Cu Cui on 2022/12/25.
+ * @file poisson.cu
+ * @author Cu Cui (cu.cui@iwr.uni-heidelberg.de)
+ * @brief Discontinuous Galerkin methods for poisson problems.
+ * @version 1.0
+ * @date 2023-02-02
+ *
+ * @copyright Copyright (c) 2023
+ *
  */
 
 #include <deal.II/base/conditional_ostream.h>
@@ -11,6 +18,7 @@
 
 #include <deal.II/dofs/dof_tools.h>
 
+#include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/fe_q.h>
 
 #include <deal.II/grid/grid_generator.h>
@@ -44,9 +52,12 @@ namespace Step64
   {
   public:
     virtual Number
-    value(const Point<dim> &, const unsigned int = 0) const override final
+    value(const Point<dim> &p, const unsigned int = 0) const override final
     {
-      return 0.;
+      Number val = 1.;
+      for (unsigned int d = 0; d < dim; ++d)
+        val *= std::sin(numbers::PI * p[d]);
+      return val;
     }
 
     virtual Tensor<1, dim, Number>
@@ -71,9 +82,13 @@ namespace Step64
   {
   public:
     virtual Number
-    value(const Point<dim> &, const unsigned int = 0) const override final
+    value(const Point<dim> &p, const unsigned int = 0) const override final
     {
-      return 1.;
+      const Number arg = numbers::PI;
+      Number       val = 1.;
+      for (unsigned int d = 0; d < dim; ++d)
+        val *= std::sin(arg * p[d]);
+      return dim * arg * arg * val;
     }
   };
 
@@ -83,10 +98,16 @@ namespace Step64
   public:
     using full_number   = double;
     using vcycle_number = CT::VCYCLE_NUMBER_;
-    using MatrixTypeDP =
-      PSMF::LaplaceOperator<dim, fe_degree, full_number, CT::DOF_LAYOUT_>;
-    using MatrixTypeSP =
-      PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, CT::DOF_LAYOUT_>;
+    using MatrixTypeDP  = PSMF::LaplaceOperator<dim,
+                                               fe_degree,
+                                               full_number,
+                                               PSMF::SmootherVariant::FUSED_L,
+                                               CT::DOF_LAYOUT_>;
+    using MatrixTypeSP  = PSMF::LaplaceOperator<dim,
+                                               fe_degree,
+                                               vcycle_number,
+                                               PSMF::SmootherVariant::FUSED_L,
+                                               CT::DOF_LAYOUT_>;
 
     LaplaceProblem();
     ~LaplaceProblem();
@@ -154,14 +175,10 @@ namespace Step64
     dof_handler.distribute_dofs(*fe);
     dof_handler.distribute_mg_dofs();
     const unsigned int nlevels = triangulation.n_global_levels();
-    for (unsigned int level = 0; level < nlevels; ++level)
-      Util::Lexicographic(dof_handler, level);
-    Util::Lexicographic(dof_handler);
 
     *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = ("
-           << ((int)std::pow(dof_handler.n_dofs() * 1.0000001, 1. / dim) - 1) /
-                fe->degree
-           << " x " << fe->degree << " + 1)^" << dim << std::endl;
+           << (1 << (nlevels - 1)) << " x (" << fe->degree << " + 1))^" << dim
+           << std::endl;
 
     setup_time += time.wall_time();
 
@@ -198,53 +215,53 @@ namespace Step64
                                                       relevant_dofs);
         // double-precision matrix-free data
         {
-          AffineConstraints<full_number> level_constraints;
-          level_constraints.reinit(relevant_dofs);
-          level_constraints.add_lines(
-            mg_constrained_dofs.get_boundary_indices(level));
-          level_constraints.close();
+          // AffineConstraints<full_number> level_constraints;
+          // level_constraints.reinit(relevant_dofs);
+          // level_constraints.add_lines(
+          //   mg_constrained_dofs.get_boundary_indices(level));
+          // level_constraints.close();
 
-          using MatrixFreeType = PSMF::MatrixFree<dim, full_number>;
+          using MatrixFreeType =
+            PSMF::LevelVertexPatch<dim,
+                                   fe_degree,
+                                   full_number,
+                                   PSMF::SmootherVariant::FUSED_L,
+                                   PSMF::DoFLayout::DGQ>;
 
           typename MatrixFreeType::AdditionalData additional_data;
-          additional_data.mapping_update_flags =
-            (update_values | update_gradients | update_JxW_values);
-          additional_data.mg_level = level;
-          std::shared_ptr<MatrixFreeType> mg_mf_storage_level(
-            new MatrixFreeType());
-          mg_mf_storage_level->reinit(mapping,
-                                      dof_handler,
-                                      level_constraints,
-                                      QGauss<1>(fe_degree + 1),
-                                      additional_data);
+          additional_data.relaxation   = 1.;
+          additional_data.use_coloring = false;
+          additional_data.patch_per_block =
+            fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+          additional_data.granularity_scheme = CT::GRANULARITY_;
 
-          matrix_dp[level].initialize(mg_mf_storage_level);
+          matrix_dp[level].initialize(dof_handler, level, additional_data);
         }
 
         // single-precision matrix-free data
         if (std::is_same_v<vcycle_number, float>)
           {
-            AffineConstraints<vcycle_number> level_constraints;
-            level_constraints.reinit(relevant_dofs);
-            level_constraints.add_lines(
-              mg_constrained_dofs.get_boundary_indices(level));
-            level_constraints.close();
+            // AffineConstraints<vcycle_number> level_constraints;
+            // level_constraints.reinit(relevant_dofs);
+            // level_constraints.add_lines(
+            //   mg_constrained_dofs.get_boundary_indices(level));
+            // level_constraints.close();
 
-            using MatrixFreeType = PSMF::MatrixFree<dim, vcycle_number>;
+            using MatrixFreeType =
+              PSMF::LevelVertexPatch<dim,
+                                     fe_degree,
+                                     vcycle_number,
+                                     PSMF::SmootherVariant::FUSED_L,
+                                     PSMF::DoFLayout::DGQ>;
 
             typename MatrixFreeType::AdditionalData additional_data;
-            additional_data.mapping_update_flags =
-              update_gradients | update_JxW_values;
-            additional_data.mg_level = level;
-            std::shared_ptr<MatrixFreeType> mg_mf_storage_level(
-              new MatrixFreeType());
-            mg_mf_storage_level->reinit(mapping,
-                                        dof_handler,
-                                        level_constraints,
-                                        QGauss<1>(fe_degree + 1),
-                                        additional_data);
+            additional_data.relaxation   = 1.;
+            additional_data.use_coloring = false;
+            additional_data.patch_per_block =
+              fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+            additional_data.granularity_scheme = CT::GRANULARITY_;
 
-            matrix[level].initialize(mg_mf_storage_level);
+            matrix[level].initialize(dof_handler, level, additional_data);
           }
       }
 
@@ -306,10 +323,12 @@ namespace Step64
           *pcout << data.print_solver();
 
           auto it    = data.solver_name + "it";
+          auto step  = data.solver_name + "step";
           auto times = data.solver_name + "[s]";
           auto mem   = data.solver_name + "Mem Usage[MB]";
 
           info_table[k].add_value(it, data.n_iteration);
+          info_table[k].add_value(step, data.n_step);
           info_table[k].add_value(times, data.timing);
           info_table[k].add_value(mem, data.mem_usage);
 
@@ -319,6 +338,7 @@ namespace Step64
               info_table[k].set_precision(times, 3);
 
               info_table[k].add_column_to_supercolumn(it, data.solver_name);
+              info_table[k].add_column_to_supercolumn(step, data.solver_name);
               info_table[k].add_column_to_supercolumn(times, data.solver_name);
               info_table[k].add_column_to_supercolumn(mem, data.solver_name);
             }
@@ -329,63 +349,63 @@ namespace Step64
       {
         switch (CT::KERNEL_TYPE_[k])
           {
-            case PSMF::SmootherVariant::GLOBAL:
-              {
-                PSMF::MultigridSolver<dim,
-                                      fe_degree,
-                                      CT::DOF_LAYOUT_,
-                                      full_number,
-                                      PSMF::SmootherVariant::GLOBAL,
-                                      vcycle_number>
-                  solver(dof_handler,
-                         matrix_dp,
-                         matrix,
-                         transfer,
-                         Functions::ZeroFunction<dim, full_number>(),
-                         Functions::ConstantFunction<dim, full_number>(1.),
-                         pcout,
-                         n_mg_cycles);
-                do_solver(solver, k);
-                break;
-              }
-            case PSMF::SmootherVariant::SEPERATE:
-              {
-                PSMF::MultigridSolver<dim,
-                                      fe_degree,
-                                      CT::DOF_LAYOUT_,
-                                      full_number,
-                                      PSMF::SmootherVariant::SEPERATE,
-                                      vcycle_number>
-                  solver(dof_handler,
-                         matrix_dp,
-                         matrix,
-                         transfer,
-                         Functions::ZeroFunction<dim, full_number>(),
-                         Functions::ConstantFunction<dim, full_number>(1.),
-                         pcout,
-                         n_mg_cycles);
-                do_solver(solver, k);
-                break;
-              }
-            case PSMF::SmootherVariant::FUSED_BASE:
-              {
-                PSMF::MultigridSolver<dim,
-                                      fe_degree,
-                                      CT::DOF_LAYOUT_,
-                                      full_number,
-                                      PSMF::SmootherVariant::FUSED_BASE,
-                                      vcycle_number>
-                  solver(dof_handler,
-                         matrix_dp,
-                         matrix,
-                         transfer,
-                         Functions::ZeroFunction<dim, full_number>(),
-                         Functions::ConstantFunction<dim, full_number>(1.),
-                         pcout,
-                         n_mg_cycles);
-                do_solver(solver, k);
-                break;
-              }
+            // case PSMF::SmootherVariant::GLOBAL:
+            //   {
+            //     PSMF::MultigridSolver<dim,
+            //                           fe_degree,
+            //                           CT::DOF_LAYOUT_,
+            //                           full_number,
+            //                           PSMF::SmootherVariant::GLOBAL,
+            //                           vcycle_number>
+            //       solver(dof_handler,
+            //              matrix_dp,
+            //              matrix,
+            //              transfer,
+            //              Functions::ZeroFunction<dim, full_number>(),
+            //              Functions::ConstantFunction<dim, full_number>(1.),
+            //              pcout,
+            //              n_mg_cycles);
+            //     do_solver(solver, k);
+            //     break;
+            //   }
+            // case PSMF::SmootherVariant::SEPERATE:
+            //   {
+            //     PSMF::MultigridSolver<dim,
+            //                           fe_degree,
+            //                           CT::DOF_LAYOUT_,
+            //                           full_number,
+            //                           PSMF::SmootherVariant::SEPERATE,
+            //                           vcycle_number>
+            //       solver(dof_handler,
+            //              matrix_dp,
+            //              matrix,
+            //              transfer,
+            //              Functions::ZeroFunction<dim, full_number>(),
+            //              Functions::ConstantFunction<dim, full_number>(1.),
+            //              pcout,
+            //              n_mg_cycles);
+            //     do_solver(solver, k);
+            //     break;
+            //   }
+            // case PSMF::SmootherVariant::FUSED_BASE:
+            //   {
+            //     PSMF::MultigridSolver<dim,
+            //                           fe_degree,
+            //                           CT::DOF_LAYOUT_,
+            //                           full_number,
+            //                           PSMF::SmootherVariant::FUSED_BASE,
+            //                           vcycle_number>
+            //       solver(dof_handler,
+            //              matrix_dp,
+            //              matrix,
+            //              transfer,
+            //              Functions::ZeroFunction<dim, full_number>(),
+            //              Functions::ConstantFunction<dim, full_number>(1.),
+            //              pcout,
+            //              n_mg_cycles);
+            //     do_solver(solver, k);
+            //     break;
+            //   }
             case PSMF::SmootherVariant::FUSED_L:
               {
                 PSMF::MultigridSolver<dim,
@@ -398,51 +418,51 @@ namespace Step64
                          matrix_dp,
                          matrix,
                          transfer,
-                         Functions::ZeroFunction<dim, full_number>(),
-                         Functions::ConstantFunction<dim, full_number>(1.),
+                         Solution<dim, full_number>(),
+                         RightHandSide<dim, full_number>(),
                          pcout,
                          n_mg_cycles);
                 do_solver(solver, k);
                 break;
               }
-            case PSMF::SmootherVariant::FUSED_3D:
-              {
-                PSMF::MultigridSolver<dim,
-                                      fe_degree,
-                                      CT::DOF_LAYOUT_,
-                                      full_number,
-                                      PSMF::SmootherVariant::FUSED_3D,
-                                      vcycle_number>
-                  solver(dof_handler,
-                         matrix_dp,
-                         matrix,
-                         transfer,
-                         Functions::ZeroFunction<dim, full_number>(),
-                         Functions::ConstantFunction<dim, full_number>(1.),
-                         pcout,
-                         n_mg_cycles);
-                do_solver(solver, k);
-                break;
-              }
-            case PSMF::SmootherVariant::FUSED_CF:
-              {
-                PSMF::MultigridSolver<dim,
-                                      fe_degree,
-                                      CT::DOF_LAYOUT_,
-                                      full_number,
-                                      PSMF::SmootherVariant::FUSED_CF,
-                                      vcycle_number>
-                  solver(dof_handler,
-                         matrix_dp,
-                         matrix,
-                         transfer,
-                         Functions::ZeroFunction<dim, full_number>(),
-                         Functions::ConstantFunction<dim, full_number>(1.),
-                         pcout,
-                         n_mg_cycles);
-                do_solver(solver, k);
-                break;
-              }
+            // case PSMF::SmootherVariant::FUSED_3D:
+            //   {
+            //     PSMF::MultigridSolver<dim,
+            //                           fe_degree,
+            //                           CT::DOF_LAYOUT_,
+            //                           full_number,
+            //                           PSMF::SmootherVariant::FUSED_3D,
+            //                           vcycle_number>
+            //       solver(dof_handler,
+            //              matrix_dp,
+            //              matrix,
+            //              transfer,
+            //              Functions::ZeroFunction<dim, full_number>(),
+            //              Functions::ConstantFunction<dim, full_number>(1.),
+            //              pcout,
+            //              n_mg_cycles);
+            //     do_solver(solver, k);
+            //     break;
+            //   }
+            // case PSMF::SmootherVariant::FUSED_CF:
+            //   {
+            //     PSMF::MultigridSolver<dim,
+            //                           fe_degree,
+            //                           CT::DOF_LAYOUT_,
+            //                           full_number,
+            //                           PSMF::SmootherVariant::FUSED_CF,
+            //                           vcycle_number>
+            //       solver(dof_handler,
+            //              matrix_dp,
+            //              matrix,
+            //              transfer,
+            //              Functions::ZeroFunction<dim, full_number>(),
+            //              Functions::ConstantFunction<dim, full_number>(1.),
+            //              pcout,
+            //              n_mg_cycles);
+            //     do_solver(solver, k);
+            //     break;
+            //   }
             default:
               AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
           }
@@ -463,9 +483,8 @@ namespace Step64
 
         *pcout << "Cycle " << cycle << std::endl;
 
-        long long unsigned int n_dofs =
-          std::pow(std::pow(2, triangulation.n_global_levels()) * fe_degree + 1,
-                   dim);
+        long long unsigned int n_dofs = std::pow(
+          std::pow(2, triangulation.n_global_levels()) * (fe_degree + 1), dim);
 
         if (n_dofs > CT::MAX_SIZES_)
           {

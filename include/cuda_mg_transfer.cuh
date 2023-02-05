@@ -1,6 +1,12 @@
 /**
  * @file cuda_mg_transfer.cuh
- * Created by Cu Cui on 2022/12/25.
+ * @author Cu Cui (cu.cui@iwr.uni-heidelberg.de)
+ * @brief Implementation of the grid transfer operations.
+ * @version 1.0
+ * @date 2023-02-02
+ * 
+ * @copyright Copyright (c) 2023
+ * 
  */
 
 #ifndef MG_TRANSFER_CUH
@@ -55,7 +61,7 @@ namespace PSMF
    * than that variant.
    */
   template <int dim, typename Number>
-  class MGTransferCUDA<dim, Number, DoFLayout::Q>
+  class MGTransferCUDA<dim, Number, DoFLayout::DGQ>
     : public MGTransferBase<LinearAlgebra::distributed::Vector<
         Number,
         MemorySpace::CUDA>> // public Subscriptor
@@ -323,7 +329,7 @@ namespace PSMF
      * The mg_constrained_dofs of the level systems.
      */
     SmartPointer<const MGConstrainedDoFs,
-                 MGTransferCUDA<dim, Number, DoFLayout::Q>>
+                 MGTransferCUDA<dim, Number, DoFLayout::DGQ>>
       mg_constrained_dofs;
 
     /**

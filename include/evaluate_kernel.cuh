@@ -16,6 +16,131 @@
 
 namespace PSMF
 {
+  /**
+   * Compute laplace operation based on tensor product structure.
+   */
+  template <int kernel_size,
+            typename Number,
+            int             dim,
+            SmootherVariant kernel,
+            DoFLayout       dof_layout>
+  struct TPEvaluator_laplace
+  {
+    /**
+     *  Constructor.
+     */
+    __device__
+    TPEvaluator_laplace()
+    {}
+
+    /**
+     * Vector multication.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *temp)
+    {}
+
+    /**
+     * apply 1d @p shape_data vector to @p in.
+     */
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {}
+  };
+
+
+  template <int kernel_size, typename Number>
+  struct TPEvaluator_laplace<kernel_size,
+                             Number,
+                             3,
+                             SmootherVariant::FUSED_BASE,
+                             DoFLayout::DGQ>
+  {
+    /**
+     *  Constructor.
+     */
+    __device__
+    TPEvaluator_laplace()
+    {}
+
+    /**
+     * Vector multication.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *temp)
+    {
+      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
+      constexpr unsigned int offset    = Util::pow(kernel_size, 2);
+
+      apply<0, false>(mass_matrix, src, &temp[local_dim]);
+      __syncthreads();
+      apply<1, false>(&mass_matrix[offset], &temp[local_dim], temp);
+      __syncthreads();
+      apply<2, false>(&derivative_matrix[offset * 2], temp, dst);
+      __syncthreads();
+      apply<1, false>(&derivative_matrix[offset], &temp[local_dim], temp);
+      __syncthreads();
+      apply<0, false>(derivative_matrix, src, &temp[local_dim]);
+      __syncthreads();
+      apply<1, true>(&mass_matrix[offset], &temp[local_dim], temp);
+      __syncthreads();
+      apply<2, true>(&mass_matrix[offset * 2], temp, dst);
+    }
+
+    /**
+     * apply 1d @p shape_data vector to @p in.
+     */
+    template <int direction, bool add>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr int stride = kernel_size * kernel_size;
+
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % kernel_size;
+
+      Number pval[kernel_size];
+      // kernel product: A kdot src, [N x N] * [N^dim, 1]
+      for (unsigned int z = 0; z < kernel_size; ++z)
+        {
+          pval[z] = 0;
+          // #pragma unroll
+          for (unsigned int k = 0; k < kernel_size; ++k)
+            {
+              const unsigned int shape_idx = row * kernel_size + k;
+
+              const unsigned int source_idx =
+                (direction == 0) ? (col * kernel_size + k + z * stride) :
+                (direction == 1) ? (k * kernel_size + col + z * stride) :
+                                   (z * kernel_size + col + k * stride);
+
+              pval[z] += shape_data[shape_idx] * in[source_idx];
+            }
+        }
+
+      for (unsigned int z = 0; z < kernel_size; ++z)
+        {
+          const unsigned int destination_idx =
+            (direction == 0) ? (col * kernel_size + row + z * stride) :
+            (direction == 1) ? (row * kernel_size + col + z * stride) :
+                               (z * kernel_size + col + row * stride);
+
+          if (add)
+            out[destination_idx] += pval[z];
+          else
+            out[destination_idx] = pval[z];
+        }
+    }
+  };
 
   /**
    * Compute residual based on tensor product structure.
@@ -327,7 +452,7 @@ namespace PSMF
                            Number,
                            3,
                            SmootherVariant::FUSED_BASE,
-                           DoFLayout::Q>
+                           DoFLayout::DGQ>
   {
     /**
      *  Constructor.
@@ -1040,7 +1165,7 @@ namespace PSMF
                              Number,
                              3,
                              SmootherVariant::FUSED_L,
-                             DoFLayout::Q>
+                             DoFLayout::DGQ>
   {
     /**
      *  Constructor.
@@ -1072,12 +1197,12 @@ namespace PSMF
       __syncthreads();
       apply<2, true>(eigenvectors, &temp[local_dim], temp);
       __syncthreads();
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        for (unsigned int z = 1; z < kernel_size - 1; ++z)
-          {
+      for (unsigned int z = 1; z < kernel_size - 1; ++z)
+        {
+          if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
             temp[z * kernel_size * kernel_size + row * kernel_size + col] /=
               (eigenvalues[z] + eigenvalues[row] + eigenvalues[col]);
-          }
+        }
       __syncthreads();
       apply<0, false>(eigenvectors, temp, &temp[local_dim]);
       __syncthreads();
@@ -1356,6 +1481,108 @@ namespace PSMF
     }
   };
 
+  /**
+   * @brief Functor. Local laplace operator based on tensor product structure.
+   *
+   * @tparam dim
+   * @tparam fe_degree
+   * @tparam Number
+   * @tparam kernel
+   * @tparam dof_layout
+   */
+  template <int dim,
+            int fe_degree,
+            typename Number,
+            SmootherVariant kernel,
+            DoFLayout       dof_layout>
+  class LocalLaplace
+  {
+  public:
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    LocalLaplace()
+      : ndofs_per_dim(0)
+    {}
+
+    LocalLaplace(unsigned int ndofs_per_dim)
+      : ndofs_per_dim(ndofs_per_dim)
+    {}
+
+    __device__ inline unsigned int
+    get_ndofs()
+    {
+      return ndofs_per_dim;
+    }
+
+    __device__ void
+    operator()(const unsigned int                                 patch,
+               const typename LevelVertexPatch<dim,
+                                               fe_degree,
+                                               Number,
+                                               kernel,
+                                               dof_layout>::Data *gpu_data,
+               SharedMemData<dim, Number, kernel> *shared_data) const
+    {}
+
+    unsigned int ndofs_per_dim;
+  };
+
+  template <int dim, int fe_degree, typename Number>
+  class LocalLaplace<dim,
+                     fe_degree,
+                     Number,
+                     SmootherVariant::FUSED_L,
+                     DoFLayout::DGQ>
+  {
+  public:
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    LocalLaplace()
+      : ndofs_per_dim(0)
+    {}
+
+    LocalLaplace(unsigned int ndofs_per_dim)
+      : ndofs_per_dim(ndofs_per_dim)
+    {}
+
+    __device__ inline unsigned int
+    get_ndofs()
+    {
+      return ndofs_per_dim;
+    }
+
+    __device__ void
+    operator()(
+      const unsigned int                                     patch,
+      const typename LevelVertexPatch<dim,
+                                      fe_degree,
+                                      Number,
+                                      SmootherVariant::FUSED_L,
+                                      DoFLayout::DGQ>::Data *gpu_data,
+      SharedMemData<dim, Number, SmootherVariant::FUSED_L>  *shared_data) const
+    {
+      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+
+      TPEvaluator_laplace<n_dofs_1d,
+                          Number,
+                          dim,
+                          SmootherVariant::FUSED_BASE,
+                          DoFLayout::DGQ>
+        eval;
+      __syncthreads();
+
+      eval.vmult(
+        &shared_data->local_dst[patch * local_dim],
+        &shared_data->local_src[patch * local_dim],
+        &shared_data->local_mass[patch * n_dofs_1d * n_dofs_1d * dim],
+        &shared_data->local_derivative[patch * n_dofs_1d * n_dofs_1d * dim],
+        &shared_data->temp[patch * local_dim * (dim - 1)]);
+      __syncthreads();
+    }
+
+    unsigned int ndofs_per_dim;
+  };
+
 
 
   /**
@@ -1602,10 +1829,10 @@ namespace PSMF
                       fe_degree,
                       Number,
                       SmootherVariant::FUSED_L,
-                      DoFLayout::Q>
+                      DoFLayout::DGQ>
   {
   public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
 
     LocalSmoother()
       : ndofs_per_dim(0)
@@ -1623,13 +1850,13 @@ namespace PSMF
 
     __device__ void
     operator()(
-      const unsigned int                                    patch,
+      const unsigned int                                     patch,
       const typename LevelVertexPatch<dim,
                                       fe_degree,
                                       Number,
                                       SmootherVariant::FUSED_L,
-                                      DoFLayout::Q>::Data  *gpu_data,
-      SharedMemData<dim, Number, SmootherVariant::FUSED_L> *shared_data) const
+                                      DoFLayout::DGQ>::Data *gpu_data,
+      SharedMemData<dim, Number, SmootherVariant::FUSED_L>  *shared_data) const
     {
       constexpr unsigned int local_dim   = Util::pow(n_dofs_1d, dim);
       const unsigned int     local_tid_x = threadIdx.x % n_dofs_1d;
@@ -1638,13 +1865,13 @@ namespace PSMF
                         Number,
                         dim,
                         SmootherVariant::FUSED_BASE,
-                        DoFLayout::Q>
+                        DoFLayout::DGQ>
         eval_vmult;
       TPEvaluator_inverse<n_dofs_1d,
                           Number,
                           dim,
                           SmootherVariant::FUSED_L,
-                          DoFLayout::Q>
+                          DoFLayout::DGQ>
         eval_inverse;
       __syncthreads();
 
@@ -1666,6 +1893,9 @@ namespace PSMF
           shared_data->local_derivative[(row + 1) * n_dofs_1d + col + 1] =
             gpu_data->eigenvectors[row * (n_dofs_1d - 2) + col];
         }
+      // for (unsigned int z = 0; z < n_dofs_1d; ++z)
+      //   shared_data->local_dst[local_tid_x + threadIdx.y * n_dofs_1d +
+      //                          z * n_dofs_1d * n_dofs_1d] = 0;
       __syncthreads();
 
       eval_inverse.apply_inverse(

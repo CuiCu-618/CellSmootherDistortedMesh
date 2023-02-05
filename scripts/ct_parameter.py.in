@@ -62,7 +62,7 @@ def parse_args():
                         help="maximum number of dofs"                    
     )
     parser.add_argument('-DLY','--dof-layout',
-                        default='Q',
+                        default='DGQ',
                         type=str,
                         choices=['Q','DGQ','RT'],
                         help="dof layout of finite element method"

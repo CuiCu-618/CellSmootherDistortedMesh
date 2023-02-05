@@ -18,6 +18,7 @@
 
 #include <deal.II/dofs/dof_tools.h>
 
+#include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/fe_q.h>
 
 #include <deal.II/grid/grid_generator.h>
@@ -49,7 +50,6 @@
 #include "app_utilities.h"
 #include "ct_parameter.h"
 #include "cuda_mg_transfer.cuh"
-#include "dealii/cuda_mf.cuh"
 #include "laplace_operator.cuh"
 #include "patch_base.cuh"
 #include "patch_smoother.cuh"
@@ -62,10 +62,16 @@ class LaplaceProblem
 public:
   using full_number   = double;
   using vcycle_number = float;
-  using MatrixTypeDP =
-    PSMF::LaplaceOperator<dim, fe_degree, full_number, CT::DOF_LAYOUT_>;
-  using MatrixTypeSP =
-    PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, CT::DOF_LAYOUT_>;
+  using MatrixTypeDP  = PSMF::LaplaceOperator<dim,
+                                             fe_degree,
+                                             full_number,
+                                             PSMF::SmootherVariant::FUSED_L,
+                                             CT::DOF_LAYOUT_>;
+  using MatrixTypeSP  = PSMF::LaplaceOperator<dim,
+                                             fe_degree,
+                                             vcycle_number,
+                                             PSMF::SmootherVariant::FUSED_L,
+                                             CT::DOF_LAYOUT_>;
   using VectorTypeDP =
     LinearAlgebra::distributed::Vector<full_number, MemorySpace::CUDA>;
   using VectorTypeSP =
@@ -155,15 +161,11 @@ LaplaceProblem<dim, fe_degree>::setup_system()
   n_mv   = 1; // dof_handler.n_dofs() < 10000000 ? 100 : 20;
 
   const unsigned int nlevels = triangulation.n_global_levels();
-  for (unsigned int level = 0; level < nlevels; ++level)
-    Util::Lexicographic(dof_handler, level);
-  Util::Lexicographic(dof_handler);
 
   *pcout << "Setting up dofs...\n";
   *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = ("
-         << ((int)std::pow(dof_handler.n_dofs() * 1.0000001, 1. / dim) - 1) /
-              fe->degree
-         << " x " << fe->degree << " + 1)^" << dim << std::endl;
+         << (1 << (nlevels - 1)) << " x (" << fe->degree << " + 1))^" << dim
+         << std::endl;
 
   *pcout << "Setting up Matrix-Free...\n";
   // Initialization of Dirichlet boundaries
@@ -181,49 +183,39 @@ LaplaceProblem<dim, fe_degree>::setup_system()
                                                 relevant_dofs);
   // DP
   {
-    AffineConstraints<full_number> level_constraints;
-    level_constraints.reinit(relevant_dofs);
-    level_constraints.add_lines(
-      mg_constrained_dofs.get_boundary_indices(maxlevel));
-    level_constraints.close();
-
-    using MatrixFreeType = PSMF::MatrixFree<dim, full_number>;
+    using MatrixFreeType =
+      PSMF::LevelVertexPatch<dim,
+                             fe_degree,
+                             full_number,
+                             PSMF::SmootherVariant::FUSED_L,
+                             PSMF::DoFLayout::DGQ>;
 
     typename MatrixFreeType::AdditionalData additional_data;
-    additional_data.mapping_update_flags =
-      (update_values | update_gradients | update_JxW_values);
-    additional_data.mg_level = maxlevel;
-    std::shared_ptr<MatrixFreeType> mg_mf_storage_level(new MatrixFreeType());
-    mg_mf_storage_level->reinit(mapping,
-                                dof_handler,
-                                level_constraints,
-                                QGauss<1>(fe_degree + 1),
-                                additional_data);
+    additional_data.relaxation   = 1.;
+    additional_data.use_coloring = false;
+    additional_data.patch_per_block =
+      fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+    additional_data.granularity_scheme = CT::GRANULARITY_;
 
-    system_matrix.initialize(mg_mf_storage_level);
+    system_matrix.initialize(dof_handler, maxlevel, additional_data);
   }
   // SP
   {
-    AffineConstraints<vcycle_number> level_constraints;
-    level_constraints.reinit(relevant_dofs);
-    level_constraints.add_lines(
-      mg_constrained_dofs.get_boundary_indices(maxlevel));
-    level_constraints.close();
-
-    using MatrixFreeType = PSMF::MatrixFree<dim, vcycle_number>;
+    using MatrixFreeType =
+      PSMF::LevelVertexPatch<dim,
+                             fe_degree,
+                             vcycle_number,
+                             PSMF::SmootherVariant::FUSED_L,
+                             PSMF::DoFLayout::DGQ>;
 
     typename MatrixFreeType::AdditionalData additional_data;
-    additional_data.mapping_update_flags =
-      (update_values | update_gradients | update_JxW_values);
-    additional_data.mg_level = maxlevel;
-    std::shared_ptr<MatrixFreeType> mg_mf_storage_level(new MatrixFreeType());
-    mg_mf_storage_level->reinit(mapping,
-                                dof_handler,
-                                level_constraints,
-                                QGauss<1>(fe_degree + 1),
-                                additional_data);
+    additional_data.relaxation   = 1.;
+    additional_data.use_coloring = false;
+    additional_data.patch_per_block =
+      fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+    additional_data.granularity_scheme = CT::GRANULARITY_;
 
-    mg_matrices.initialize(mg_mf_storage_level);
+    mg_matrices.initialize(dof_handler, maxlevel, additional_data);
   }
 
   system_matrix.initialize_dof_vector(system_rhs_dp);
@@ -234,6 +226,12 @@ LaplaceProblem<dim, fe_degree>::setup_system()
 
   system_rhs_dp = 1.;
   system_rhs_sp = 1.;
+
+  LinearAlgebra::ReadWriteVector<vcycle_number> rw_vector(dof_handler.n_dofs());
+  vcycle_number                                 c = 0;
+  for (auto &val : rw_vector)
+    val = c++;
+  system_rhs_sp.import(rw_vector, VectorOperation::insert);
 }
 template <int dim, int fe_degree>
 void
@@ -273,6 +271,8 @@ LaplaceProblem<dim, fe_degree>::bench_Ax()
         }
       best_time2 = std::min(time.wall_time() / n_mv, best_time2);
     }
+
+  std::cout << "Ax " << solution_sp.l2_norm() << std::endl;
 
   info_table[0].add_value("Name", "Mat-vec SP");
   info_table[0].add_value("Time[s]", best_time2);
@@ -334,6 +334,8 @@ LaplaceProblem<dim, fe_degree>::bench_transfer()
       best_time2 = std::min(time.wall_time() / n_mv, best_time2);
     }
 
+  std::cout << u_coarse_.l2_norm() << std::endl;
+
   info_table[1].add_value("Name", "Transfer SP");
   info_table[1].add_value("Time[s]", best_time2);
   info_table[1].add_value("Perf[Dof/s]", n_dofs / best_time2);
@@ -360,6 +362,10 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
   double best_time  = 1e10;
   double best_time2 = 1e10;
 
+  solution_dp   = 0.;
+  solution_sp   = 0.;
+  system_rhs_dp = 1.;
+
   for (unsigned int i = 0; i < N; ++i)
     {
       time.restart();
@@ -370,6 +376,8 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
         }
       best_time = std::min(time.wall_time() / n_mv, best_time);
     }
+
+  std::cout << solution_dp.l2_norm() << std::endl;
 
   info_table[2].add_value("Name",
                           std::string(SmootherToString(kernel)) + "_DP");
@@ -406,6 +414,9 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
         }
       best_time2 = std::min(time.wall_time() / n_mv, best_time2);
     }
+
+  std::cout << solution_sp.l2_norm() << std::endl;
+  // solution_sp.print(std::cout);
 
   info_table[3].add_value("Name",
                           std::string(SmootherToString(kernel)) + "_SP");
@@ -466,7 +477,7 @@ LaplaceProblem<dim, fe_degree>::run()
     n_dofs_1d = std::cbrt(CT::MAX_SIZES_);
 
   auto n_refinement =
-    static_cast<unsigned int>(std::log2((n_dofs_1d - 1) / fe_degree));
+    static_cast<unsigned int>(std::log2(n_dofs_1d / (fe_degree + 1)));
   triangulation.refine_global(n_refinement);
 
   setup_system();

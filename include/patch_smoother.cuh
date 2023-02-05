@@ -103,11 +103,13 @@ namespace PSMF
     public:
       AdditionalData(
         const Number            relaxation         = 1.,
+        const bool              use_coloring       = true,
         const unsigned int      n_iterations       = 1,
         const unsigned int      patch_per_block    = 1,
         const GranularityScheme granularity_scheme = GranularityScheme::none);
 
       Number            relaxation;
+      bool              use_coloring;
       unsigned int      n_iterations;
       unsigned int      patch_per_block;
       GranularityScheme granularity_scheme;
@@ -139,12 +141,15 @@ namespace PSMF
     typename LevelVertexPatch::AdditionalData additional_data;
 
     additional_data.relaxation         = additional_data_in.relaxation;
+    additional_data.use_coloring       = additional_data_in.use_coloring;
     additional_data.patch_per_block    = additional_data_in.patch_per_block;
     additional_data.granularity_scheme = additional_data_in.granularity_scheme;
 
-    level_vertex_patch.reinit(A.get_matrix_free(), additional_data);
+    level_vertex_patch.reinit(*(A.get_dof_handler()),
+                              A.get_mg_level(),
+                              additional_data);
 
-    level_vertex_patch.reinit_tensor_product();
+    level_vertex_patch.reinit_tensor_product_smoother();
   }
 
   template <typename MatrixType,
@@ -188,11 +193,9 @@ namespace PSMF
     VectorType       &dst,
     const VectorType &src) const
   {
-    unsigned int level          = A->get_matrix_free()->get_mg_level();
-    unsigned int n_dofs_per_dim = (1 << level) * fe_degree + 1;
-
-    const unsigned int n_patches_1d =
-      (1 << (A->get_matrix_free()->get_mg_level())) - 1;
+    unsigned int       level          = A->get_mg_level();
+    unsigned int       n_dofs_per_dim = (1 << level) * (fe_degree + 2);
+    // const unsigned int n_patches_1d   = (1 << level) - 1;
 
     switch (kernel)
       {
@@ -307,10 +310,12 @@ namespace PSMF
             DoFLayout       dof_layout>
   inline PatchSmoother<MatrixType, dim, fe_degree, kernel, dof_layout>::
     AdditionalData::AdditionalData(const Number            relaxation,
+                                   const bool              use_coloring,
                                    const unsigned int      n_iterations,
                                    const unsigned int      patch_per_block,
                                    const GranularityScheme granularity_scheme)
     : relaxation(relaxation)
+    , use_coloring(use_coloring)
     , n_iterations(n_iterations)
     , patch_per_block(patch_per_block)
     , granularity_scheme(granularity_scheme)

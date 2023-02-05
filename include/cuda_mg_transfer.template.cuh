@@ -1,6 +1,12 @@
 /**
  * @file cuda_mg_transfer.template.cuh
- * Created by Cu Cui on 2022/12/25.
+ * @author Cu Cui (cu.cui@iwr.uni-heidelberg.de)
+ * @brief Implementation of the grid transfer operations.
+ * @version 1.0
+ * @date 2023-02-02
+ *
+ * @copyright Copyright (c) 2023
+ *
  */
 
 #ifndef MG_TRANSFER_TEMPLATE_CUH
@@ -23,7 +29,7 @@ namespace PSMF
   {
   protected:
     static constexpr unsigned int n_coarse = fe_degree + 1;
-    static constexpr unsigned int n_fine   = fe_degree * 2 + 1;
+    static constexpr unsigned int n_fine   = fe_degree * 2 + 2;
     static constexpr unsigned int M        = 2;
 
     Number             *values;
@@ -62,9 +68,9 @@ namespace PSMF
       constexpr unsigned int M3 =
         prol ? (dir > 1 ? M : 1) : ((dir > 1 || dim < 3) ? 1 : M);
 
-      const bool last_thread_x = threadIdx.x == (n_coarse - 1);
-      const bool last_thread_y = threadIdx.y == (n_coarse - 1);
-      const bool last_thread_z = threadIdx.z == (n_coarse - 1);
+      // const bool last_thread_x = 0;
+      // const bool last_thread_y = 0;
+      // const bool last_thread_z = 0;
 
       Number tmp[M1 * M2 * M3];
 
@@ -90,13 +96,13 @@ namespace PSMF
                                     y + n_fine * (z + n_fine * x));
                       // unless we are the last thread in a direction AND we
                       // are updating any value after the first one, go ahead
-                      if (((m1 == 0) || !last_thread_x) &&
-                          ((m2 == 0) || !last_thread_y) &&
-                          ((m3 == 0) || !last_thread_z))
-                        {
-                          tmp[m1 + M1 * (m2 + M2 * m3)] +=
-                            my_shvals[m1 * n_src + i] * values[idx];
-                        }
+                      // if (((m1 == 0) || !last_thread_x) &&
+                      //     ((m2 == 0) || !last_thread_y) &&
+                      //     ((m3 == 0) || !last_thread_z))
+                      {
+                        tmp[m1 + M1 * (m2 + M2 * m3)] +=
+                          my_shvals[m1 * n_src + i] * values[idx];
+                      }
                     }
                 }
             }
@@ -120,50 +126,12 @@ namespace PSMF
                      dir == 1 ? y + n_fine * (x + n_fine * z) :
                                 y + n_fine * (z + n_fine * x));
 
-                  if (((m1 == 0) || !last_thread_x) &&
-                      ((m2 == 0) || !last_thread_y) &&
-                      ((m3 == 0) || !last_thread_z))
-                    {
-                      values[idx] = tmp[m1 + M1 * (m2 + M2 * m3)];
-                    }
-                }
-            }
-        }
-    }
-
-    inline __device__ unsigned int
-    dof1d_to_3(unsigned int x)
-    {
-      return (x > 0) + (x == (fe_degree * 2));
-    }
-    __device__ void
-    weigh_values()
-    {
-      const unsigned int M1 = M;
-      const unsigned int M2 = (dim > 1 ? M : 1);
-      const unsigned int M3 = (dim > 2 ? M : 1);
-
-#pragma unroll
-      for (int m3 = 0; m3 < M3; ++m3)
-        {
-#pragma unroll
-          for (int m2 = 0; m2 < M2; ++m2)
-            {
-#pragma unroll
-              for (int m1 = 0; m1 < M1; ++m1)
-                {
-                  const unsigned int x = (M1 * threadIdx.x + m1);
-                  const unsigned int y = (M2 * threadIdx.y + m2);
-                  const unsigned int z = (M3 * threadIdx.z + m3);
-
-                  const unsigned int idx = x + n_fine * (y + n_fine * z);
-                  const unsigned int weight_idx =
-                    dof1d_to_3(x) + 3 * (dof1d_to_3(y) + 3 * dof1d_to_3(z));
-
-                  if (x < n_fine && y < n_fine && z < n_fine)
-                    {
-                      values[idx] *= weights[weight_idx];
-                    }
+                  // if (((m1 == 0) || !last_thread_x) &&
+                  //     ((m2 == 0) || !last_thread_y) &&
+                  //     ((m3 == 0) || !last_thread_z))
+                  {
+                    values[idx] = tmp[m1 + M1 * (m2 + M2 * m3)];
+                  }
                 }
             }
         }
@@ -200,7 +168,7 @@ namespace PSMF
     run(Number *dst, const Number *src)
     {
       Number my_shvals[M * n_coarse];
-      for (int m = 0; m < (threadIdx.x < fe_degree ? M : 1); ++m)
+      for (int m = 0; m < (threadIdx.x < fe_degree ? M : M); ++m)
         for (int i = 0; i < n_coarse; ++i)
           my_shvals[m * n_coarse + i] =
             shape_values[(threadIdx.x * M + m) + n_fine * i];
@@ -221,8 +189,8 @@ namespace PSMF
             }
         }
 
-      this->weigh_values();
-      __syncthreads();
+      // this->weigh_values();
+      // __syncthreads();
 
       write_fine(dst);
     }
@@ -293,8 +261,8 @@ namespace PSMF
 
       read_fine(src);
       __syncthreads();
-      this->weigh_values();
-      __syncthreads();
+      // this->weigh_values();
+      // __syncthreads();
 
       this->template reduce<RESTRICTION, 0>(my_shvals);
       __syncthreads();
@@ -339,9 +307,36 @@ namespace PSMF
     {
       const unsigned int idx =
         threadIdx.x + n_fine * (threadIdx.y + n_fine * threadIdx.z);
+
+      // printf("[%d %d] ", idx, dof_indices_coarse[idx]);
+
       atomicAdd(&vec[dof_indices_coarse[idx]], values[idx]);
     }
   };
+
+  namespace internal
+  {
+    extern __shared__ double shmem_d[];
+    extern __shared__ float  shmem_f[];
+
+    template <typename Number>
+    __device__ inline Number *
+    get_shared_mem_ptr();
+
+    template <>
+    __device__ inline double *
+    get_shared_mem_ptr()
+    {
+      return shmem_d;
+    }
+
+    template <>
+    __device__ inline float *
+    get_shared_mem_ptr()
+    {
+      return shmem_f;
+    }
+  } // namespace internal
 
   template <int dim, int degree, typename loop_body, typename Number>
   __global__ void
@@ -354,12 +349,11 @@ namespace PSMF
             const unsigned int *child_offset_in_parent,
             const unsigned int  n_child_cell_dofs)
   {
-    const unsigned int n_fine        = Util::pow(degree * 2 + 1, dim);
+    const unsigned int n_fine        = Util::pow(degree * 2 + 2, dim);
     const unsigned int coarse_cell   = blockIdx.x;
     const unsigned int coarse_offset = child_offset_in_parent[coarse_cell];
-    __shared__ Number  values[n_fine];
 
-    loop_body body(values,
+    loop_body body(internal::get_shared_mem_ptr<Number>(),
                    weights + coarse_cell * Util::pow(3, dim),
                    shape_values,
                    dof_indices_coarse + coarse_offset,
@@ -373,13 +367,14 @@ namespace PSMF
   template <int dim, typename Number>
   template <template <int, int, typename> class loop_body, int degree>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::coarse_cell_loop(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::coarse_cell_loop(
     const unsigned int                                             fine_level,
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
     const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
     const
   {
-    // constexpr unsigned int n_fine_dofs_1d = 2*degree+1;
+    constexpr unsigned int n_fine_size =
+      Util::pow(degree * 2 + 2, dim) * sizeof(Number);
     constexpr unsigned int n_coarse_dofs_1d = degree + 1;
 
     const unsigned int n_coarse_cells = n_owned_level_cells[fine_level - 1];
@@ -391,33 +386,39 @@ namespace PSMF
 
     dim3 gd_dim(n_coarse_cells);
 
-    mg_kernel<dim, degree, loop_body<dim, degree, Number>><<<gd_dim, bk_dim>>>(
-      dst.get_values(),
-      src.get_values(),
-      weights_on_refined[fine_level - 1]
-        .get_values(), // only has fine-level entries
-      prolongation_matrix_1d.get_values(),
-      level_dof_indices[fine_level - 1].get_values(),
-      level_dof_indices[fine_level].get_values(),
-      child_offset_in_parent[fine_level - 1].get_values(), // on coarse level
-      n_child_cell_dofs);
+    AssertCuda(cudaFuncSetAttribute(
+      mg_kernel<dim, degree, loop_body<dim, degree, Number>, Number>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      n_fine_size));
+
+    mg_kernel<dim, degree, loop_body<dim, degree, Number>>
+      <<<gd_dim, bk_dim, n_fine_size>>>(
+        dst.get_values(),
+        src.get_values(),
+        weights_on_refined[fine_level - 1]
+          .get_values(), // only has fine-level entries
+        prolongation_matrix_1d.get_values(),
+        level_dof_indices[fine_level - 1].get_values(),
+        level_dof_indices[fine_level].get_values(),
+        child_offset_in_parent[fine_level - 1].get_values(), // on coarse level
+        n_child_cell_dofs);
 
     AssertCudaKernel();
   }
 
   template <int dim, typename Number>
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::MGTransferCUDA()
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::MGTransferCUDA()
     : fe_degree(0)
-    , element_is_continuous(true)
+    , element_is_continuous(false)
     , n_components(0)
     , n_child_cell_dofs(0)
   {}
 
   template <int dim, typename Number>
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::MGTransferCUDA(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::MGTransferCUDA(
     const MGConstrainedDoFs &mg_c)
     : fe_degree(0)
-    , element_is_continuous(true)
+    , element_is_continuous(false)
     , n_components(0)
     , n_child_cell_dofs(0)
   {
@@ -425,12 +426,12 @@ namespace PSMF
   }
 
   template <int dim, typename Number>
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::~MGTransferCUDA()
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::~MGTransferCUDA()
   {}
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::initialize_constraints(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::initialize_constraints(
     const MGConstrainedDoFs &mg_c)
   {
     this->mg_constrained_dofs = &mg_c;
@@ -438,7 +439,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::clear()
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::clear()
   {
     fe_degree             = 0;
     element_is_continuous = false;
@@ -452,7 +453,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::build(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::build(
     const DoFHandler<dim, dim> &mg_dof,
     const std::vector<std::shared_ptr<const Utilities::MPI::Partitioner>>
       &external_partitioners)
@@ -536,7 +537,9 @@ namespace PSMF
           {
             const unsigned int shift =
               dealii::internal::MGTransfer::compute_shift_within_children<dim>(
-                parent_child_connect[l][c].second, fe_degree, fe_degree);
+                parent_child_connect[l][c].second,
+                fe_degree + 1 - element_is_continuous,
+                fe_degree);
             offsets[c] =
               parent_child_connect[l][c].first * n_child_cell_dofs + shift;
           }
@@ -560,7 +563,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::prolongate(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::prolongate(
     const unsigned int                                             to_level,
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
     const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
@@ -572,7 +575,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::prolongate_and_add(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::prolongate_and_add(
     const unsigned int                                             to_level,
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
     const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
@@ -602,19 +605,9 @@ namespace PSMF
     else if (fe_degree == 8)
       coarse_cell_loop<MGProlongateHelper, 8>(to_level, dst, src_with_bc);
     else if (fe_degree == 9)
-      {
-        constexpr unsigned int degree = dim == 2 ? 9 : 8;
-        coarse_cell_loop<MGProlongateHelper, degree>(to_level,
-                                                     dst,
-                                                     src_with_bc);
-      }
+      coarse_cell_loop<MGProlongateHelper, 9>(to_level, dst, src_with_bc);
     else if (fe_degree == 10)
-      {
-        constexpr unsigned int degree = dim == 2 ? 10 : 8;
-        coarse_cell_loop<MGProlongateHelper, degree>(to_level,
-                                                     dst,
-                                                     src_with_bc);
-      }
+      coarse_cell_loop<MGProlongateHelper, 10>(to_level, dst, src_with_bc);
     else
       AssertThrow(false,
                   ExcNotImplemented("Only degrees 1 through 10 implemented."));
@@ -622,7 +615,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::restrict_and_add(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::restrict_and_add(
     const unsigned int                                             from_level,
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
     const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
@@ -652,15 +645,9 @@ namespace PSMF
     else if (fe_degree == 8)
       coarse_cell_loop<MGRestrictHelper, 8>(from_level, increment, src);
     else if (fe_degree == 9)
-      {
-        constexpr unsigned int degree = dim == 2 ? 9 : 8;
-        coarse_cell_loop<MGRestrictHelper, degree>(from_level, increment, src);
-      }
+      coarse_cell_loop<MGRestrictHelper, 9>(from_level, increment, src);
     else if (fe_degree == 10)
-      {
-        constexpr unsigned int degree = dim == 2 ? 10 : 8;
-        coarse_cell_loop<MGRestrictHelper, degree>(from_level, increment, src);
-      }
+      coarse_cell_loop<MGRestrictHelper, 10>(from_level, increment, src);
     else
       AssertThrow(false,
                   ExcNotImplemented("Only degrees 1 through 10 implemented."));
@@ -686,7 +673,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::set_mg_constrained_dofs(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::set_mg_constrained_dofs(
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &vec,
     unsigned int                                                   level,
     Number                                                         val) const
@@ -708,7 +695,7 @@ namespace PSMF
   template <int dim, typename Number>
   template <int spacedim, typename Number2>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::copy_to_mg(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::copy_to_mg(
     const DoFHandler<dim, spacedim> &mg_dof,
     MGLevelObject<LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
                                                                          &dst,
@@ -753,7 +740,7 @@ namespace PSMF
   template <int dim, typename Number>
   template <int spacedim, typename Number2>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::copy_from_mg(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::copy_from_mg(
     const DoFHandler<dim, spacedim>                                &mg_dof,
     LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &dst,
     const MGLevelObject<
@@ -787,7 +774,7 @@ namespace PSMF
   template <int dim, typename Number>
   template <int spacedim, typename Number2>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::copy_from_mg_add(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::copy_from_mg_add(
     const DoFHandler<dim, spacedim>                                &mg_dof,
     LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &dst,
     const MGLevelObject<
@@ -822,7 +809,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   std::size_t
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::memory_consumption() const
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::memory_consumption() const
   {
     std::size_t memory = 0;
     memory += MemoryConsumption::memory_consumption(copy_indices);
@@ -838,7 +825,7 @@ namespace PSMF
   template <int dim, typename Number>
   template <typename VectorType, typename VectorType2>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::copy_to_device(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::copy_to_device(
     VectorType        &device,
     const VectorType2 &host)
   {
@@ -852,7 +839,7 @@ namespace PSMF
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number, DoFLayout::Q>::fill_copy_indices(
+  MGTransferCUDA<dim, Number, DoFLayout::DGQ>::fill_copy_indices(
     const DoFHandler<dim> &mg_dof)
   {
     std::vector<
