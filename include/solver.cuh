@@ -485,7 +485,7 @@ namespace PSMF
         const double convergence_rate =
           1. / n_iter * std::log10(residual_0 / residual_n);
 
-        const auto n_step = std::log10(CT::REDUCE_) * std::log10(rho);
+        const auto n_step = -10 * std::log10(rho);
 
         size_t free_mem, total_mem;
         AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
@@ -642,7 +642,7 @@ namespace PSMF
     void
     do_vcycle()
     {
-      v_cycle(maxlevel, true);
+      v_cycle(maxlevel, 1);
     }
 
     double
@@ -1192,7 +1192,7 @@ namespace PSMF
         const double convergence_rate =
           1. / n_iter * std::log10(residual_0 / residual_n);
 
-        const auto n_step = std::log10(CT::REDUCE_) * std::log10(rho);
+        const auto n_step = -10 * std::log10(rho);
 
         size_t free_mem, total_mem;
         AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
