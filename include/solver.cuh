@@ -166,7 +166,9 @@ namespace PSMF
             int       fe_degree,
             DoFLayout dof_layout,
             typename Number,
-            SmootherVariant smooth_kernel,
+            LaplaceVariant  lapalace_kernel,
+            LaplaceVariant  smooth_vmult,
+            SmootherVariant smooth_inverse,
             typename Number2>
   class MultigridSolver
   {
@@ -175,22 +177,24 @@ namespace PSMF
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>;
     using VectorType2 =
       LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA>;
-    using MatrixType =
-      LaplaceOperator<dim, fe_degree, Number, smooth_kernel, dof_layout>;
+    using MatrixType = LaplaceOperator<dim, fe_degree, Number, lapalace_kernel>;
     using MatrixType2 =
-      LaplaceOperator<dim, fe_degree, Number2, smooth_kernel, dof_layout>;
+      LaplaceOperator<dim, fe_degree, Number2, lapalace_kernel>;
+    using SmootherType =
+      PatchSmoother<MatrixType2, dim, fe_degree, smooth_vmult, smooth_inverse>;
+    using MatrixFreeType  = LevelVertexPatch<dim, fe_degree, Number>;
+    using MatrixFreeType2 = LevelVertexPatch<dim, fe_degree, Number2>;
 
-    MultigridSolver(const DoFHandler<dim>                          &dof_handler,
-                    const MGLevelObject<MatrixType>                &matrix_dp,
-                    const MGLevelObject<MatrixType2>               &matrix,
-                    const MGTransferCUDA<dim, Number2, dof_layout> &transfer,
-                    const Function<dim, Number>        &boundary_values,
-                    const Function<dim, Number>        &right_hand_side,
-                    std::shared_ptr<ConditionalOStream> pcout,
-                    const unsigned int                  n_cycles = 1)
+    MultigridSolver(
+      const DoFHandler<dim>                                 &dof_handler,
+      const MGLevelObject<std::shared_ptr<MatrixFreeType>>  &mfdata_dp,
+      const MGLevelObject<std::shared_ptr<MatrixFreeType2>> &mfdata,
+      const MGTransferCUDA<dim, Number2, dof_layout>        &transfer,
+      const Function<dim, Number>                           &boundary_values,
+      const Function<dim, Number>                           &right_hand_side,
+      std::shared_ptr<ConditionalOStream>                    pcout,
+      const unsigned int                                     n_cycles = 1)
       : dof_handler(&dof_handler)
-      , matrix_dp(&matrix_dp)
-      , matrix(&matrix)
       , transfer(&transfer)
       , minlevel(1)
       , maxlevel(dof_handler.get_triangulation().n_global_levels() - 1)
@@ -207,24 +211,25 @@ namespace PSMF
     {
       AssertDimension(fe_degree, dof_handler.get_fe().degree);
 
+      matrix_dp.resize(minlevel, maxlevel);
+      matrix.resize(minlevel, maxlevel);
+
       for (unsigned int level = minlevel; level <= maxlevel; ++level)
         {
+          matrix_dp[level].initialize(mfdata_dp[level], dof_handler, level);
+          matrix[level].initialize(mfdata[level], dof_handler, level);
+
           matrix[level].initialize_dof_vector(defect[level]);
           t[level].reinit(defect[level]);
           solution_update[level].reinit(defect[level]);
 
-          // if (level == maxlevel)
-          {
-            matrix_dp[level].initialize_dof_vector(solution[level]);
-            rhs[level].reinit(solution[level]);
-            residual[level].reinit(solution[level]);
-          }
+          if (level == maxlevel)
+            {
+              matrix_dp[level].initialize_dof_vector(solution[level]);
+              rhs[level].reinit(solution[level]);
+              residual[level].reinit(solution[level]);
+            }
         }
-
-      // Timer time;
-      cudaEvent_t start, stop;
-      AssertCuda(cudaEventCreate(&start));
-      AssertCuda(cudaEventCreate(&stop));
 
       // set up a mapping for the geometry representation
       MappingQ1<dim> mapping;
@@ -273,50 +278,34 @@ namespace PSMF
                     }
           }
 
-      MGTransferCUDA<dim, Number, dof_layout> mg_transfer_no_boundary;
-      mg_transfer_no_boundary.build(dof_handler);
 
-      for (int level = maxlevel; level >= minlevel; --level)
-        {
-          // evaluate the right hand side in the equation, including the
-          // residual from the inhomogeneous boundary conditions
-          set_inhomogeneous_bc<false>(level);
-          rhs[level] = 0.;
-          if (level == maxlevel)
-            matrix_dp[level].compute_residual(rhs[level],
-                                              solution[level],
-                                              right_hand_side,
-                                              boundary_values,
-                                              level);
-          else
-            mg_transfer_no_boundary.restrict_and_add(level + 1,
-                                                     rhs[level],
-                                                     rhs[level + 1]);
-        }
-
-      float gpu_time = 0.0f;
-
-      cudaEventRecord(start);
       {
-        typename SmootherType::AdditionalData additional_data;
-        additional_data.relaxation   = 1.;
-        additional_data.use_coloring = true;
-        additional_data.patch_per_block =
-          fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
-        additional_data.granularity_scheme = CT::GRANULARITY_;
+        // evaluate the right hand side in the equation, including the
+        // residual from the inhomogeneous boundary conditions
+        set_inhomogeneous_bc<false>(maxlevel);
+        rhs[maxlevel] = 0.;
+        if (CT::SETS_ == "error_analysis")
+          matrix_dp[maxlevel].compute_residual(rhs[maxlevel],
+                                               solution[maxlevel],
+                                               right_hand_side,
+                                               boundary_values,
+                                               maxlevel);
+        else
+          rhs[maxlevel] = 1.;
+      }
 
-        mg_smoother.initialize(matrix, additional_data);
+
+      {
+        MGLevelObject<typename SmootherType::AdditionalData> smoother_data;
+        smoother_data.resize(minlevel, maxlevel);
+        for (unsigned int level = minlevel; level <= maxlevel; ++level)
+          {
+            smoother_data[level].data = mfdata[level];
+          }
+
+        mg_smoother.initialize(matrix, smoother_data);
         mg_coarse.initialize(mg_smoother);
       }
-      cudaEventRecord(stop);
-      cudaDeviceSynchronize();
-      AssertCuda(cudaEventElapsedTime(&gpu_time, start, stop));
-
-      *pcout << "Smoother setup time:    " << gpu_time / 1e3 << "s"
-             << std::endl;
-
-      AssertCuda(cudaEventDestroy(start));
-      AssertCuda(cudaEventDestroy(stop));
     }
 
     // Print a summary of computation times on the various levels
@@ -456,119 +445,76 @@ namespace PSMF
     }
 
 
+    // Solve with the conjugate gradient method preconditioned by the V-cycle
+    // (invoking this->vmult) and return the number of iterations and the
+    // reduction rate per GMRES iteration
     std::vector<SolverData>
     solve()
     {
       *pcout << "Solving...\n";
 
-      std::string solver_name = "";
+      std::string solver_name = "GMRES";
 
-      auto solver = [&](auto kernel) {
-        Timer              time;
-        const unsigned int N         = 10;
-        double             best_time = 1e10;
-        for (unsigned int i = 0; i < N; ++i)
-          {
-            time.reset();
-            time.start();
-            kernel(this);
-            best_time = std::min(time.wall_time(), best_time);
-          }
+      ReductionControl solver_control(CT::MAX_STEPS_, 1e-15, CT::REDUCE_);
+      solver_control.enable_history_data();
+      solver_control.log_history(true);
 
-        print_wall_times(N);
+      SolverGMRES<VectorType> solver(solver_control);
 
-        const auto [n_iter, residual_n, residual_0] = kernel(this);
-
-        // *** average reduction: r_n = rho^n * r_0
-        const double rho =
-          std::pow(residual_n / residual_0, static_cast<double>(1. / n_iter));
-        const double convergence_rate =
-          1. / n_iter * std::log10(residual_0 / residual_n);
-
-        const auto n_step = -10 * std::log10(rho);
-
-        size_t free_mem, total_mem;
-        AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
-
-        int mem_usage = (total_mem - free_mem) / 1024 / 1024;
-
-        SolverData data;
-        data.solver_name      = solver_name;
-        data.n_iteration      = n_iter;
-        data.n_step           = n_step;
-        data.residual         = residual_n;
-        data.reduction_rate   = rho;
-        data.convergence_rate = convergence_rate;
-        data.timing           = best_time;
-        data.mem_usage        = mem_usage;
-        solver_data.push_back(data);
-      };
-
-      for (unsigned int s = 0; s < 1; ++s)
+      Timer              time;
+      const unsigned int N         = 10;
+      double             best_time = 1e10;
+      for (unsigned int i = 0; i < N; ++i)
         {
-          switch (s)
-            {
-              case 0:
-                {
-                  auto kernel = std::mem_fn(&MultigridSolver::solve_gmres);
-                  solver_name = "GMRES";
-                  solver(kernel);
-                  break;
-                }
-              default:
-                AssertThrow(false, ExcMessage("Invalid Solver Variant."));
-            }
+          time.reset();
+          time.start();
+
+          solution[maxlevel] = 0;
+          solver.solve(matrix_dp[maxlevel],
+                       solution[maxlevel],
+                       rhs[maxlevel],
+                       *this);
+
+          best_time = std::min(time.wall_time(), best_time);
         }
 
-      return solver_data;
-    }
+      print_wall_times(N);
 
-    /**
-     * compute the average reduction rho over n iterations and the
-     * fractional number of iterations to achieve the requested
-     * reduction (relative stopping criterion)
-     */
-    std::pair<double, double>
-    compute_fractional_steps(const ReductionControl &solver_control)
-    {
-      const double residual_0 = solver_control.initial_value();
-      const double residual_n = solver_control.last_value();
-      const int    n = solver_control.last_step(); // number of iterations
-      const double reduction = solver_control.reduction(); // relative tolerance
+      auto n_iter     = solver_control.last_step();
+      auto residual_0 = solver_control.initial_value();
+      auto residual_n = solver_control.last_value();
+      auto reduction  = solver_control.reduction();
 
       // *** average reduction: r_n = rho^n * r_0
       const double rho =
-        std::pow(residual_n / residual_0, static_cast<double>(1. / n));
+        std::pow(residual_n / residual_0, static_cast<double>(1. / n_iter));
+      const double convergence_rate =
+        1. / n_iter * std::log10(residual_0 / residual_n);
 
-      /**
-       * since r_n <= reduction * r_0 we can compute the fractional
-       * number of iterations n_frac that is sufficient to achieve the
-       * desired reduction:
-       *    rho^n_frac = reduction   <=>   n_frac = log(reduction)/log(rho)
-       */
-      const double n_frac = std::log(reduction) / std::log(rho);
+      const auto n_step = -10 * std::log10(rho);
+      const auto n_frac = std::log(reduction) / std::log(rho);
 
-      return std::make_pair(n_frac, rho);
-    }
+      size_t free_mem, total_mem;
+      AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
 
-    // Solve with the conjugate gradient method preconditioned by the V-cycle
-    // (invoking this->vmult) and return the number of iterations and the
-    // reduction rate per CG iteration
-    std::tuple<int, double, double>
-    solve_gmres()
-    {
-      ReductionControl solver_control(CT::MAX_STEPS_, 1e-15, CT::REDUCE_);
+      int mem_usage = (total_mem - free_mem) / 1024 / 1024;
 
-      SolverGMRES<VectorType> solver(solver_control);
-      solution[maxlevel] = 0;
-      solver.solve((*matrix_dp)[maxlevel],
-                   solution[maxlevel],
-                   rhs[maxlevel],
-                   *this);
+      SolverData data;
+      data.solver_name      = solver_name;
+      data.n_iteration      = n_iter;
+      data.n_step           = n_frac;
+      data.residual         = residual_n;
+      data.reduction_rate   = rho;
+      data.convergence_rate = convergence_rate;
+      data.timing           = best_time;
+      data.mem_usage        = mem_usage;
+      solver_data.push_back(data);
 
-      return std::make_tuple(solver_control.last_step(),
-                             solver_control.last_value(),
-                             solver_control.initial_value());
+      auto history_data = solver_control.get_history_data();
+      for (auto i = 1U; i < n_iter + 1; ++i)
+        *pcout << "step " << i << ": " << history_data[i] / residual_0 << "\n";
+
+      return solver_data;
     }
 
     // Implement the vmult() function needed by the preconditioner interface
@@ -617,7 +563,7 @@ namespace PSMF
     void
     do_matvec()
     {
-      (*matrix_dp)[maxlevel].vmult(residual[maxlevel], solution[maxlevel]);
+      matrix_dp[maxlevel].vmult(residual[maxlevel], solution[maxlevel]);
       cudaDeviceSynchronize();
     }
 
@@ -625,7 +571,7 @@ namespace PSMF
     void
     do_matvec_smoother()
     {
-      (*matrix)[maxlevel].vmult(solution_update[maxlevel], defect[maxlevel]);
+      matrix[maxlevel].vmult(solution_update[maxlevel], defect[maxlevel]);
       cudaDeviceSynchronize();
     }
 
@@ -643,48 +589,6 @@ namespace PSMF
     do_vcycle()
     {
       v_cycle(maxlevel, 1);
-    }
-
-    double
-    memory_consumption_GMRES()
-    {
-      double result = sizeof(*this);
-      result += solution.memory_consumption();
-      result += rhs.memory_consumption();
-      result += transfer.memory_consumption();
-      result += defect.memory_consumption();
-      result += t.memory_consumption();
-      result += solution_update.memory_consumption();
-      result += matrix.memory_consumption();
-      result += matrix_dp[maxlevel].memory_consumption();
-      result += smoother_mem;
-
-      double scale = 1024 * 1024;
-      result       = result / scale;
-
-
-      *pcout << "GMRES GPU Memory Usage [MB]" << std::endl
-             << "System matrix: "
-             << matrix_dp[maxlevel].memory_consumption() / scale << std::endl
-             << "Level matrix:  " << matrix.memory_consumption() / scale
-             << std::endl
-             << "Solution:      " << solution.memory_consumption() / scale
-             << std::endl
-             << "System rhs:    " << rhs.memory_consumption() / scale
-             << std::endl
-             << "MG transfer:   " << transfer.memory_consumption() / scale
-             << std::endl
-             << "MG smoother:   " << smoother_mem / scale << std::endl
-             << "MG Auxiliary:  "
-             << (defect.memory_consumption() +
-                 solution_update.memory_consumption() +
-                 t.memory_consumption()) /
-                  scale
-             << std::endl
-             << "Total:         " << result << "\n\n";
-
-
-      return result;
     }
 
   private:
@@ -818,7 +722,7 @@ namespace PSMF
           timings[level][5] += gpu_time;
 
           cudaEventRecord(start);
-          (*matrix)[level].vmult(t[level], solution_update[level]);
+          matrix[level].vmult(t[level], solution_update[level]);
           cudaEventRecord(stop);
           cudaDeviceSynchronize();
           AssertCuda(cudaEventElapsedTime(&gpu_time, start, stop));
@@ -867,12 +771,12 @@ namespace PSMF
 
     const SmartPointer<const DoFHandler<dim>> dof_handler;
 
-    const SmartPointer<const MGLevelObject<MatrixType>>  matrix_dp;
-    const SmartPointer<const MGLevelObject<MatrixType2>> matrix;
-
     const SmartPointer<const MGTransferCUDA<dim, Number2, dof_layout>> transfer;
 
     std::vector<std::map<unsigned int, Number>> inhomogeneous_bc;
+
+    MGLevelObject<MatrixType>  matrix_dp;
+    MGLevelObject<MatrixType2> matrix;
 
     /**
      * Lowest level of cells.
@@ -895,7 +799,8 @@ namespace PSMF
     mutable MGLevelObject<VectorType> rhs;
 
     /**
-     * Residual vector before it is passed down into float through the v-cycle
+     * Residual vector before it is passed down into float through the
+     * v-cycle
      */
     mutable MGLevelObject<VectorType> residual;
 
@@ -915,12 +820,6 @@ namespace PSMF
      */
     mutable MGLevelObject<VectorType2> solution_update;
 
-    /**
-     * The smoother object
-     */
-    using SmootherType =
-      PatchSmoother<MatrixType2, dim, fe_degree, smooth_kernel, dof_layout>;
-
     // MGLevelObject<SmootherType> smooth;
 
     MGSmootherPrecondition<MatrixType2, SmootherType, VectorType2> mg_smoother;
@@ -929,6 +828,7 @@ namespace PSMF
      * The coarse solver
      */
     MGCoarseGridApplySmoother<VectorType2> mg_coarse;
+
     // MGCoarseFromSmoother<VectorType2, MGLevelObject<SmootherType>> coarse;
 
     /**
@@ -960,30 +860,36 @@ namespace PSMF
             int       fe_degree,
             DoFLayout dof_layout,
             typename Number,
-            SmootherVariant smooth_kernel>
+            LaplaceVariant  lapalace_kernel,
+            LaplaceVariant  smooth_vmult,
+            SmootherVariant smooth_inverse>
   class MultigridSolver<dim,
                         fe_degree,
                         dof_layout,
                         Number,
-                        smooth_kernel,
+                        lapalace_kernel,
+                        smooth_vmult,
+                        smooth_inverse,
                         Number>
   {
   public:
     using VectorType =
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>;
-    using MatrixType =
-      LaplaceOperator<dim, fe_degree, Number, smooth_kernel, dof_layout>;
+    using MatrixType = LaplaceOperator<dim, fe_degree, Number, lapalace_kernel>;
+    using SmootherType =
+      PatchSmoother<MatrixType, dim, fe_degree, smooth_vmult, smooth_inverse>;
+    using MatrixFreeType = LevelVertexPatch<dim, fe_degree, Number>;
 
-    MultigridSolver(const DoFHandler<dim>           &dof_handler,
-                    const MGLevelObject<MatrixType> &matrix_dp,
-                    const MGLevelObject<MatrixType> &,
-                    const MGTransferCUDA<dim, Number, dof_layout> &transfer_dp,
-                    const Function<dim, Number>        &boundary_values,
-                    const Function<dim, Number>        &right_hand_side,
-                    std::shared_ptr<ConditionalOStream> pcout,
-                    const unsigned int                  n_cycles = 1)
+    MultigridSolver(
+      const DoFHandler<dim>                                &dof_handler,
+      const MGLevelObject<std::shared_ptr<MatrixFreeType>> &mfdata_dp,
+      const MGLevelObject<std::shared_ptr<MatrixFreeType>> &,
+      const MGTransferCUDA<dim, Number, dof_layout> &transfer_dp,
+      const Function<dim, Number>                   &boundary_values,
+      const Function<dim, Number>                   &right_hand_side,
+      std::shared_ptr<ConditionalOStream>            pcout,
+      const unsigned int                             n_cycles = 1)
       : dof_handler(&dof_handler)
-      , matrix(&matrix_dp)
       , transfer(&transfer_dp)
       , minlevel(1)
       , maxlevel(dof_handler.get_triangulation().n_global_levels() - 1)
@@ -997,9 +903,13 @@ namespace PSMF
     {
       AssertDimension(fe_degree, dof_handler.get_fe().degree);
 
+      matrix.resize(minlevel, maxlevel);
+
       for (unsigned int level = minlevel; level <= maxlevel; ++level)
         {
-          matrix_dp[level].initialize_dof_vector(solution[level]);
+          matrix[level].initialize(mfdata_dp[level], dof_handler, level);
+
+          matrix[level].initialize_dof_vector(solution[level]);
           defect[level] = solution[level];
           rhs[level]    = solution[level];
           t[level]      = solution[level];
@@ -1011,62 +921,60 @@ namespace PSMF
       // interpolate the inhomogeneous boundary conditions
       inhomogeneous_bc.clear();
       inhomogeneous_bc.resize(maxlevel + 1);
-      // if (CT::SETS_ == "error_analysis")
-      //   for (unsigned int level = minlevel; level <= maxlevel; ++level)
-      //     {
-      //       Quadrature<dim - 1> face_quad(
-      //         dof_handler.get_fe().get_unit_face_support_points());
-      //       FEFaceValues<dim>                    fe_values(mapping,
-      //                                   dof_handler.get_fe(),
-      //                                   face_quad,
-      //                                   update_quadrature_points);
-      //       std::vector<types::global_dof_index> face_dof_indices(
-      //         dof_handler.get_fe().dofs_per_face);
+      if (CT::SETS_ == "error_analysis")
+        for (unsigned int level = minlevel; level <= maxlevel; ++level)
+          {
+            Quadrature<dim - 1> face_quad(
+              dof_handler.get_fe().get_unit_face_support_points());
+            FEFaceValues<dim>                    fe_values(mapping,
+                                        dof_handler.get_fe(),
+                                        face_quad,
+                                        update_quadrature_points);
+            std::vector<types::global_dof_index> face_dof_indices(
+              dof_handler.get_fe().dofs_per_face);
 
-      //       typename DoFHandler<dim>::cell_iterator cell =
-      //                                                 dof_handler.begin(level),
-      //                                               endc =
-      //                                                 dof_handler.end(level);
-      //       for (; cell != endc; ++cell)
-      //         if (cell->level_subdomain_id() !=
-      //             numbers::artificial_subdomain_id)
-      //           for (unsigned int face_no = 0;
-      //                face_no < GeometryInfo<dim>::faces_per_cell;
-      //                ++face_no)
-      //             if (cell->at_boundary(face_no))
-      //               {
-      //                 const typename DoFHandler<dim>::face_iterator face =
-      //                   cell->face(face_no);
-      //                 face->get_mg_dof_indices(level, face_dof_indices);
-      //                 fe_values.reinit(cell, face_no);
-      //                 for (unsigned int i = 0; i < face_dof_indices.size();
-      //                 ++i)
-      //                   if
-      //                   (dof_handler.locally_owned_mg_dofs(level).is_element(
-      //                         face_dof_indices[i]))
-      //                     {
-      //                       const double value = analytic_solution.value(
-      //                         fe_values.quadrature_point(i));
-      //                       if (value != 0.0)
-      //                         inhomogeneous_bc[level][face_dof_indices[i]] =
-      //                           value;
-      //                     }
-      //               }
-      //     }
+            typename DoFHandler<dim>::cell_iterator cell =
+                                                      dof_handler.begin(level),
+                                                    endc =
+                                                      dof_handler.end(level);
+            for (; cell != endc; ++cell)
+              if (cell->level_subdomain_id() !=
+                  numbers::artificial_subdomain_id)
+                for (unsigned int face_no = 0;
+                     face_no < GeometryInfo<dim>::faces_per_cell;
+                     ++face_no)
+                  if (cell->at_boundary(face_no))
+                    {
+                      const typename DoFHandler<dim>::face_iterator face =
+                        cell->face(face_no);
+                      face->get_mg_dof_indices(level, face_dof_indices);
+                      fe_values.reinit(cell, face_no);
+                      for (unsigned int i = 0; i < face_dof_indices.size(); ++i)
+                        if (dof_handler.locally_owned_mg_dofs(level).is_element(
+                              face_dof_indices[i]))
+                          {
+                            const double value = analytic_solution.value(
+                              fe_values.quadrature_point(i));
+                            if (value != 0.0)
+                              inhomogeneous_bc[level][face_dof_indices[i]] =
+                                value;
+                          }
+                    }
+          }
 
       for (int level = maxlevel; level >= minlevel; --level)
         {
           // evaluate the right hand side in the equation, including the
           // residual from the inhomogeneous boundary conditions
-          set_inhomogeneous_bc<false>(level);
+          // set_inhomogeneous_bc<false>(level);
           rhs[level] = 0.;
           if (level == maxlevel)
             if (CT::SETS_ == "error_analysis")
-              matrix_dp[level].compute_residual(rhs[level],
-                                                solution[level],
-                                                right_hand_side,
-                                                boundary_values,
-                                                level);
+              matrix[level].compute_residual(rhs[level],
+                                             solution[level],
+                                             right_hand_side,
+                                             boundary_values,
+                                             level);
             else
               rhs[level] = 1.;
           else
@@ -1074,23 +982,15 @@ namespace PSMF
         }
 
       {
-        Timer time;
+        MGLevelObject<typename SmootherType::AdditionalData> smoother_data;
+        smoother_data.resize(minlevel, maxlevel);
+        for (unsigned int level = minlevel; level <= maxlevel; ++level)
+          {
+            smoother_data[level].data = mfdata_dp[level];
+          }
 
-        typename SmootherType::AdditionalData additional_data;
-        additional_data.relaxation   = 1.;
-        additional_data.use_coloring = true;
-        additional_data.patch_per_block =
-          fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
-        additional_data.granularity_scheme = CT::GRANULARITY_;
-
-        // for (unsigned int level = minlevel; level <= maxlevel; ++level)
-        //   smooth[level].initialize(matrix_dp[level], additional_data);
-
-        mg_smoother.initialize(matrix_dp, additional_data);
+        mg_smoother.initialize(matrix, smoother_data);
         mg_coarse.initialize(mg_smoother);
-
-        *pcout << "Smoother setup time:    " << time.wall_time() << "s"
-               << std::endl;
       }
     }
 
@@ -1166,7 +1066,7 @@ namespace PSMF
     }
 
     std::vector<SolverData>
-    solve()
+    solve_old()
     {
       *pcout << "Solving...\n";
 
@@ -1193,6 +1093,7 @@ namespace PSMF
           1. / n_iter * std::log10(residual_0 / residual_n);
 
         const auto n_step = -10 * std::log10(rho);
+        const auto n_frac = std::log(CT::REDUCE_) / std::log(rho);
 
         size_t free_mem, total_mem;
         AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
@@ -1202,7 +1103,7 @@ namespace PSMF
         SolverData data;
         data.solver_name      = solver_name;
         data.n_iteration      = n_iter;
-        data.n_step           = n_step;
+        data.n_step           = n_frac;
         data.residual         = residual_n;
         data.reduction_rate   = rho;
         data.convergence_rate = convergence_rate;
@@ -1224,10 +1125,9 @@ namespace PSMF
               //   }
               // case 1:
               //   {
-              //     auto kernel = std::mem_fn(&MultigridSolver::solve_vcycle);
-              //     solver_name = "V-cycles";
-              //     solver(kernel);
-              //     break;
+              //     auto kernel =
+              //     std::mem_fn(&MultigridSolver::solve_vcycle); solver_name
+              //     = "V-cycles"; solver(kernel); break;
               //   }
               case 0:
                 {
@@ -1258,21 +1158,71 @@ namespace PSMF
     // Solve with the conjugate gradient method preconditioned by the V-cycle
     // (invoking this->vmult) and return the number of iterations and the
     // reduction rate per GMRES iteration
-    std::tuple<int, double, double>
-    solve_gmres()
+    std::vector<SolverData>
+    solve()
     {
+      *pcout << "Solving...\n";
+
+      std::string solver_name = "GMRES";
+
       ReductionControl solver_control(CT::MAX_STEPS_, 1e-15, CT::REDUCE_);
+      solver_control.enable_history_data();
+      solver_control.log_history(true);
 
       SolverGMRES<VectorType> solver(solver_control);
-      solution[maxlevel] = 0;
-      solver.solve((*matrix)[maxlevel],
-                   solution[maxlevel],
-                   rhs[maxlevel],
-                   *this);
 
-      return std::make_tuple(solver_control.last_step(),
-                             solver_control.last_value(),
-                             solver_control.initial_value());
+      Timer              time;
+      const unsigned int N         = 10;
+      double             best_time = 1e10;
+      for (unsigned int i = 0; i < N; ++i)
+        {
+          time.reset();
+          time.start();
+
+          solution[maxlevel] = 0;
+          solver.solve(matrix[maxlevel],
+                       solution[maxlevel],
+                       rhs[maxlevel],
+                       *this);
+
+          best_time = std::min(time.wall_time(), best_time);
+        }
+
+      auto n_iter     = solver_control.last_step();
+      auto residual_0 = solver_control.initial_value();
+      auto residual_n = solver_control.last_value();
+      auto reduction  = solver_control.reduction();
+
+      // *** average reduction: r_n = rho^n * r_0
+      const double rho =
+        std::pow(residual_n / residual_0, static_cast<double>(1. / n_iter));
+      const double convergence_rate =
+        1. / n_iter * std::log10(residual_0 / residual_n);
+
+      const auto n_step = -10 * std::log10(rho);
+      const auto n_frac = std::log(reduction) / std::log(rho);
+
+      size_t free_mem, total_mem;
+      AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
+
+      int mem_usage = (total_mem - free_mem) / 1024 / 1024;
+
+      SolverData data;
+      data.solver_name      = solver_name;
+      data.n_iteration      = n_iter;
+      data.n_step           = n_frac;
+      data.residual         = residual_n;
+      data.reduction_rate   = rho;
+      data.convergence_rate = convergence_rate;
+      data.timing           = best_time;
+      data.mem_usage        = mem_usage;
+      solver_data.push_back(data);
+
+      auto history_data = solver_control.get_history_data();
+      for (auto i = 1U; i < n_iter + 1; ++i)
+        *pcout << "step " << i << ": " << history_data[i] / residual_0 << "\n";
+
+      return solver_data;
     }
 
     // Solve with the FMG cycle and return the reduction rate of a V-cycle
@@ -1306,7 +1256,7 @@ namespace PSMF
 
           // set_inhomogeneous_bc<true>(maxlevel);
 
-          (*matrix)[maxlevel].vmult(t[maxlevel], solution[maxlevel]);
+          matrix[maxlevel].vmult(t[maxlevel], solution[maxlevel]);
           t[maxlevel].sadd(-1., 1., rhs[maxlevel]);
           res_norm = t[maxlevel].l2_norm();
 
@@ -1335,7 +1285,7 @@ namespace PSMF
 
           // set_inhomogeneous_bc<true>(maxlevel);
 
-          (*matrix)[maxlevel].vmult(t[maxlevel], solution[maxlevel]);
+          matrix[maxlevel].vmult(t[maxlevel], solution[maxlevel]);
           t[maxlevel].sadd(-1., 1., rhs[maxlevel]);
           res_norm = t[maxlevel].l2_norm();
 
@@ -1384,7 +1334,7 @@ namespace PSMF
     void
     do_matvec()
     {
-      (*matrix)[maxlevel].vmult(solution[maxlevel], rhs[maxlevel]);
+      matrix[maxlevel].vmult(solution[maxlevel], rhs[maxlevel]);
       cudaDeviceSynchronize();
     }
 
@@ -1404,7 +1354,7 @@ namespace PSMF
       else
         (mg_smoother).smooth(level, solution[level], defect[level]);
 
-      (*matrix)[level].vmult(t[level], solution[level]);
+      matrix[level].vmult(t[level], solution[level]);
 
       t[level].sadd(-1.0, 1.0, defect[level]);
 
@@ -1488,9 +1438,10 @@ namespace PSMF
     }
 
 
-    const SmartPointer<const DoFHandler<dim>>           dof_handler;
-    const SmartPointer<const MGLevelObject<MatrixType>> matrix;
+    const SmartPointer<const DoFHandler<dim>> dof_handler;
     const SmartPointer<const MGTransferCUDA<dim, Number, dof_layout>> transfer;
+
+    MGLevelObject<MatrixType> matrix;
 
     std::vector<std::map<unsigned int, Number>> inhomogeneous_bc;
 
@@ -1525,11 +1476,6 @@ namespace PSMF
      */
     mutable MGLevelObject<VectorType> t;
 
-    /**
-     * The smoother object
-     */
-    using SmootherType =
-      PatchSmoother<MatrixType, dim, fe_degree, smooth_kernel, dof_layout>;
 
     // MGLevelObject<SmootherType> smooth;
 

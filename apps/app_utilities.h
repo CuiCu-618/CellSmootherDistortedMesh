@@ -17,21 +17,19 @@
 #include "ct_parameter.h"
 #include "git_version.h"
 
-#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6)                 \
-  enum class name                                               \
-  {                                                             \
-    v1,                                                         \
-    v2,                                                         \
-    v3,                                                         \
-    v4,                                                         \
-    v5,                                                         \
-    v6,                                                         \
-  };                                                            \
-  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6}; \
-  template <typename T>                                         \
-  constexpr const char *name##ToString(T value)                 \
-  {                                                             \
-    return name##Strings[static_cast<int>(value)];              \
+#define SMO_MACRO(name, v1, v2, v3, v4)               \
+  enum class name                                     \
+  {                                                   \
+    v1,                                               \
+    v2,                                               \
+    v3,                                               \
+    v4,                                               \
+  };                                                  \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4}; \
+  template <typename T>                               \
+  constexpr const char *name##ToString(T value)       \
+  {                                                   \
+    return name##Strings[static_cast<int>(value)];    \
   }
 
 #define ENUM_MACRO(name, v1, v2, v3)               \
@@ -48,7 +46,8 @@
     return name##Strings[static_cast<int>(value)]; \
   }
 
-SMO_MACRO(Smoother, GLOBAL, SEPERATE, FUSED_BASE, FUSED_L, FUSED_3D, FUSED_CF);
+SMO_MACRO(Smoother, GLOBAL, FUSED_L, ConflictFree, TensorCore);
+ENUM_MACRO(Laplace, Basic, ConflictFree, TensorCore);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);
 
@@ -67,12 +66,24 @@ namespace Util
     else
       AssertThrow(false, ExcMessage("Invalid Vcycle number type."));
 
-    std::string str_smooth_variant = "";
+    std::string str_laplace_variant      = "";
+    std::string str_smooth_vmult_variant = "";
+    std::string str_smooth_inv_variant   = "";
 
-    for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
+    for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
       {
-        str_smooth_variant += SmootherToString(CT::KERNEL_TYPE_[k]);
-        str_smooth_variant += "_";
+        str_laplace_variant += LaplaceToString(CT::LAPLACE_TYPE_[k]);
+        str_laplace_variant += "_";
+      }
+    for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
+      {
+        str_smooth_vmult_variant += LaplaceToString(CT::SMOOTH_VMULT_[k]);
+        str_smooth_vmult_variant += "_";
+      }
+    for (unsigned int k = 0; k < CT::SMOOTH_INV_.size(); ++k)
+      {
+        str_smooth_inv_variant += SmootherToString(CT::SMOOTH_INV_[k]);
+        str_smooth_inv_variant += "_";
       }
     const auto str_dof_layout  = DoFLayoutToString(CT::DOF_LAYOUT_);
     const auto str_granularity = GranularityToString(CT::GRANULARITY_);
@@ -82,7 +93,9 @@ namespace Util
     oss << "_" << CT::DIMENSION_ << "D";
     oss << "_" << str_dof_layout;
     oss << CT::FE_DEGREE_;
-    oss << "_" << str_smooth_variant;
+    oss << "_" << str_laplace_variant;
+    oss << str_smooth_vmult_variant;
+    oss << str_smooth_inv_variant;
     oss << str_granularity;
     oss << "_" << value_type;
 
@@ -130,10 +143,18 @@ namespace Util
         << "Polynomial degree:              " << CT::FE_DEGREE_ << std::endl
         << "DoF Layout:                     "
         << DoFLayoutToString(CT::DOF_LAYOUT_) << std::endl
-        << "Number type for V-cycle:        " << value_type << std::endl
-        << "Smoother Variant:               ";
-    for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
-      oss << SmootherToString(CT::KERNEL_TYPE_[k]) << " ";
+        << "Number type for V-cycle:        " << value_type << std::endl;
+    oss << "Laplace Variant:                ";
+    for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+      oss << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " ";
+    oss << std::endl;
+    oss << "Smoother Vmult Variant:         ";
+    for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
+      oss << LaplaceToString(CT::SMOOTH_VMULT_[k]) << " ";
+    oss << std::endl;
+    oss << "Smoother Inverse Variant:       ";
+    for (unsigned int k = 0; k < CT::SMOOTH_INV_.size(); ++k)
+      oss << SmootherToString(CT::SMOOTH_INV_[k]) << " ";
     oss << std::endl;
     oss << "Granularity Scheme:             "
         << GranularityToString(CT::GRANULARITY_) << std::endl

@@ -62,16 +62,9 @@ class LaplaceProblem
 public:
   using full_number   = double;
   using vcycle_number = float;
-  using MatrixTypeDP  = PSMF::LaplaceOperator<dim,
-                                             fe_degree,
-                                             full_number,
-                                             PSMF::SmootherVariant::FUSED_L,
-                                             CT::DOF_LAYOUT_>;
-  using MatrixTypeSP  = PSMF::LaplaceOperator<dim,
-                                             fe_degree,
-                                             vcycle_number,
-                                             PSMF::SmootherVariant::FUSED_L,
-                                             CT::DOF_LAYOUT_>;
+  using MatrixFreeDP  = PSMF::LevelVertexPatch<dim, fe_degree, full_number>;
+  using MatrixFreeSP  = PSMF::LevelVertexPatch<dim, fe_degree, vcycle_number>;
+
   using VectorTypeDP =
     LinearAlgebra::distributed::Vector<full_number, MemorySpace::CUDA>;
   using VectorTypeSP =
@@ -92,7 +85,10 @@ private:
   void
   bench_smooth();
 
-  template <PSMF::SmootherVariant kernel>
+  template <PSMF::LaplaceVariant kernel>
+  void
+  do_Ax();
+  template <PSMF::LaplaceVariant smooth_vmult, PSMF::SmootherVariant smooth_inv>
   void
   do_smooth();
 
@@ -103,8 +99,8 @@ private:
 
   MGConstrainedDoFs mg_constrained_dofs;
 
-  MatrixTypeDP system_matrix;
-  MatrixTypeSP mg_matrices;
+  std::shared_ptr<MatrixFreeDP> mfdata_dp;
+  std::shared_ptr<MatrixFreeSP> mfdata_sp;
 
   VectorTypeDP solution_dp;
   VectorTypeDP system_rhs_dp;
@@ -118,11 +114,12 @@ private:
   unsigned int N;
   unsigned int n_mv;
   unsigned int n_dofs;
+  unsigned int maxlevel;
 
   std::fstream                        fout;
   std::shared_ptr<ConditionalOStream> pcout;
 
-  std::array<ConvergenceTable, 4> info_table;
+  std::array<ConvergenceTable, 5> info_table;
 };
 
 template <int dim, int fe_degree>
@@ -157,8 +154,8 @@ LaplaceProblem<dim, fe_degree>::setup_system()
   dof_handler.distribute_mg_dofs();
 
   n_dofs = dof_handler.n_dofs();
-  N      = 1;
-  n_mv   = 1; // dof_handler.n_dofs() < 10000000 ? 100 : 20;
+  N      = 5;
+  n_mv   = dof_handler.n_dofs() < 10000000 ? 100 : 20;
 
   const unsigned int nlevels = triangulation.n_global_levels();
 
@@ -175,7 +172,7 @@ LaplaceProblem<dim, fe_degree>::setup_system()
   mg_constrained_dofs.make_zero_boundary_constraints(dof_handler,
                                                      dirichlet_boundary);
   MappingQ1<dim> mapping;
-  unsigned int   maxlevel = triangulation.n_global_levels() - 1;
+  maxlevel = triangulation.n_global_levels() - 1;
 
   IndexSet relevant_dofs;
   DoFTools::extract_locally_relevant_level_dofs(dof_handler,
@@ -183,101 +180,103 @@ LaplaceProblem<dim, fe_degree>::setup_system()
                                                 relevant_dofs);
   // DP
   {
-    using MatrixFreeType =
-      PSMF::LevelVertexPatch<dim,
-                             fe_degree,
-                             full_number,
-                             PSMF::SmootherVariant::FUSED_L,
-                             PSMF::DoFLayout::DGQ>;
-
-    typename MatrixFreeType::AdditionalData additional_data;
-    additional_data.relaxation   = 1.;
-    additional_data.use_coloring = false;
-    additional_data.patch_per_block =
-      fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+    typename MatrixFreeDP::AdditionalData additional_data;
+    additional_data.relaxation         = 1.;
+    additional_data.use_coloring       = false;
+    additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
     additional_data.granularity_scheme = CT::GRANULARITY_;
 
-    system_matrix.initialize(dof_handler, maxlevel, additional_data);
+    mfdata_dp = std::make_shared<MatrixFreeDP>();
+    mfdata_dp->reinit(dof_handler, maxlevel, additional_data);
   }
   // SP
   {
-    using MatrixFreeType =
-      PSMF::LevelVertexPatch<dim,
-                             fe_degree,
-                             vcycle_number,
-                             PSMF::SmootherVariant::FUSED_L,
-                             PSMF::DoFLayout::DGQ>;
-
-    typename MatrixFreeType::AdditionalData additional_data;
-    additional_data.relaxation   = 1.;
-    additional_data.use_coloring = false;
-    additional_data.patch_per_block =
-      fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+    typename MatrixFreeSP::AdditionalData additional_data;
+    additional_data.relaxation         = 1.;
+    additional_data.use_coloring       = false;
+    additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
     additional_data.granularity_scheme = CT::GRANULARITY_;
 
-    mg_matrices.initialize(dof_handler, maxlevel, additional_data);
+    mfdata_sp = std::make_shared<MatrixFreeSP>();
+    mfdata_sp->reinit(dof_handler, maxlevel, additional_data);
   }
-
-  system_matrix.initialize_dof_vector(system_rhs_dp);
-  mg_matrices.initialize_dof_vector(system_rhs_sp);
-
-  solution_dp.reinit(system_rhs_dp);
-  solution_sp.reinit(system_rhs_sp);
-
-  system_rhs_dp = 1.;
-  system_rhs_sp = 1.;
-
-  LinearAlgebra::ReadWriteVector<vcycle_number> rw_vector(dof_handler.n_dofs());
-  vcycle_number                                 c = 0;
-  for (auto &val : rw_vector)
-    val = c++;
-  system_rhs_sp.import(rw_vector, VectorOperation::insert);
 }
 template <int dim, int fe_degree>
+template <PSMF::LaplaceVariant kernel>
 void
-LaplaceProblem<dim, fe_degree>::bench_Ax()
+LaplaceProblem<dim, fe_degree>::do_Ax()
 {
-  *pcout << "Benchmarking Mat-vec in double precision...\n";
+  PSMF::LaplaceOperator<dim, fe_degree, full_number, kernel> matrix_dp;
+  matrix_dp.initialize(mfdata_dp, dof_handler, maxlevel);
+  matrix_dp.initialize_dof_vector(system_rhs_dp);
+  solution_dp.reinit(system_rhs_dp);
+
+  system_rhs_dp = 1.;
+  solution_dp   = 0.;
 
   Timer  time;
-  double best_time  = 1e10;
-  double best_time2 = 1e10;
+  double best_time = 1e10;
 
   for (unsigned int i = 0; i < N; ++i)
     {
       time.restart();
       for (unsigned int i = 0; i < n_mv; ++i)
         {
-          system_matrix.vmult(solution_dp, system_rhs_dp);
+          matrix_dp.vmult(solution_dp, system_rhs_dp);
           cudaDeviceSynchronize();
         }
       best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
-  info_table[0].add_value("Name", "Mat-vec DP");
+  info_table[0].add_value("Name", std::string(LaplaceToString(kernel)) + " DP");
   info_table[0].add_value("Time[s]", best_time);
   info_table[0].add_value("Perf[Dof/s]", n_dofs / best_time);
-  info_table[0].add_value("Speedup", 0);
 
-  *pcout << "Benchmarking Mat-vec in single precision...\n";
+
+  PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, kernel> matrix_sp;
+  matrix_sp.initialize(mfdata_sp, dof_handler, maxlevel);
+  matrix_sp.initialize_dof_vector(system_rhs_sp);
+  solution_sp.reinit(system_rhs_sp);
+
+  system_rhs_sp = 1.;
+  solution_sp   = 0.;
 
   for (unsigned int i = 0; i < N; ++i)
     {
       time.restart();
       for (unsigned int i = 0; i < n_mv; ++i)
         {
-          mg_matrices.vmult(solution_sp, system_rhs_sp);
+          matrix_sp.vmult(solution_sp, system_rhs_sp);
           cudaDeviceSynchronize();
         }
-      best_time2 = std::min(time.wall_time() / n_mv, best_time2);
+      best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
-  std::cout << "Ax " << solution_sp.l2_norm() << std::endl;
+  info_table[1].add_value("Name", std::string(LaplaceToString(kernel)) + " SP");
+  info_table[1].add_value("Time[s]", best_time);
+  info_table[1].add_value("Perf[Dof/s]", n_dofs / best_time);
+}
+template <int dim, int fe_degree>
+void
+LaplaceProblem<dim, fe_degree>::bench_Ax()
+{
+  *pcout << "Benchmarking Mat-vec...\n";
 
-  info_table[0].add_value("Name", "Mat-vec SP");
-  info_table[0].add_value("Time[s]", best_time2);
-  info_table[0].add_value("Perf[Dof/s]", n_dofs / best_time2);
-  info_table[0].add_value("Speedup", best_time / best_time2);
+  for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+    switch (CT::LAPLACE_TYPE_[k])
+      {
+        case PSMF::LaplaceVariant::Basic:
+          do_Ax<PSMF::LaplaceVariant::Basic>();
+          break;
+        case PSMF::LaplaceVariant::TensorCore:
+          do_Ax<PSMF::LaplaceVariant::TensorCore>();
+          break;
+        case PSMF::LaplaceVariant::ConflictFree:
+          do_Ax<PSMF::LaplaceVariant::ConflictFree>();
+          break;
+        default:
+          AssertThrow(false, ExcMessage("Invalid Laplace Variant."));
+      }
 }
 template <int dim, int fe_degree>
 void
@@ -311,10 +310,9 @@ LaplaceProblem<dim, fe_degree>::bench_transfer()
       best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
-  info_table[1].add_value("Name", "Transfer DP");
-  info_table[1].add_value("Time[s]", best_time);
-  info_table[1].add_value("Perf[Dof/s]", n_dofs / best_time);
-  info_table[1].add_value("Speedup", 0);
+  info_table[2].add_value("Name", "Transfer DP");
+  info_table[2].add_value("Time[s]", best_time);
+  info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time);
 
   *pcout << "Benchmarking Transfer in single precision...\n";
 
@@ -334,36 +332,32 @@ LaplaceProblem<dim, fe_degree>::bench_transfer()
       best_time2 = std::min(time.wall_time() / n_mv, best_time2);
     }
 
-  std::cout << u_coarse_.l2_norm() << std::endl;
-
-  info_table[1].add_value("Name", "Transfer SP");
-  info_table[1].add_value("Time[s]", best_time2);
-  info_table[1].add_value("Perf[Dof/s]", n_dofs / best_time2);
-  info_table[1].add_value("Speedup", best_time / best_time2);
+  info_table[2].add_value("Name", "Transfer SP");
+  info_table[2].add_value("Time[s]", best_time2);
+  info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time2);
 }
 
 template <int dim, int fe_degree>
-template <PSMF::SmootherVariant kernel>
+template <PSMF::LaplaceVariant smooth_vmult, PSMF::SmootherVariant smooth_inv>
 void
 LaplaceProblem<dim, fe_degree>::do_smooth()
 {
-  *pcout << "Benchmarking Smoother in double precision...\n";
-
   // DP
+  using MatrixTypeDP = PSMF::LaplaceOperator<dim, fe_degree, full_number, smooth_vmult>;
+  MatrixTypeDP matrix_dp;
+  matrix_dp.initialize(mfdata_dp, dof_handler, maxlevel);
+
   using SmootherTypeDP =
-    PSMF::PatchSmoother<MatrixTypeDP, dim, fe_degree, kernel, CT::DOF_LAYOUT_>;
+    PSMF::PatchSmoother<MatrixTypeDP, dim, fe_degree, smooth_vmult, smooth_inv>;
   SmootherTypeDP                          smooth_dp;
-  typename SmootherTypeDP::AdditionalData additional_data;
-  additional_data.relaxation         = 1.;
-  additional_data.granularity_scheme = CT::GRANULARITY_;
-  smooth_dp.initialize(system_matrix, additional_data);
+  typename SmootherTypeDP::AdditionalData smoother_data_dp;
+  smoother_data_dp.data = mfdata_dp;
+
+  smooth_dp.initialize(matrix_dp, smoother_data_dp);
 
   Timer  time;
-  double best_time  = 1e10;
-  double best_time2 = 1e10;
+  double best_time = 1e10;
 
-  solution_dp   = 0.;
-  solution_sp   = 0.;
   system_rhs_dp = 1.;
 
   for (unsigned int i = 0; i < N; ++i)
@@ -377,32 +371,26 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
       best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
-  std::cout << solution_dp.l2_norm() << std::endl;
-
-  info_table[2].add_value("Name",
-                          std::string(SmootherToString(kernel)) + "_DP");
-  info_table[2].add_value("Time[s]", best_time);
-  info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time);
-  if (kernel == PSMF::SmootherVariant::GLOBAL)
-    {
-      base_time_dp = best_time;
-      info_table[2].add_value("Speedup", 0);
-    }
-  else
-    {
-      info_table[2].add_value("Speedup", base_time_dp / best_time);
-    }
-
-  *pcout << "Benchmarking Smoother in single precision...\n";
+  info_table[3].add_value("Name",
+                          std::string(LaplaceToString(smooth_vmult)) + " " +
+                            std::string(SmootherToString(smooth_inv)) + " DP");
+  info_table[3].add_value("Time[s]", best_time);
+  info_table[3].add_value("Perf[Dof/s]", n_dofs / best_time);
 
   // SP
+  using MatrixTypeSP = PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, smooth_vmult>;
+  MatrixTypeSP matrix_sp;
+  matrix_sp.initialize(mfdata_sp, dof_handler, maxlevel);
+
   using SmootherTypeSP =
-    PSMF::PatchSmoother<MatrixTypeSP, dim, fe_degree, kernel, CT::DOF_LAYOUT_>;
+    PSMF::PatchSmoother<MatrixTypeSP, dim, fe_degree, smooth_vmult, smooth_inv>;
   SmootherTypeSP                          smooth_sp;
-  typename SmootherTypeSP::AdditionalData additional_data_;
-  additional_data_.relaxation         = 1.;
-  additional_data_.granularity_scheme = CT::GRANULARITY_;
-  smooth_sp.initialize(mg_matrices, additional_data_);
+  typename SmootherTypeSP::AdditionalData smoother_data_sp;
+  smoother_data_sp.data = mfdata_sp;
+
+  smooth_sp.initialize(matrix_sp, smoother_data_sp);
+
+  system_rhs_sp = 1.;
 
   for (unsigned int i = 0; i < N; ++i)
     {
@@ -412,50 +400,77 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
           smooth_sp.step(solution_sp, system_rhs_sp);
           cudaDeviceSynchronize();
         }
-      best_time2 = std::min(time.wall_time() / n_mv, best_time2);
+      best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
-  std::cout << solution_sp.l2_norm() << std::endl;
-  // solution_sp.print(std::cout);
-
-  info_table[3].add_value("Name",
-                          std::string(SmootherToString(kernel)) + "_SP");
-  info_table[3].add_value("Time[s]", best_time2);
-  info_table[3].add_value("Perf[Dof/s]", n_dofs / best_time2);
-  if (kernel == PSMF::SmootherVariant::GLOBAL)
-    {
-      base_time_sp = best_time2;
-      info_table[3].add_value("Speedup", 0);
-    }
-  else
-    {
-      info_table[3].add_value("Speedup", base_time_sp / best_time2);
-    }
+  info_table[4].add_value("Name",
+                          std::string(LaplaceToString(smooth_vmult)) + " " +
+                            std::string(SmootherToString(smooth_inv)) + " SP");
+  info_table[4].add_value("Time[s]", best_time);
+  info_table[4].add_value("Perf[Dof/s]", n_dofs / best_time);
 }
 template <int dim, int fe_degree>
 void
 LaplaceProblem<dim, fe_degree>::bench_smooth()
 {
-  for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
-    switch (CT::KERNEL_TYPE_[k])
+  *pcout << "Benchmarking Smoothing...\n";
+
+  for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
+    switch (CT::SMOOTH_VMULT_[k])
       {
-        case PSMF::SmootherVariant::GLOBAL:
-          do_smooth<PSMF::SmootherVariant::GLOBAL>();
+        case PSMF::LaplaceVariant::Basic:
+          for (unsigned int j = 0; j < CT::SMOOTH_INV_.size(); ++j)
+            switch (CT::SMOOTH_INV_[j])
+              {
+                case PSMF::SmootherVariant::GLOBAL:
+                  do_smooth<PSMF::LaplaceVariant::Basic,
+                            PSMF::SmootherVariant::GLOBAL>();
+                  break;
+                case PSMF::SmootherVariant::FUSED_L:
+                  do_smooth<PSMF::LaplaceVariant::Basic,
+                            PSMF::SmootherVariant::FUSED_L>();
+                  break;
+                case PSMF::SmootherVariant::ConflictFree:
+                  do_smooth<PSMF::LaplaceVariant::Basic,
+                            PSMF::SmootherVariant::ConflictFree>();
+                  break;
+              }
           break;
-        case PSMF::SmootherVariant::SEPERATE:
-          do_smooth<PSMF::SmootherVariant::SEPERATE>();
+        case PSMF::LaplaceVariant::ConflictFree:
+          for (unsigned int j = 0; j < CT::SMOOTH_INV_.size(); ++j)
+            switch (CT::SMOOTH_INV_[j])
+              {
+                case PSMF::SmootherVariant::GLOBAL:
+                  do_smooth<PSMF::LaplaceVariant::ConflictFree,
+                            PSMF::SmootherVariant::GLOBAL>();
+                  break;
+                case PSMF::SmootherVariant::FUSED_L:
+                  do_smooth<PSMF::LaplaceVariant::ConflictFree,
+                            PSMF::SmootherVariant::FUSED_L>();
+                  break;
+                case PSMF::SmootherVariant::ConflictFree:
+                  do_smooth<PSMF::LaplaceVariant::ConflictFree,
+                            PSMF::SmootherVariant::ConflictFree>();
+                  break;
+              }
           break;
-        case PSMF::SmootherVariant::FUSED_BASE:
-          do_smooth<PSMF::SmootherVariant::FUSED_BASE>();
-          break;
-        case PSMF::SmootherVariant::FUSED_L:
-          do_smooth<PSMF::SmootherVariant::FUSED_L>();
-          break;
-        case PSMF::SmootherVariant::FUSED_3D:
-          do_smooth<PSMF::SmootherVariant::FUSED_3D>();
-          break;
-        case PSMF::SmootherVariant::FUSED_CF:
-          do_smooth<PSMF::SmootherVariant::FUSED_CF>();
+        case PSMF::LaplaceVariant::TensorCore:
+          for (unsigned int j = 0; j < CT::SMOOTH_INV_.size(); ++j)
+            switch (CT::SMOOTH_INV_[j])
+              {
+                case PSMF::SmootherVariant::GLOBAL:
+                  do_smooth<PSMF::LaplaceVariant::TensorCore,
+                            PSMF::SmootherVariant::GLOBAL>();
+                  break;
+                case PSMF::SmootherVariant::FUSED_L:
+                  do_smooth<PSMF::LaplaceVariant::TensorCore,
+                            PSMF::SmootherVariant::FUSED_L>();
+                  break;
+                case PSMF::SmootherVariant::ConflictFree:
+                  do_smooth<PSMF::LaplaceVariant::TensorCore,
+                            PSMF::SmootherVariant::ConflictFree>();
+                  break;
+              }
           break;
         default:
           AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
@@ -487,7 +502,7 @@ LaplaceProblem<dim, fe_degree>::run()
 
   *pcout << std::endl;
 
-  for (unsigned int k = 0; k < 4; ++k)
+  for (unsigned int k = 0; k < 5; ++k)
     {
       std::ostringstream oss;
 

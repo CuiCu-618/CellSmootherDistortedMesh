@@ -4,9 +4,9 @@
  * @brief Implementation of the grid transfer operations.
  * @version 1.0
  * @date 2023-02-02
- * 
+ *
  * @copyright Copyright (c) 2023
- * 
+ *
  */
 
 #ifndef MG_TRANSFER_CUH

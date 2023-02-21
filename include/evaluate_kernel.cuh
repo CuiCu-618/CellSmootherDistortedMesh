@@ -12,606 +12,97 @@
 #ifndef CUDA_EVALUATE_CUH
 #define CUDA_EVALUATE_CUH
 
+#include <mma.h>
+
 #include "patch_base.cuh"
+
+using namespace nvcuda;
+
 
 namespace PSMF
 {
+  ////////////////////////////////////////////////////////////////////
+  /////////////////////// TPEvaluatorBase ////////////////////////////
+  ////////////////////////////////////////////////////////////////////
   /**
-   * Compute laplace operation based on tensor product structure.
+   * A base struct for the various TensorProduct Evaluator template
+   * specializations, containing common functionalities.
+   *
+   * @tparam T Type of the actual vectorized array. We are using the
+   *   Couriously Recurring Template Pattern (see
+   *   https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern) in
+   *   this struct to avoid having to resort to `virtual` member functions.
    */
-  template <int kernel_size,
+  template <typename T,
+            int n_dofs_1d,
             typename Number,
-            int             dim,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  struct TPEvaluator_laplace
+            LaplaceVariant laplace_type,
+            int            dim>
+  struct TPEvaluatorBase
   {
-    /**
-     *  Constructor.
-     */
     __device__
-    TPEvaluator_laplace()
-    {}
+    TPEvaluatorBase() = default;
 
-    /**
-     * Vector multication.
-     */
     __device__ void
     vmult(Number       *dst,
           const Number *src,
           const Number *mass_matrix,
           const Number *derivative_matrix,
-          Number       *temp)
+          Number       *tmp)
     {}
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool add, bool sub = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {}
   };
 
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_laplace<kernel_size,
-                             Number,
-                             3,
-                             SmootherVariant::FUSED_BASE,
-                             DoFLayout::DGQ>
+  template <typename T, int n_dofs_1d, typename Number>
+  struct TPEvaluatorBase<T, n_dofs_1d, Number, LaplaceVariant::Basic, 2>
   {
     /**
-     *  Constructor.
+     * Default constructor.
      */
     __device__
-    TPEvaluator_laplace()
-    {}
+    TPEvaluatorBase() = default;
 
     /**
-     * Vector multication.
+     * Implements a matrix-vector product for Laplacian.
      */
     __device__ void
     vmult(Number       *dst,
           const Number *src,
           const Number *mass_matrix,
           const Number *derivative_matrix,
-          Number       *temp)
+          Number       *tmp)
     {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-      constexpr unsigned int offset    = Util::pow(kernel_size, 2);
-
-      apply<0, false>(mass_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(&mass_matrix[offset], &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false>(&derivative_matrix[offset * 2], temp, dst);
-      __syncthreads();
-      apply<1, false>(&derivative_matrix[offset], &temp[local_dim], temp);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, true>(&mass_matrix[offset], &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, true>(&mass_matrix[offset * 2], temp, dst);
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add>
+    template <int direction, bool add, bool sub = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr int stride = kernel_size * kernel_size;
-
       const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
-
-      Number pval[kernel_size];
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      for (unsigned int z = 0; z < kernel_size; ++z)
-        {
-          pval[z] = 0;
-          // #pragma unroll
-          for (unsigned int k = 0; k < kernel_size; ++k)
-            {
-              const unsigned int shape_idx = row * kernel_size + k;
-
-              const unsigned int source_idx =
-                (direction == 0) ? (col * kernel_size + k + z * stride) :
-                (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                   (z * kernel_size + col + k * stride);
-
-              pval[z] += shape_data[shape_idx] * in[source_idx];
-            }
-        }
-
-      for (unsigned int z = 0; z < kernel_size; ++z)
-        {
-          const unsigned int destination_idx =
-            (direction == 0) ? (col * kernel_size + row + z * stride) :
-            (direction == 1) ? (row * kernel_size + col + z * stride) :
-                               (z * kernel_size + col + row * stride);
-
-          if (add)
-            out[destination_idx] += pval[z];
-          else
-            out[destination_idx] = pval[z];
-        }
-    }
-  };
-
-  /**
-   * Compute residual based on tensor product structure.
-   */
-  template <int kernel_size,
-            typename Number,
-            int             dim,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  struct TPEvaluator_vmult
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_vmult()
-    {}
-
-    /**
-     * Vector multication.
-     */
-    __device__ void
-    vmult(Number       *dst,
-          const Number *src,
-          const Number *mass_matrix,
-          const Number *derivative_matrix,
-          Number       *temp)
-    {}
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add, bool sub = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {}
-  };
-
-  /**
-   * local solver based on tensor product structure.
-   */
-  template <int kernel_size,
-            typename Number,
-            int             dim,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  struct TPEvaluator_inverse
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
-
-    /**
-     * Apply inverse to @p src.
-     */
-    __device__ void
-    apply_inverse(Number       *dst,
-                  Number       *src,
-                  const Number *eigenvalues,
-                  const Number *eigenvectors,
-                  Number       *temp)
-    {}
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool contract_over_rows, bool add = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {}
-  };
-
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_vmult<kernel_size,
-                           Number,
-                           2,
-                           SmootherVariant::SEPERATE,
-                           DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_vmult()
-    {}
-
-    /**
-     * Vector multication.
-     */
-    __device__ void
-    vmult(Number       *dst,
-          const Number *src,
-          const Number *mass_matrix,
-          const Number *derivative_matrix,
-          Number       *temp)
-    {
-      apply<0, false>(mass_matrix, src, temp);
-      __syncthreads();
-      apply<1, false, true>(derivative_matrix, temp, dst);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, temp);
-      __syncthreads();
-      apply<1, false, true>(mass_matrix, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add, bool sub = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      const int row = threadIdx.y;
-      const int col = threadIdx.x % kernel_size;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
 
       Number pval = 0;
-
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
       // #pragma unroll
-      for (int k = 0; k < kernel_size; ++k)
+      for (unsigned int k = 0; k < n_dofs_1d; ++k)
         {
-          const unsigned int shape_idx  = row * kernel_size + k;
-          const unsigned int source_idx = (direction == 0) ?
-                                            (col * kernel_size + k) :
-                                            (k * kernel_size + col);
-
-          pval += shape_data[shape_idx] * in[source_idx];
-        }
-
-      const unsigned int destination_idx = (direction == 0) ?
-                                             (col * kernel_size + row) :
-                                             (row * kernel_size + col);
-
-      if (add)
-        out[destination_idx] += pval;
-      if (sub)
-        out[destination_idx] -= pval;
-      else
-        out[destination_idx] = pval;
-    }
-  };
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_vmult<kernel_size,
-                           Number,
-                           3,
-                           SmootherVariant::SEPERATE,
-                           DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_vmult()
-    {}
-
-    /**
-     * Vector multication.
-     */
-    __device__ void
-    vmult(Number       *dst,
-          const Number *src,
-          const Number *mass_matrix,
-          const Number *derivative_matrix,
-          Number       *temp)
-    {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-
-      apply<0, false>(mass_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(derivative_matrix, temp, dst);
-      __syncthreads();
-      apply<1, false>(derivative_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, true>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(mass_matrix, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add, bool sub = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      constexpr int stride = kernel_size * kernel_size;
-
-      const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
-
-      Number pval[kernel_size];
-
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      for (unsigned int z = 0; z < kernel_size; ++z)
-        {
-          pval[z] = 0;
-          // #pragma unroll
-          for (unsigned int k = 0; k < kernel_size; ++k)
-            {
-              const unsigned int shape_idx = row * kernel_size + k;
-
-              const unsigned int source_idx =
-                (direction == 0) ? (col * kernel_size + k + z * stride) :
-                (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                   (z * kernel_size + col + k * stride);
-
-              pval[z] += shape_data[shape_idx] * in[source_idx];
-            }
-        }
-
-      for (unsigned int z = 0; z < kernel_size; ++z)
-        {
-          const unsigned int destination_idx =
-            (direction == 0) ? (col * kernel_size + row + z * stride) :
-            (direction == 1) ? (row * kernel_size + col + z * stride) :
-                               (z * kernel_size + col + row * stride);
-
-          if (add)
-            out[destination_idx] += pval[z];
-          else if (sub)
-            out[destination_idx] -= pval[z];
-          else
-            out[destination_idx] = pval[z];
-        }
-    }
-  };
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_vmult<kernel_size,
-                           Number,
-                           2,
-                           SmootherVariant::FUSED_BASE,
-                           DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_vmult()
-    {}
-
-    /**
-     * Vector multication.
-     */
-    __device__ void
-    vmult(Number       *dst,
-          const Number *src,
-          const Number *mass_matrix,
-          const Number *derivative_matrix,
-          Number       *temp)
-    {
-      apply<0, false>(mass_matrix, src, temp);
-      __syncthreads();
-      apply<1, false, true>(derivative_matrix, temp, dst);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, temp);
-      __syncthreads();
-      apply<1, false, true>(mass_matrix, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add, bool sub = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      const int row = threadIdx.y;
-      const int col = threadIdx.x % kernel_size;
-
-      Number pval = 0;
-
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      // #pragma unroll
-      for (int k = 0; k < kernel_size; ++k)
-        {
-          const unsigned int shape_idx  = row * kernel_size + k;
-          const unsigned int source_idx = (direction == 0) ?
-                                            (col * kernel_size + k) :
-                                            (k * kernel_size + col);
-
-          pval += shape_data[shape_idx] * in[source_idx];
-        }
-
-      const unsigned int destination_idx = (direction == 0) ?
-                                             (col * kernel_size + row) :
-                                             (row * kernel_size + col);
-
-      if (add)
-        out[destination_idx] += pval;
-      if (sub)
-        out[destination_idx] -= pval;
-      else
-        out[destination_idx] = pval;
-    }
-  };
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_vmult<kernel_size,
-                           Number,
-                           3,
-                           SmootherVariant::FUSED_BASE,
-                           DoFLayout::DGQ>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_vmult()
-    {}
-
-    /**
-     * Vector multication.
-     */
-    __device__ void
-    vmult(Number       *dst,
-          const Number *src,
-          const Number *mass_matrix,
-          const Number *derivative_matrix,
-          Number       *temp)
-    {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-
-      apply<0, false>(mass_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(derivative_matrix, temp, dst);
-      __syncthreads();
-      apply<1, false>(derivative_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, true>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(mass_matrix, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add, bool sub = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      constexpr int stride = kernel_size * kernel_size;
-
-      const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
-
-      Number pval[kernel_size];
-
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      for (unsigned int z = 0; z < kernel_size; ++z)
-        {
-          pval[z] = 0;
-          // #pragma unroll
-          for (unsigned int k = 0; k < kernel_size; ++k)
-            {
-              const unsigned int shape_idx = row * kernel_size + k;
-
-              const unsigned int source_idx =
-                (direction == 0) ? (col * kernel_size + k + z * stride) :
-                (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                   (z * kernel_size + col + k * stride);
-
-              pval[z] += shape_data[shape_idx] * in[source_idx];
-            }
-        }
-
-      for (unsigned int z = 0; z < kernel_size; ++z)
-        {
-          const unsigned int destination_idx =
-            (direction == 0) ? (col * kernel_size + row + z * stride) :
-            (direction == 1) ? (row * kernel_size + col + z * stride) :
-                               (z * kernel_size + col + row * stride);
-
-          if (add)
-            out[destination_idx] += pval[z];
-          else if (sub)
-            out[destination_idx] -= pval[z];
-          else
-            out[destination_idx] = pval[z];
-        }
-    }
-  };
-
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_vmult<kernel_size,
-                           Number,
-                           3,
-                           SmootherVariant::FUSED_3D,
-                           DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_vmult()
-    {}
-
-    /**
-     * Vector multication.
-     */
-    __device__ void
-    vmult(Number       *dst,
-          const Number *src,
-          const Number *mass_matrix,
-          const Number *derivative_matrix,
-          Number       *temp)
-    {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-
-      apply<0, false>(mass_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(derivative_matrix, temp, dst);
-      __syncthreads();
-      apply<1, false>(derivative_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, true>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(mass_matrix, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool add, bool sub = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      constexpr int stride = kernel_size * kernel_size;
-
-      const unsigned int z   = threadIdx.z;
-      const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
-
-      Number pval = 0;
-
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      // #pragma unroll
-      for (unsigned int k = 0; k < kernel_size; ++k)
-        {
-          const unsigned int shape_idx = row * kernel_size + k;
+          const unsigned int shape_idx = row * n_dofs_1d + k;
 
           const unsigned int source_idx =
-            (direction == 0) ? (col * kernel_size + k + z * stride) :
-            (direction == 1) ? (k * kernel_size + col + z * stride) :
-                               (z * kernel_size + col + k * stride);
+            (direction == 0) ? (col * n_dofs_1d + k) : (k * n_dofs_1d + col);
 
           pval += shape_data[shape_idx] * in[source_idx];
         }
 
+
       const unsigned int destination_idx =
-        (direction == 0) ? (col * kernel_size + row + z * stride) :
-        (direction == 1) ? (row * kernel_size + col + z * stride) :
-                           (z * kernel_size + col + row * stride);
+        (direction == 0) ? (col * n_dofs_1d + row) : (row * n_dofs_1d + col);
 
       if (add)
         out[destination_idx] += pval;
@@ -622,87 +113,63 @@ namespace PSMF
     }
   };
 
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_vmult<kernel_size,
-                           Number,
-                           3,
-                           SmootherVariant::FUSED_CF,
-                           DoFLayout::Q>
+  template <typename T, int n_dofs_1d, typename Number>
+  struct TPEvaluatorBase<T, n_dofs_1d, Number, LaplaceVariant::Basic, 3>
   {
     /**
-     *  Constructor.
+     * Default constructor.
      */
     __device__
-    TPEvaluator_vmult()
-    {}
+    TPEvaluatorBase() = default;
 
     /**
-     * Vector multication.
+     * Implements a matrix-vector product for Laplacian.
      */
     __device__ void
     vmult(Number       *dst,
           const Number *src,
           const Number *mass_matrix,
           const Number *derivative_matrix,
-          Number       *temp)
+          Number       *tmp)
     {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-
-      apply<0, false>(mass_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(derivative_matrix, temp, dst);
-      __syncthreads();
-      apply<1, false>(derivative_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<0, false>(derivative_matrix, src, &temp[local_dim]);
-      __syncthreads();
-      apply<1, true>(mass_matrix, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(mass_matrix, temp, dst);
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool add, bool sub = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr unsigned int stride = kernel_size * kernel_size;
+      constexpr int stride = n_dofs_1d * n_dofs_1d;
 
       const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
 
-      Number pval[kernel_size];
-
+      Number pval[n_dofs_1d];
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      for (unsigned int z = 0; z < kernel_size; ++z)
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
         {
           pval[z] = 0;
           // #pragma unroll
-          for (unsigned int k = 0; k < kernel_size; ++k)
+          for (unsigned int k = 0; k < n_dofs_1d; ++k)
             {
-              const unsigned int shape_idx =
-                (direction == 0) ? col * kernel_size + k :
-                (direction == 1) ? row * kernel_size + k :
-                                   z * kernel_size + k;
+              const unsigned int shape_idx = row * n_dofs_1d + k;
 
               const unsigned int source_idx =
-                (direction == 0) ? (row * kernel_size + k + z * stride) :
-                (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                   (row * kernel_size + col + k * stride);
+                (direction == 0) ? (col * n_dofs_1d + k + z * stride) :
+                (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                   (z * n_dofs_1d + col + k * stride);
 
               pval[z] += shape_data[shape_idx] * in[source_idx];
             }
         }
 
-      for (unsigned int z = 0; z < kernel_size; ++z)
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
         {
           const unsigned int destination_idx =
-            row * kernel_size + col + z * stride;
+            (direction == 0) ? (col * n_dofs_1d + row + z * stride) :
+            (direction == 1) ? (row * n_dofs_1d + col + z * stride) :
+                               (z * n_dofs_1d + col + row * stride);
 
           if (add)
             out[destination_idx] += pval[z];
@@ -715,74 +182,1378 @@ namespace PSMF
   };
 
 
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             2,
-                             SmootherVariant::SEPERATE,
-                             DoFLayout::Q>
+
+  template <typename T, int n_dofs_1d, typename Number>
+  struct TPEvaluatorBase<T, n_dofs_1d, Number, LaplaceVariant::ConflictFree, 2>
   {
     /**
-     *  Constructor.
+     * Default constructor.
      */
     __device__
-    TPEvaluator_inverse()
-    {}
+    TPEvaluatorBase() = default;
 
     /**
-     * Apply inverse to @p src.
+     * Implements a matrix-vector product for Laplacian.
      */
     __device__ void
-    apply_inverse(Number       *dst,
-                  Number       *src,
-                  const Number *eigenvalues,
-                  const Number *eigenvectors,
-                  Number       *temp)
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
     {
-      const unsigned int local_tid_x = threadIdx.x % kernel_size;
-
-      apply<0, true>(eigenvectors, src, temp);
-      __syncthreads();
-      apply<1, true>(eigenvectors, temp, src);
-      __syncthreads();
-      src[threadIdx.y * kernel_size + local_tid_x] /=
-        (eigenvalues[threadIdx.y] + eigenvalues[local_tid_x]);
-      __syncthreads();
-      apply<0, false>(eigenvectors, src, temp);
-      __syncthreads();
-      apply<1, false, true>(eigenvectors, temp, dst);
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool contract_over_rows, bool add = false>
+    template <int direction, bool add, bool sub = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      const int row = threadIdx.y;
-      const int col = threadIdx.x % kernel_size;
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
 
       Number pval = 0;
-
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
       // #pragma unroll
-      for (unsigned int k = 0; k < kernel_size; ++k)
+      for (unsigned int k = 0; k < n_dofs_1d; ++k)
         {
           const unsigned int shape_idx =
-            contract_over_rows ? k * kernel_size + row : row * kernel_size + k;
+            (direction == 0) ? (col * n_dofs_1d + k) : (row * n_dofs_1d + k);
 
-          const unsigned int source_idx = (direction == 0) ?
-                                            (col * kernel_size + k) :
-                                            (k * kernel_size + col);
+          const unsigned int source_idx =
+            (direction == 0) ? (row * n_dofs_1d + k) : (k * n_dofs_1d + col);
 
           pval += shape_data[shape_idx] * in[source_idx];
         }
 
 
-      const unsigned int destination_idx = (direction == 0) ?
-                                             (col * kernel_size + row) :
-                                             (row * kernel_size + col);
+      const unsigned int destination_idx = row * n_dofs_1d + col;
+
+      if (add)
+        out[destination_idx] += pval;
+      else if (sub)
+        out[destination_idx] -= pval;
+      else
+        out[destination_idx] = pval;
+    }
+  };
+
+  template <typename T, int n_dofs_1d, typename Number>
+  struct TPEvaluatorBase<T, n_dofs_1d, Number, LaplaceVariant::ConflictFree, 3>
+  {
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr int stride = n_dofs_1d * n_dofs_1d;
+
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
+
+      Number pval[n_dofs_1d];
+      // kernel product: A kdot src, [N x N] * [N^dim, 1]
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          pval[z] = 0;
+          // #pragma unroll
+          for (unsigned int k = 0; k < n_dofs_1d; ++k)
+            {
+              const unsigned int shape_idx =
+                (direction == 0) ? col * n_dofs_1d + k :
+                (direction == 1) ? row * n_dofs_1d + k :
+                                   z * n_dofs_1d + k;
+
+              const unsigned int source_idx =
+                (direction == 0) ? (row * n_dofs_1d + k + z * stride) :
+                (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                   (row * n_dofs_1d + col + k * stride);
+
+
+              pval[z] += shape_data[shape_idx] * in[source_idx];
+            }
+        }
+
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          const unsigned int destination_idx =
+            row * n_dofs_1d + col + z * stride;
+
+          if (add)
+            out[destination_idx] += pval[z];
+          else if (sub)
+            out[destination_idx] -= pval[z];
+          else
+            out[destination_idx] = pval[z];
+        }
+    }
+  };
+
+
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 8, double, LaplaceVariant::TensorCore, 2>
+  {
+    using Number = double;
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int n_dofs_1d   = 8;
+      constexpr unsigned int skew_double = Util::padding;
+
+      if (direction == 0)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          if (warpId != 0)
+            return;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major>
+                                                             b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
+
+          wmma::fill_fragment(c_frag, 0.0f);
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 4],
+                                     8 + skew_double);
+
+              wmma::load_matrix_sync(
+                b_frag,
+                &in[warpId * 8 * (8 + skew_double) + i * 4],
+                8 + skew_double);
+
+              wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+
+          wmma::store_matrix_sync(&out[warpId * 8 * (8 + skew_double)],
+                                  c_frag,
+                                  8 + skew_double,
+                                  wmma::mem_col_major);
+        }
+      else if (direction == 1)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          if (warpId != 0)
+            return;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major>
+                                                             b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
+
+          if (add)
+            wmma::load_matrix_sync(c_frag,
+                                   &out[warpId * 8 * (8 + skew_double)],
+                                   8 + skew_double,
+                                   wmma::mem_row_major);
+          else
+            wmma::fill_fragment(c_frag, 0.0f);
+
+          if (add)
+            __syncthreads();
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 4],
+                                     8 + skew_double);
+
+              wmma::load_matrix_sync(
+                b_frag,
+                &in[warpId * 8 * (8 + skew_double) + i * 4 * (8 + skew_double)],
+                8 + skew_double);
+
+              wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+
+          wmma::store_matrix_sync(&out[warpId * 8 * (8 + skew_double)],
+                                  c_frag,
+                                  8 + skew_double,
+                                  wmma::mem_row_major);
+        }
+    }
+  };
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 8, double, LaplaceVariant::TensorCore, 3>
+  {
+    using Number = double;
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int n_dofs_1d   = 8;
+      constexpr unsigned int skew_double = Util::padding;
+
+      if (direction == 0)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major>
+            b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+            c_frag[n_dofs_1d / 2];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 4],
+                                     8 + skew_double);
+
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  wmma::load_matrix_sync(
+                    b_frag,
+                    &in[(z * 2 + warpId) * 8 * (8 + skew_double) + i * 4],
+                    8 + skew_double);
+
+                  wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            wmma::store_matrix_sync(
+              &out[(z * 2 + warpId) * 8 * (8 + skew_double)],
+              c_frag[z],
+              8 + skew_double,
+              wmma::mem_col_major);
+        }
+      else if (direction == 1)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major>
+            b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+            c_frag[n_dofs_1d / 2];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            if (add)
+              wmma::load_matrix_sync(
+                c_frag[z],
+                &out[(z * 2 + warpId) * 8 * (8 + skew_double)],
+                8 + skew_double,
+                wmma::mem_row_major);
+            else
+              wmma::fill_fragment(c_frag[z], 0.0f);
+
+          if (add)
+            __syncthreads();
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 4],
+                                     8 + skew_double);
+
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  wmma::load_matrix_sync(
+                    b_frag,
+                    &in[(z * 2 + warpId) * 8 * (8 + skew_double) +
+                        i * 4 * (8 + skew_double)],
+                    8 + skew_double);
+
+                  wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            wmma::store_matrix_sync(
+              &out[(z * 2 + warpId) * 8 * (8 + skew_double)],
+              c_frag[z],
+              8 + skew_double,
+              wmma::mem_row_major);
+        }
+      else
+        {
+          constexpr int n_dofs_1d_padding = n_dofs_1d + skew_double;
+          constexpr int stride            = n_dofs_1d * n_dofs_1d_padding;
+
+          const int row = threadIdx.y;
+          const int col = threadIdx.x % n_dofs_1d;
+
+          double pval[n_dofs_1d];
+
+          // kernel product: A kdot src, [N x N] * [N^dim, 1]
+          for (unsigned int z = 0; z < n_dofs_1d; ++z)
+            {
+              pval[z] = 0;
+              // #pragma unroll
+              for (int k = 0; k < n_dofs_1d; ++k)
+                {
+                  const unsigned int shape_idx = row * n_dofs_1d_padding + k;
+                  const unsigned int source_idx =
+                    z * n_dofs_1d_padding + col + k * stride;
+
+                  pval[z] += shape_data[shape_idx] * in[source_idx];
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d; ++z)
+            {
+              const unsigned int destination_idx =
+                z * n_dofs_1d_padding + col + row * stride;
+
+              if (add)
+                out[destination_idx] += pval[z];
+              else if (sub)
+                out[destination_idx] -= pval[z];
+              else
+                out[destination_idx] = pval[z];
+            }
+        }
+    }
+  };
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 16, double, LaplaceVariant::TensorCore, 2>
+  {
+    using Number = double;
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int n_dofs_1d   = 16;
+      constexpr unsigned int skew_double = Util::padding;
+
+      if (direction == 0)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+          const unsigned int subId = warpId % 4;
+
+          if (warpId > 3)
+            return;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major>
+                                                             b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
+
+          wmma::fill_fragment(c_frag, 0.0f);
+
+          for (int i = 0; i < 4; ++i)
+            {
+              wmma::load_matrix_sync(
+                a_frag,
+                &shape_data[subId / 2 * (16 + skew_double) * 8 + i * 4],
+                16 + skew_double);
+
+              wmma::load_matrix_sync(
+                b_frag,
+                &in[subId % 2 * (16 + skew_double) * 8 + i * 4],
+                16 + skew_double);
+
+              wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+
+          wmma::store_matrix_sync(
+            &out[subId % 2 * (16 + skew_double) * 8 + subId / 2 * 8],
+            c_frag,
+            16 + skew_double,
+            wmma::mem_col_major);
+        }
+      else if (direction == 1)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+          const unsigned int subId = warpId % 4;
+
+          if (warpId > 3)
+            return;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major>
+                                                             b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
+
+          // TODO: bug?
+          if (add)
+            wmma::load_matrix_sync(
+              c_frag,
+              &out[subId / 2 * (16 + skew_double) * 8 + subId % 2 * 8],
+              16 + skew_double,
+              wmma::mem_row_major);
+          else
+            wmma::fill_fragment(c_frag, 0.0f);
+
+          if (add)
+            __syncthreads();
+
+          for (int i = 0; i < 4; ++i)
+            {
+              wmma::load_matrix_sync(
+                a_frag,
+                &shape_data[subId / 2 * (16 + skew_double) * 8 + i * 4],
+                16 + skew_double);
+
+              wmma::load_matrix_sync(
+                b_frag,
+                &in[subId % 2 * 8 + i * 4 * (16 + skew_double)],
+                16 + skew_double);
+
+              wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+
+          wmma::store_matrix_sync(
+            &out[subId / 2 * (16 + skew_double) * 8 + subId % 2 * 8],
+            c_frag,
+            16 + skew_double,
+            wmma::mem_row_major);
+        }
+    }
+  };
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 16, double, LaplaceVariant::TensorCore, 3>
+  {
+    using Number = double;
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int n_dofs_1d   = 16;
+      constexpr unsigned int skew_double = Util::padding;
+
+      if (direction == 0)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+          // sub matrix id
+          const unsigned int subId = warpId % 4;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major>
+            b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+            c_frag[n_dofs_1d / 2];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+          for (int i = 0; i < 4; ++i)
+            {
+              wmma::load_matrix_sync(
+                a_frag,
+                &shape_data[subId / 2 * (16 + skew_double) * 8 + i * 4],
+                16 + skew_double);
+
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  wmma::load_matrix_sync(
+                    b_frag,
+                    &in[(z * 2 + warpId / 4) * (16 + skew_double) * 16 +
+                        subId % 2 * (16 + skew_double) * 8 + i * 4],
+                    16 + skew_double);
+
+                  wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            wmma::store_matrix_sync(
+              &out[(z * 2 + warpId / 4) * (16 + skew_double) * 16 +
+                   subId % 2 * (16 + skew_double) * 8 + subId / 2 * 8],
+              c_frag[z],
+              16 + skew_double,
+              wmma::mem_col_major);
+        }
+      else if (direction == 1)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+          // sub matrix id
+          const unsigned int subId = warpId % 4;
+
+          wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major>
+            b_frag;
+          wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+            c_frag[n_dofs_1d / 2];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            if (add)
+              wmma::load_matrix_sync(
+                c_frag[z],
+                &out[(z * 2 + warpId / 4) * (16 + skew_double) * 16 +
+                     subId / 2 * (16 + skew_double) * 8 + subId % 2 * 8],
+                16 + skew_double,
+                wmma::mem_row_major);
+            else
+              wmma::fill_fragment(c_frag[z], 0.0f);
+
+          if (add)
+            __syncthreads();
+
+          for (int i = 0; i < 4; ++i)
+            {
+              wmma::load_matrix_sync(
+                a_frag,
+                &shape_data[subId / 2 * (16 + skew_double) * 8 + i * 4],
+                16 + skew_double);
+
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  wmma::load_matrix_sync(
+                    b_frag,
+                    &in[(z * 2 + warpId / 4) * (16 + skew_double) * 16 +
+                        subId % 2 * 8 + i * 4 * (16 + skew_double)],
+                    16 + skew_double);
+
+                  wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            wmma::store_matrix_sync(
+              &out[(z * 2 + warpId / 4) * (16 + skew_double) * 16 +
+                   subId / 2 * (16 + skew_double) * 8 + subId % 2 * 8],
+              c_frag[z],
+              16,
+              wmma::mem_row_major);
+        }
+      else
+        {
+          constexpr int n_dofs_1d_padding = n_dofs_1d + skew_double;
+          constexpr int stride            = n_dofs_1d * n_dofs_1d_padding;
+
+          const int row = threadIdx.y;
+          const int col = threadIdx.x % n_dofs_1d;
+
+          double pval[n_dofs_1d];
+
+          // kernel product: A kdot src, [N x N] * [N^dim, 1]
+          for (unsigned int z = 0; z < n_dofs_1d; ++z)
+            {
+              pval[z] = 0;
+              // #pragma unroll
+              for (int k = 0; k < n_dofs_1d; ++k)
+                {
+                  const unsigned int shape_idx = row * n_dofs_1d_padding + k;
+                  const unsigned int source_idx =
+                    z * n_dofs_1d_padding + col + k * stride;
+
+                  pval[z] += shape_data[shape_idx] * in[source_idx];
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d; ++z)
+            {
+              const unsigned int destination_idx =
+                z * n_dofs_1d_padding + col + row * stride;
+
+              if (add)
+                out[destination_idx] += pval[z];
+              else if (sub)
+                out[destination_idx] -= pval[z];
+              else
+                out[destination_idx] = pval[z];
+            }
+        }
+    }
+  };
+
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 16, float, LaplaceVariant::TensorCore, 2>
+  {
+    using Number = float;
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int n_dofs_1d   = 16;
+      constexpr unsigned int skew_double = Util::padding;
+
+      if (direction == 0)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          if (warpId != 0)
+            return;
+
+          wmma::fragment<wmma::matrix_a,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::col_major>
+                                                              b_frag;
+          wmma::fragment<wmma::accumulator, 16, 16, 8, float> c_frag;
+
+          wmma::fill_fragment(c_frag, 0.0f);
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 8],
+                                     16 + skew_double);
+#pragma unroll
+              for (int t = 0; t < a_frag.num_elements; t++)
+                {
+                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+                }
+
+              wmma::load_matrix_sync(
+                b_frag,
+                &in[warpId * 16 * (16 + skew_double) + i * 8],
+                16 + skew_double);
+#pragma unroll
+              for (int t = 0; t < b_frag.num_elements; t++)
+                {
+                  b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+                }
+
+              wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+
+          wmma::store_matrix_sync(&out[warpId * 16 * (16 + skew_double)],
+                                  c_frag,
+                                  16 + skew_double,
+                                  wmma::mem_col_major);
+        }
+      else if (direction == 1)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          if (warpId != 0)
+            return;
+
+          wmma::fragment<wmma::matrix_a,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::row_major>
+                                                              b_frag;
+          wmma::fragment<wmma::accumulator, 16, 16, 8, float> c_frag;
+
+          if (add)
+            wmma::load_matrix_sync(c_frag,
+                                   &out[warpId * 16 * (16 + skew_double)],
+                                   16 + skew_double,
+                                   wmma::mem_row_major);
+          else
+            wmma::fill_fragment(c_frag, 0.0f);
+
+          if (add)
+            __syncthreads();
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 8],
+                                     16 + skew_double);
+#pragma unroll
+              for (int t = 0; t < a_frag.num_elements; t++)
+                {
+                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+                }
+
+              wmma::load_matrix_sync(b_frag,
+                                     &in[warpId * 16 * (16 + skew_double) +
+                                         i * 8 * (16 + skew_double)],
+                                     16 + skew_double);
+#pragma unroll
+              for (int t = 0; t < b_frag.num_elements; t++)
+                {
+                  b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+                }
+              wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+
+          wmma::store_matrix_sync(&out[warpId * 16 * (16 + skew_double)],
+                                  c_frag,
+                                  16 + skew_double,
+                                  wmma::mem_row_major);
+        }
+    }
+  };
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 16, float, LaplaceVariant::TensorCore, 3>
+  {
+    using Number = float;
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int n_dofs_1d   = 16;
+      constexpr unsigned int skew_double = Util::padding;
+
+      if (direction == 0)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          wmma::fragment<wmma::matrix_a,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::col_major>
+            b_frag;
+          wmma::fragment<wmma::accumulator, 16, 16, 8, float>
+            c_frag[n_dofs_1d / 8];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 8],
+                                     16 + skew_double);
+#pragma unroll
+              for (int t = 0; t < a_frag.num_elements; t++)
+                {
+                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+                }
+              for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
+                {
+                  wmma::load_matrix_sync(
+                    b_frag,
+                    &in[(z * 8 + warpId) * 16 * (16 + skew_double) + i * 8],
+                    16 + skew_double);
+#pragma unroll
+                  for (int t = 0; t < b_frag.num_elements; t++)
+                    {
+                      b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+                    }
+
+                  wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
+            wmma::store_matrix_sync(
+              &out[(z * 8 + warpId) * 16 * (16 + skew_double)],
+              c_frag[z],
+              16 + skew_double,
+              wmma::mem_col_major);
+        }
+      else if (direction == 1)
+        {
+          const unsigned int warpId =
+            (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
+
+          wmma::fragment<wmma::matrix_a,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::row_major>
+            a_frag;
+          wmma::fragment<wmma::matrix_b,
+                         16,
+                         16,
+                         8,
+                         wmma::precision::tf32,
+                         wmma::row_major>
+            b_frag;
+          wmma::fragment<wmma::accumulator, 16, 16, 8, float>
+            c_frag[n_dofs_1d / 8];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
+            if (add)
+              wmma::load_matrix_sync(
+                c_frag[z],
+                &out[(z * 8 + warpId) * 16 * (16 + skew_double)],
+                16 + skew_double,
+                wmma::mem_row_major);
+            else
+              wmma::fill_fragment(c_frag[z], 0.0f);
+
+          if (add)
+            __syncthreads();
+
+          for (int i = 0; i < 2; ++i)
+            {
+              wmma::load_matrix_sync(a_frag,
+                                     &shape_data[i * 8],
+                                     16 + skew_double);
+#pragma unroll
+              for (int t = 0; t < a_frag.num_elements; t++)
+                {
+                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+                }
+              for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
+                {
+                  wmma::load_matrix_sync(
+                    b_frag,
+                    &in[(z * 8 + warpId) * 16 * (16 + skew_double) +
+                        i * 8 * (16 + skew_double)],
+                    16 + skew_double);
+#pragma unroll
+                  for (int t = 0; t < b_frag.num_elements; t++)
+                    {
+                      b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+                    }
+                  wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
+            wmma::store_matrix_sync(
+              &out[(z * 8 + warpId) * 16 * (16 + skew_double)],
+              c_frag[z],
+              16 + skew_double,
+              wmma::mem_row_major);
+        }
+      else
+        {
+          constexpr int n_dofs_1d_padding = n_dofs_1d + skew_double;
+          constexpr int stride            = n_dofs_1d * n_dofs_1d_padding;
+
+          const int row = threadIdx.y;
+          const int col = threadIdx.x % n_dofs_1d;
+
+          float pval[n_dofs_1d];
+
+          // kernel product: A kdot src, [N x N] * [N^dim, 1]
+          for (unsigned int z = 0; z < n_dofs_1d; ++z)
+            {
+              pval[z] = 0;
+              // #pragma unroll
+              for (int k = 0; k < n_dofs_1d; ++k)
+                {
+                  const unsigned int shape_idx = row * n_dofs_1d_padding + k;
+                  const unsigned int source_idx =
+                    z * n_dofs_1d_padding + col + k * stride;
+
+                  pval[z] += shape_data[shape_idx] * in[source_idx];
+                }
+            }
+
+          for (unsigned int z = 0; z < n_dofs_1d; ++z)
+            {
+              const unsigned int destination_idx =
+                z * n_dofs_1d_padding + col + row * stride;
+
+              if (add)
+                out[destination_idx] += pval[z];
+              else if (sub)
+                out[destination_idx] -= pval[z];
+              else
+                out[destination_idx] = pval[z];
+            }
+        }
+    }
+  };
+
+
+
+  ////////////////////////////////////////////////////////////////////
+  //////////////////// TPEvaluatorLaplace ////////////////////////////
+  ////////////////////////////////////////////////////////////////////
+  template <LaplaceVariant laplace_type,
+            typename Number,
+            int n_dofs_1d,
+            int dim>
+  struct TPEvaluatorLaplace
+    : TPEvaluatorBase<TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, dim>,
+                      n_dofs_1d,
+                      Number,
+                      laplace_type,
+                      dim>
+  {
+    using TPEvaluatorBase<
+      TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, dim>,
+      n_dofs_1d,
+      Number,
+      laplace_type,
+      dim>::apply;
+    __device__ void
+    vmult()
+    {}
+  };
+
+  template <LaplaceVariant laplace_type, typename Number, int n_dofs_1d>
+  struct TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, 2>
+    : TPEvaluatorBase<TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, 2>,
+                      n_dofs_1d,
+                      Number,
+                      laplace_type,
+                      2>
+  {
+    using TPEvaluatorBase<
+      TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, 2>,
+      n_dofs_1d,
+      Number,
+      laplace_type,
+      2>::apply;
+
+    __device__ void
+    vmult_impl(Number       *dst,
+               const Number *src,
+               const Number *mass_matrix,
+               const Number *derivative_matrix,
+               Number       *tmp)
+    {
+      constexpr unsigned int offset = n_dofs_1d * (n_dofs_1d + Util::padding);
+
+      apply<0, false>(mass_matrix, src, tmp);
+      __syncthreads();
+      apply<1, false>(&derivative_matrix[offset], tmp, dst);
+      __syncthreads();
+      apply<0, false>(derivative_matrix, src, tmp);
+      __syncthreads();
+      apply<1, true>(&mass_matrix[offset], tmp, dst);
+    }
+  };
+
+  template <LaplaceVariant laplace_type, typename Number, int n_dofs_1d>
+  struct TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, 3>
+    : TPEvaluatorBase<TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, 3>,
+                      n_dofs_1d,
+                      Number,
+                      laplace_type,
+                      3>
+  {
+    using TPEvaluatorBase<
+      TPEvaluatorLaplace<laplace_type, Number, n_dofs_1d, 3>,
+      n_dofs_1d,
+      Number,
+      laplace_type,
+      3>::apply;
+
+    __device__ void
+    vmult_impl(Number       *dst,
+               const Number *src,
+               const Number *mass_matrix,
+               const Number *derivative_matrix,
+               Number       *tmp)
+    {
+      constexpr unsigned int local_dim =
+        Util::pow(n_dofs_1d, 2) * (n_dofs_1d + Util::padding);
+      constexpr unsigned int offset = n_dofs_1d * (n_dofs_1d + Util::padding);
+
+      apply<0, false>(mass_matrix, src, &tmp[local_dim]);
+      __syncthreads();
+      apply<1, false>(&mass_matrix[offset], &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<2, false>(&derivative_matrix[offset * 2], tmp, dst);
+      __syncthreads();
+      apply<1, false>(&derivative_matrix[offset], &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<0, false>(derivative_matrix, src, &tmp[local_dim]);
+      __syncthreads();
+      apply<1, true>(&mass_matrix[offset], &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<2, true>(&mass_matrix[offset * 2], tmp, dst);
+    }
+  };
+
+
+  ////////////////////////////////////////////////////////////////////
+  //////////////////// TPEvaluatorSmoother ///////////////////////////
+  ////////////////////////////////////////////////////////////////////
+  template <typename Number,
+            int            n_dofs_1d,
+            LaplaceVariant laplace_type,
+            int            dim>
+  struct TPEvaluatorSmootherVmult
+    : TPEvaluatorBase<
+        TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, dim>,
+        n_dofs_1d,
+        Number,
+        laplace_type,
+        dim>
+  {
+    using TPEvaluatorBase<
+      TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, dim>,
+      n_dofs_1d,
+      Number,
+      laplace_type,
+      dim>::apply;
+
+    __device__ void
+    vmult_impl(Number       *dst,
+               const Number *src,
+               const Number *mass_matrix,
+               const Number *derivative_matrix,
+               Number       *tmp)
+    {}
+  };
+
+
+  template <typename Number, int n_dofs_1d, LaplaceVariant laplace_type>
+  struct TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, 2>
+    : TPEvaluatorBase<
+        TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, 2>,
+        n_dofs_1d,
+        Number,
+        laplace_type,
+        2>
+  {
+    using TPEvaluatorBase<
+      TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, 2>,
+      n_dofs_1d,
+      Number,
+      laplace_type,
+      2>::apply;
+
+    __device__ void
+    vmult_impl(Number       *dst,
+               const Number *src,
+               const Number *mass_matrix,
+               const Number *derivative_matrix,
+               Number       *tmp)
+    {
+      apply<0, false>(mass_matrix, src, tmp);
+      __syncthreads();
+      apply<1, false, true>(derivative_matrix, tmp, dst);
+      __syncthreads();
+      apply<0, false>(derivative_matrix, src, tmp);
+      __syncthreads();
+      apply<1, false, true>(mass_matrix, tmp, dst);
+    }
+  };
+
+  template <typename Number, int n_dofs_1d, LaplaceVariant laplace_type>
+  struct TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, 3>
+    : TPEvaluatorBase<
+        TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, 3>,
+        n_dofs_1d,
+        Number,
+        laplace_type,
+        3>
+  {
+    using TPEvaluatorBase<
+      TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace_type, 3>,
+      n_dofs_1d,
+      Number,
+      laplace_type,
+      3>::apply;
+
+    __device__ void
+    vmult_impl(Number       *dst,
+               const Number *src,
+               const Number *mass_matrix,
+               const Number *derivative_matrix,
+               Number       *tmp)
+    {
+      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, 3);
+
+      apply<0, false>(mass_matrix, src, &tmp[local_dim]);
+      __syncthreads();
+      apply<1, false>(mass_matrix, &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<2, false, true>(derivative_matrix, tmp, dst);
+      __syncthreads();
+      apply<1, false>(derivative_matrix, &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<0, false>(derivative_matrix, src, &tmp[local_dim]);
+      __syncthreads();
+      apply<1, true>(mass_matrix, &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<2, false, true>(mass_matrix, tmp, dst);
+    }
+  };
+
+
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherVmult<Number,
+                                  n_dofs_1d,
+                                  LaplaceVariant::TensorCore,
+                                  2>
+    : TPEvaluatorBase<TPEvaluatorSmootherVmult<Number,
+                                               n_dofs_1d,
+                                               LaplaceVariant::TensorCore,
+                                               2>,
+                      n_dofs_1d,
+                      Number,
+                      LaplaceVariant::TensorCore,
+                      2>
+  {
+    using TPEvaluatorBase<TPEvaluatorSmootherVmult<Number,
+                                                   n_dofs_1d,
+                                                   LaplaceVariant::TensorCore,
+                                                   2>,
+                          n_dofs_1d,
+                          Number,
+                          LaplaceVariant::TensorCore,
+                          2>::apply;
+
+    __device__ void
+    vmult_impl(Number       *dst,
+               const Number *src,
+               const Number *mass_matrix,
+               const Number *derivative_matrix,
+               Number       *tmp)
+    {
+      apply<0, false>(mass_matrix, src, tmp);
+      __syncthreads();
+      apply<1, false, false>(derivative_matrix, tmp, tmp);
+      __syncthreads();
+      dst[threadIdx.y * n_dofs_1d + threadIdx.x] -=
+        tmp[threadIdx.y * n_dofs_1d + threadIdx.x];
+      __syncthreads();
+      apply<0, false>(derivative_matrix, src, tmp);
+      __syncthreads();
+      apply<1, false, false>(mass_matrix, tmp, tmp);
+      __syncthreads();
+      dst[threadIdx.y * n_dofs_1d + threadIdx.x] -=
+        tmp[threadIdx.y * n_dofs_1d + threadIdx.x];
+    }
+  };
+
+
+
+  template <typename Number,
+            int             n_dofs_1d,
+            SmootherVariant smoother_type,
+            int             dim>
+  struct TPEvaluatorSmootherInv
+  {
+    __device__ void
+    apply_inverse(Number       *dst,
+                  Number       *src,
+                  const Number *eigenvalues,
+                  const Number *eigenvectors,
+                  Number       *tmp)
+    {}
+
+    template <int direction, bool contract_over_rows, bool add = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {}
+  };
+
+
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::GLOBAL, 2>
+  {
+    __device__ void
+    apply_inverse(Number       *dst,
+                  Number       *src,
+                  const Number *eigenvalues,
+                  const Number *eigenvectors,
+                  Number       *tmp)
+    {
+      apply<0, true>(eigenvectors, src, tmp);
+      __syncthreads();
+      apply<1, true>(eigenvectors, tmp, src);
+      __syncthreads();
+      src[threadIdx.y * n_dofs_1d + threadIdx.x % n_dofs_1d] /=
+        (eigenvalues[threadIdx.y] + eigenvalues[threadIdx.x % n_dofs_1d]);
+      __syncthreads();
+      apply<0, false>(eigenvectors, src, tmp);
+      __syncthreads();
+      apply<1, false, true>(eigenvectors, tmp, dst);
+    }
+
+    template <int direction, bool contract_over_rows, bool add = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
+
+      Number pval = 0;
+
+      // kernel product: A kdot src, [N x N] * [N^dim, 1]
+      // #pragma unroll
+      for (unsigned int k = 0; k < n_dofs_1d; ++k)
+        {
+          const unsigned int shape_idx =
+            contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
+
+          const unsigned int source_idx =
+            (direction == 0) ? (col * n_dofs_1d + k) : (k * n_dofs_1d + col);
+
+          pval += shape_data[shape_idx] * in[source_idx];
+        }
+
+
+      const unsigned int destination_idx =
+        (direction == 0) ? (col * n_dofs_1d + row) : (row * n_dofs_1d + col);
       if (add)
         out[destination_idx] += pval;
       else
@@ -790,93 +1561,75 @@ namespace PSMF
     }
   };
 
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             3,
-                             SmootherVariant::SEPERATE,
-                             DoFLayout::Q>
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::GLOBAL, 3>
   {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
-
-    /**
-     * Apply inverse to @p src.
-     */
     __device__ void
     apply_inverse(Number       *dst,
                   Number       *src,
                   const Number *eigenvalues,
                   const Number *eigenvectors,
-                  Number       *temp)
+                  Number       *tmp)
     {
-      constexpr unsigned int local_dim   = Util::pow(kernel_size, 3);
-      const unsigned int     local_tid_x = threadIdx.x % kernel_size;
+      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, 3);
 
-      apply<0, true>(eigenvectors, src, temp);
+      apply<0, true>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, true>(eigenvectors, temp, src);
+      apply<1, true>(eigenvectors, tmp, &tmp[local_dim]);
       __syncthreads();
-      apply<2, true>(eigenvectors, src, temp);
+      apply<2, true>(eigenvectors, &tmp[local_dim], tmp);
       __syncthreads();
-      for (unsigned int z = 0; z < kernel_size; ++z)
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
         {
-          temp[z * kernel_size * kernel_size + threadIdx.y * kernel_size +
-               local_tid_x] /= (eigenvalues[z] + eigenvalues[threadIdx.y] +
-                                eigenvalues[local_tid_x]);
+          tmp[z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d +
+              threadIdx.x % n_dofs_1d] /=
+            (eigenvalues[z] + eigenvalues[threadIdx.y] +
+             eigenvalues[threadIdx.x % n_dofs_1d]);
         }
       __syncthreads();
-      apply<0, false>(eigenvectors, temp, src);
+      apply<0, false>(eigenvectors, tmp, &tmp[local_dim]);
       __syncthreads();
-      apply<1, false>(eigenvectors, src, temp);
+      apply<1, false>(eigenvectors, &tmp[local_dim], tmp);
       __syncthreads();
-      apply<2, false, true>(eigenvectors, temp, dst);
+      apply<2, false, true>(eigenvectors, tmp, dst);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool contract_over_rows, bool add = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr int stride = kernel_size * kernel_size;
+      constexpr unsigned int stride = n_dofs_1d * n_dofs_1d;
 
       const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
 
-      Number pval[kernel_size];
+      Number pval[n_dofs_1d];
 
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      for (unsigned int z = 0; z < kernel_size; ++z)
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
         {
           pval[z] = 0;
           // #pragma unroll
-          for (unsigned int k = 0; k < kernel_size; ++k)
+          for (unsigned int k = 0; k < n_dofs_1d; ++k)
             {
-              const unsigned int shape_idx = contract_over_rows ?
-                                               k * kernel_size + row :
-                                               row * kernel_size + k;
+              const unsigned int shape_idx =
+                contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
 
               const unsigned int source_idx =
-                (direction == 0) ? (col * kernel_size + k + z * stride) :
-                (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                   (z * kernel_size + col + k * stride);
+                (direction == 0) ? (col * n_dofs_1d + k + z * stride) :
+                (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                   (z * n_dofs_1d + col + k * stride);
 
               pval[z] += shape_data[shape_idx] * in[source_idx];
             }
         }
 
-      for (unsigned int z = 0; z < kernel_size; ++z)
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
         {
           const unsigned int destination_idx =
-            (direction == 0) ? (col * kernel_size + row + z * stride) :
-            (direction == 1) ? (row * kernel_size + col + z * stride) :
-                               (z * kernel_size + col + row * stride);
+            (direction == 0) ? (col * n_dofs_1d + row + z * stride) :
+            (direction == 1) ? (row * n_dofs_1d + col + z * stride) :
+                               (z * n_dofs_1d + col + row * stride);
           if (add)
             out[destination_idx] += pval[z];
           else
@@ -886,84 +1639,70 @@ namespace PSMF
   };
 
 
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             2,
-                             SmootherVariant::FUSED_BASE,
-                             DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
 
-    /**
-     * Apply inverse to @p src.
-     */
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::FUSED_L, 2>
+  {
     __device__ void
     apply_inverse(Number       *dst,
                   Number       *src,
                   const Number *eigenvalues,
                   const Number *eigenvectors,
-                  Number       *temp)
+                  Number       *tmp)
     {
-      const unsigned int local_tid_x = threadIdx.x % kernel_size;
+      const unsigned int linear_tid =
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      apply<0, true>(eigenvectors, src, temp);
+      unsigned int row = linear_tid / (n_dofs_1d - 2) + 1;
+      unsigned int col = linear_tid % (n_dofs_1d - 2) + 1;
+
+      apply<0, true>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, true>(eigenvectors, temp, src);
+      apply<1, true>(eigenvectors, tmp, src);
       __syncthreads();
-      if (0 < local_tid_x && local_tid_x < kernel_size - 1 && 0 < threadIdx.y &&
-          threadIdx.y < kernel_size - 1)
-        src[threadIdx.y * kernel_size + local_tid_x] /=
-          (eigenvalues[threadIdx.y] + eigenvalues[local_tid_x]);
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+        src[row * n_dofs_1d + col] /= (eigenvalues[row] + eigenvalues[col]);
       __syncthreads();
-      apply<0, false>(eigenvectors, src, temp);
+      apply<0, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, false, true>(eigenvectors, temp, dst);
+      apply<1, false, true>(eigenvectors, tmp, dst);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool contract_over_rows, bool add = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      const unsigned int row = threadIdx.y;
-      const unsigned int col = threadIdx.x % kernel_size;
+      const unsigned int linear_tid =
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
+
+      const unsigned int row = linear_tid / (n_dofs_1d - 2) + 1;
+      const unsigned int col = linear_tid % (n_dofs_1d - 2) + 1;
 
       Number pval;
 
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      if (0 < col && col < kernel_size - 1 && 0 < threadIdx.y &&
-          threadIdx.y < kernel_size - 1)
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
         {
           pval = 0;
           // #pragma unroll
-          for (unsigned int k = 1; k < kernel_size - 1; ++k)
+          for (unsigned int k = 1; k < n_dofs_1d - 1; ++k)
             {
-              const unsigned int shape_idx = contract_over_rows ?
-                                               k * kernel_size + row :
-                                               row * kernel_size + k;
+              const unsigned int shape_idx =
+                contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
 
               const unsigned int source_idx = (direction == 0) ?
-                                                (col * kernel_size + k) :
-                                                (k * kernel_size + col);
+                                                (col * n_dofs_1d + k) :
+                                                (k * n_dofs_1d + col);
 
               pval += shape_data[shape_idx] * in[source_idx];
             }
         }
 
-      if (0 < col && col < kernel_size - 1 && 0 < threadIdx.y &&
-          threadIdx.y < kernel_size - 1)
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
         {
           const unsigned int destination_idx = (direction == 0) ?
-                                                 (col * kernel_size + row) :
-                                                 (row * kernel_size + col);
+                                                 (col * n_dofs_1d + row) :
+                                                 (row * n_dofs_1d + col);
           if (add)
             out[destination_idx] += pval;
           else
@@ -972,396 +1711,165 @@ namespace PSMF
     }
   };
 
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             3,
-                             SmootherVariant::FUSED_BASE,
-                             DoFLayout::Q>
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::FUSED_L, 3>
   {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
-
-    /**
-     * Apply inverse to @p src.
-     */
     __device__ void
     apply_inverse(Number       *dst,
                   Number       *src,
                   const Number *eigenvalues,
                   const Number *eigenvectors,
-                  Number       *temp)
+                  Number       *tmp)
     {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-      const unsigned int     row       = threadIdx.y;
-      const unsigned int     col       = threadIdx.x % kernel_size;
-
-      apply<0, true>(eigenvectors, src, temp);
-      __syncthreads();
-      apply<1, true>(eigenvectors, temp, &temp[local_dim]);
-      __syncthreads();
-      apply<2, true>(eigenvectors, &temp[local_dim], temp);
-      __syncthreads();
-      if (0 < col && col < kernel_size - 1 && 0 < threadIdx.y &&
-          threadIdx.y < kernel_size - 1)
-        for (unsigned int z = 1; z < kernel_size - 1; ++z)
-          temp[z * kernel_size * kernel_size + row * kernel_size + col] /=
-            (eigenvalues[z] + eigenvalues[row] + eigenvalues[col]);
-      __syncthreads();
-      apply<0, false>(eigenvectors, temp, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(eigenvectors, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(eigenvectors, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool contract_over_rows, bool add = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      constexpr unsigned int stride = kernel_size * kernel_size;
-      const unsigned int     row    = threadIdx.y;
-      const unsigned int     col    = threadIdx.x % kernel_size;
-
-      Number pval[kernel_size];
-
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      if (0 < col && col < kernel_size - 1 && 0 < threadIdx.y &&
-          threadIdx.y < kernel_size - 1)
-        for (unsigned int z = 1; z < kernel_size - 1; ++z)
-          {
-            pval[z] = 0;
-            // #pragma unroll
-            for (unsigned int k = 1; k < kernel_size - 1; ++k)
-              {
-                const unsigned int shape_idx = contract_over_rows ?
-                                                 k * kernel_size + row :
-                                                 row * kernel_size + k;
-
-                const unsigned int source_idx =
-                  (direction == 0) ? (col * kernel_size + k + z * stride) :
-                  (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                     (z * kernel_size + col + k * stride);
-
-                pval[z] += shape_data[shape_idx] * in[source_idx];
-              }
-          }
-
-      if (0 < col && col < kernel_size - 1 && 0 < threadIdx.y &&
-          threadIdx.y < kernel_size - 1)
-        for (unsigned int z = 1; z < kernel_size - 1; ++z)
-          {
-            const unsigned int destination_idx =
-              (direction == 0) ? (col * kernel_size + row + z * stride) :
-              (direction == 1) ? (row * kernel_size + col + z * stride) :
-                                 (z * kernel_size + col + row * stride);
-            if (add)
-              out[destination_idx] += pval[z];
-            else
-              out[destination_idx] = pval[z];
-          }
-    }
-  };
-
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             2,
-                             SmootherVariant::FUSED_L,
-                             DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
-
-    /**
-     * Apply inverse to @p src.
-     */
-    __device__ void
-    apply_inverse(Number       *dst,
-                  Number       *src,
-                  const Number *eigenvalues,
-                  const Number *eigenvectors,
-                  Number       *temp)
-    {
-      const unsigned int linear_tid =
-        threadIdx.x % kernel_size + threadIdx.y * kernel_size;
-
-      unsigned int row = linear_tid / (kernel_size - 2) + 1;
-      unsigned int col = linear_tid % (kernel_size - 2) + 1;
-
-      apply<0, true>(eigenvectors, src, temp);
-      __syncthreads();
-      apply<1, true>(eigenvectors, temp, src);
-      __syncthreads();
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        src[row * kernel_size + col] /= (eigenvalues[row] + eigenvalues[col]);
-      __syncthreads();
-      apply<0, false>(eigenvectors, src, temp);
-      __syncthreads();
-      apply<1, false, true>(eigenvectors, temp, dst);
-    }
-
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
-    template <int direction, bool contract_over_rows, bool add = false>
-    __device__ void
-    apply(const Number *shape_data, const Number *in, Number *out)
-    {
-      const unsigned int linear_tid =
-        threadIdx.x % kernel_size + threadIdx.y * kernel_size;
-
-      const unsigned int row = linear_tid / (kernel_size - 2) + 1;
-      const unsigned int col = linear_tid % (kernel_size - 2) + 1;
-
-      Number pval;
-
-      // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        {
-          pval = 0;
-          // #pragma unroll
-          for (unsigned int k = 1; k < kernel_size - 1; ++k)
-            {
-              const unsigned int shape_idx = contract_over_rows ?
-                                               k * kernel_size + row :
-                                               row * kernel_size + k;
-
-              const unsigned int source_idx = (direction == 0) ?
-                                                (col * kernel_size + k) :
-                                                (k * kernel_size + col);
-
-              pval += shape_data[shape_idx] * in[source_idx];
-            }
-        }
-
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        {
-          const unsigned int destination_idx = (direction == 0) ?
-                                                 (col * kernel_size + row) :
-                                                 (row * kernel_size + col);
-          if (add)
-            out[destination_idx] += pval;
-          else
-            out[destination_idx] = pval;
-        }
-    }
-  };
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             3,
-                             SmootherVariant::FUSED_L,
-                             DoFLayout::DGQ>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
-
-    /**
-     * Apply inverse to @p src.
-     */
-    __device__ void
-    apply_inverse(Number       *dst,
-                  Number       *src,
-                  const Number *eigenvalues,
-                  const Number *eigenvectors,
-                  Number       *temp)
-    {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
+      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, 3);
       const unsigned int     linear_tid =
-        threadIdx.x % kernel_size + threadIdx.y * kernel_size;
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      unsigned int row = linear_tid / (kernel_size - 2) + 1;
-      unsigned int col = linear_tid % (kernel_size - 2) + 1;
+      unsigned int row = linear_tid / (n_dofs_1d - 2) + 1;
+      unsigned int col = linear_tid % (n_dofs_1d - 2) + 1;
 
-      apply<0, true>(eigenvectors, src, temp);
+      apply<0, true>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, true>(eigenvectors, temp, &temp[local_dim]);
+      apply<1, true>(eigenvectors, tmp, &tmp[local_dim]);
       __syncthreads();
-      apply<2, true>(eigenvectors, &temp[local_dim], temp);
+      apply<2, true>(eigenvectors, &tmp[local_dim], tmp);
       __syncthreads();
-      for (unsigned int z = 1; z < kernel_size - 1; ++z)
-        {
-          if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-            temp[z * kernel_size * kernel_size + row * kernel_size + col] /=
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+        for (unsigned int z = 1; z < n_dofs_1d - 1; ++z)
+          {
+            tmp[z * n_dofs_1d * n_dofs_1d + row * n_dofs_1d + col] /=
               (eigenvalues[z] + eigenvalues[row] + eigenvalues[col]);
-        }
+          }
       __syncthreads();
-      apply<0, false>(eigenvectors, temp, &temp[local_dim]);
+      apply<0, false>(eigenvectors, tmp, &tmp[local_dim]);
       __syncthreads();
-      apply<1, false>(eigenvectors, &temp[local_dim], temp);
+      apply<1, false>(eigenvectors, &tmp[local_dim], tmp);
       __syncthreads();
-      apply<2, false, true>(eigenvectors, temp, dst);
+      apply<2, false, true>(eigenvectors, tmp, dst);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool contract_over_rows, bool add = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr int      stride = kernel_size * kernel_size;
-      const unsigned int linear_tid =
-        threadIdx.x % kernel_size + threadIdx.y * kernel_size;
+      constexpr unsigned int stride = n_dofs_1d * n_dofs_1d;
+      const unsigned int     linear_tid =
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      const unsigned int row = linear_tid / (kernel_size - 2) + 1;
-      const unsigned int col = linear_tid % (kernel_size - 2) + 1;
+      const unsigned int row = linear_tid / (n_dofs_1d - 2) + 1;
+      const unsigned int col = linear_tid % (n_dofs_1d - 2) + 1;
 
-      Number pval[kernel_size];
+      Number pval[n_dofs_1d - 2];
 
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        for (unsigned int z = 1; z < kernel_size - 1; ++z)
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+        for (unsigned int z = 1; z < n_dofs_1d - 1; ++z)
           {
-            pval[z] = 0;
+            pval[z - 1] = 0;
             // #pragma unroll
-            for (unsigned int k = 1; k < kernel_size - 1; ++k)
+            for (unsigned int k = 1; k < n_dofs_1d - 1; ++k)
               {
                 const unsigned int shape_idx = contract_over_rows ?
-                                                 k * kernel_size + row :
-                                                 row * kernel_size + k;
+                                                 k * n_dofs_1d + row :
+                                                 row * n_dofs_1d + k;
 
                 const unsigned int source_idx =
-                  (direction == 0) ? (col * kernel_size + k + z * stride) :
-                  (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                     (z * kernel_size + col + k * stride);
+                  (direction == 0) ? (col * n_dofs_1d + k + z * stride) :
+                  (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                     (z * n_dofs_1d + col + k * stride);
 
-                pval[z] += shape_data[shape_idx] * in[source_idx];
+                pval[z - 1] += shape_data[shape_idx] * in[source_idx];
               }
           }
 
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        for (unsigned int z = 1; z < kernel_size - 1; ++z)
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+        for (unsigned int z = 1; z < n_dofs_1d - 1; ++z)
           {
             const unsigned int destination_idx =
-              (direction == 0) ? (col * kernel_size + row + z * stride) :
-              (direction == 1) ? (row * kernel_size + col + z * stride) :
-                                 (z * kernel_size + col + row * stride);
+              (direction == 0) ? (col * n_dofs_1d + row + z * stride) :
+              (direction == 1) ? (row * n_dofs_1d + col + z * stride) :
+                                 (z * n_dofs_1d + col + row * stride);
             if (add)
-              out[destination_idx] += pval[z];
+              out[destination_idx] += pval[z - 1];
             else
-              out[destination_idx] = pval[z];
+              out[destination_idx] = pval[z - 1];
           }
     }
   };
 
 
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             3,
-                             SmootherVariant::FUSED_3D,
-                             DoFLayout::Q>
-  {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
 
-    /**
-     * Apply inverse to @p src.
-     */
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number,
+                                n_dofs_1d,
+                                SmootherVariant::ConflictFree,
+                                2>
+  {
     __device__ void
     apply_inverse(Number       *dst,
                   Number       *src,
                   const Number *eigenvalues,
                   const Number *eigenvectors,
-                  Number       *temp)
+                  Number       *tmp)
     {
-      constexpr unsigned int local_dim = Util::pow(kernel_size, 3);
-      const unsigned int     linear_tid =
-        threadIdx.x % kernel_size +
-        (threadIdx.y + threadIdx.z * kernel_size) * kernel_size;
+      const unsigned int linear_tid =
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      const unsigned int row =
-        (linear_tid / (kernel_size - 2)) % ((kernel_size - 2)) + 1;
-      const unsigned int col = linear_tid % (kernel_size - 2) + 1;
-      const unsigned int z =
-        linear_tid / ((kernel_size - 2) * (kernel_size - 2)) + 1;
+      unsigned int row = linear_tid / (n_dofs_1d - 2);
+      unsigned int col = linear_tid % (n_dofs_1d - 2);
 
-      apply<0, true>(eigenvectors, src, temp);
+      apply<0, true>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, true>(eigenvectors, temp, &temp[local_dim]);
+      apply<1, true>(eigenvectors, tmp, src);
       __syncthreads();
-      apply<2, true>(eigenvectors, &temp[local_dim], temp);
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+        src[row * (n_dofs_1d - 2) + col] /=
+          (eigenvalues[row] + eigenvalues[col]);
       __syncthreads();
-      if (linear_tid <
-          (kernel_size - 2) * (kernel_size - 2) * (kernel_size - 2))
-        temp[z * kernel_size * kernel_size + row * kernel_size + col] /=
-          (eigenvalues[z] + eigenvalues[row] + eigenvalues[col]);
+      apply<0, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<0, false>(eigenvectors, temp, &temp[local_dim]);
-      __syncthreads();
-      apply<1, false>(eigenvectors, &temp[local_dim], temp);
-      __syncthreads();
-      apply<2, false, true>(eigenvectors, temp, dst);
-      __syncthreads();
+      apply<1, false, true>(eigenvectors, tmp, dst);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool contract_over_rows, bool add = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr unsigned int stride = kernel_size * kernel_size;
+      constexpr unsigned int n_dofs_1d_i = n_dofs_1d - 2;
       const unsigned int     linear_tid =
-        threadIdx.x % kernel_size +
-        (threadIdx.y + threadIdx.z * kernel_size) * kernel_size;
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      int row = (linear_tid / (kernel_size - 2)) % ((kernel_size - 2)) + 1;
-      int col = linear_tid % (kernel_size - 2) + 1;
-      int z   = linear_tid / ((kernel_size - 2) * (kernel_size - 2)) + 1;
+      const unsigned int row = linear_tid / n_dofs_1d_i;
+      const unsigned int col = linear_tid % n_dofs_1d_i;
 
-      Number pval = 0;
+      Number pval;
 
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      // #pragma unroll
-      if (linear_tid <
-          (kernel_size - 2) * (kernel_size - 2) * (kernel_size - 2))
-        for (unsigned int k = 1; k < kernel_size - 1; ++k)
-          {
-            const unsigned int shape_idx = contract_over_rows ?
-                                             k * kernel_size + row :
-                                             row * kernel_size + k;
-
-            const unsigned int source_idx =
-              (direction == 0) ? (col * kernel_size + k + z * stride) :
-              (direction == 1) ? (k * kernel_size + col + z * stride) :
-                                 (z * kernel_size + col + k * stride);
-
-            pval += shape_data[shape_idx] * in[source_idx];
-          }
-
-
-      if (linear_tid <
-          (kernel_size - 2) * (kernel_size - 2) * (kernel_size - 2))
+      if (linear_tid < n_dofs_1d_i * n_dofs_1d_i)
         {
-          const unsigned int destination_idx =
-            (direction == 0) ? (col * kernel_size + row + z * stride) :
-            (direction == 1) ? (row * kernel_size + col + z * stride) :
-                               (z * kernel_size + col + row * stride);
+          pval = 0;
+          // #pragma unroll
+          for (unsigned int k = 0; k < n_dofs_1d_i; ++k)
+            {
+              const unsigned int shape_idx =
+                contract_over_rows ?
+                  ((direction == 0) ? k * n_dofs_1d_i + col :
+                                      k * n_dofs_1d_i + row) :
+                  ((direction == 0) ? col * n_dofs_1d_i + k :
+                                      row * n_dofs_1d_i + k);
+
+              const unsigned int source_idx = (direction == 0) ?
+                                                (row * n_dofs_1d_i + k) :
+                                                (k * n_dofs_1d_i + col);
+
+              pval += shape_data[shape_idx] * in[source_idx];
+            }
+        }
+
+      if (linear_tid < n_dofs_1d_i * n_dofs_1d_i)
+        {
+          const unsigned int destination_idx = row * n_dofs_1d_i + col;
+
           if (add)
             out[destination_idx] += pval;
           else
@@ -1370,108 +1878,90 @@ namespace PSMF
     }
   };
 
-
-
-  template <int kernel_size, typename Number>
-  struct TPEvaluator_inverse<kernel_size,
-                             Number,
-                             3,
-                             SmootherVariant::FUSED_CF,
-                             DoFLayout::Q>
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number,
+                                n_dofs_1d,
+                                SmootherVariant::ConflictFree,
+                                3>
   {
-    /**
-     *  Constructor.
-     */
-    __device__
-    TPEvaluator_inverse()
-    {}
-
-    /**
-     * Apply inverse to @p src.
-     */
     __device__ void
     apply_inverse(Number       *dst,
                   Number       *src,
                   const Number *eigenvalues,
                   const Number *eigenvectors,
-                  Number       *temp)
+                  Number       *tmp)
     {
-      const unsigned int patch_per_block = blockDim.x / kernel_size;
-      const unsigned int local_dim =
-        Util::pow(kernel_size, 3) * patch_per_block;
       const unsigned int linear_tid =
-        threadIdx.x % kernel_size + threadIdx.y * kernel_size;
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      unsigned int row = linear_tid / (kernel_size - 2);
-      unsigned int col = linear_tid % (kernel_size - 2);
+      unsigned int row = linear_tid / (n_dofs_1d - 2);
+      unsigned int col = linear_tid % (n_dofs_1d - 2);
 
-      apply<0, true>(eigenvectors, src, temp);
+      apply<0, true>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, true>(eigenvectors, temp, &temp[local_dim]);
+      apply<1, true>(eigenvectors, tmp, src);
       __syncthreads();
-      apply<2, true>(eigenvectors, &temp[local_dim], temp);
+      apply<2, true>(eigenvectors, src, tmp);
       __syncthreads();
-      if (linear_tid < (kernel_size - 2) * (kernel_size - 2))
-        for (unsigned int z = 0; z < kernel_size - 2; ++z)
-          temp[z * kernel_size * kernel_size + row * (kernel_size - 2) + col] /=
-            (eigenvalues[z] + eigenvalues[row] + eigenvalues[col]);
+      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+        for (unsigned int z = 0; z < n_dofs_1d - 2; ++z)
+          {
+            tmp[z * n_dofs_1d * n_dofs_1d + row * (n_dofs_1d - 2) + col] /=
+              (eigenvalues[z] + eigenvalues[row] + eigenvalues[col]);
+          }
       __syncthreads();
-      apply<0, false>(eigenvectors, temp, &temp[local_dim]);
+      apply<0, false>(eigenvectors, tmp, src);
       __syncthreads();
-      apply<1, false>(eigenvectors, &temp[local_dim], temp);
+      apply<1, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<2, false, true>(eigenvectors, temp, dst);
-      __syncthreads();
+      apply<2, false, true>(eigenvectors, tmp, dst);
     }
 
-    /**
-     * apply 1d @p shape_data vector to @p in.
-     */
     template <int direction, bool contract_over_rows, bool add = false>
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr unsigned int stride        = kernel_size * kernel_size;
-      constexpr unsigned int kernel_size_i = kernel_size - 2;
+      constexpr unsigned int stride      = n_dofs_1d * n_dofs_1d;
+      constexpr unsigned int n_dofs_1d_i = n_dofs_1d - 2;
       const unsigned int     linear_tid =
-        threadIdx.x % kernel_size + threadIdx.y * kernel_size;
+        threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-      const unsigned int row = linear_tid / kernel_size_i;
-      const unsigned int col = linear_tid % kernel_size_i;
+      const unsigned int row = linear_tid / n_dofs_1d_i;
+      const unsigned int col = linear_tid % n_dofs_1d_i;
 
-      Number pval[kernel_size_i];
+      Number pval[n_dofs_1d_i];
 
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      if (linear_tid < kernel_size_i * kernel_size_i)
-        for (unsigned int z = 0; z < kernel_size_i; ++z)
+      if (linear_tid < n_dofs_1d_i * n_dofs_1d_i)
+        for (unsigned int z = 0; z < n_dofs_1d_i; ++z)
           {
             pval[z] = 0;
             // #pragma unroll
-            for (unsigned int k = 0; k < kernel_size - 2; ++k)
+            for (unsigned int k = 0; k < n_dofs_1d_i; ++k)
               {
                 const unsigned int shape_idx =
                   contract_over_rows ?
-                    ((direction == 0) ? k * kernel_size_i + col :
-                     (direction == 1) ? k * kernel_size_i + row :
-                                        k * kernel_size_i + z) :
-                    ((direction == 0) ? col * kernel_size_i + k :
-                     (direction == 1) ? row * kernel_size_i + k :
-                                        z * kernel_size_i + k);
+                    ((direction == 0) ? k * n_dofs_1d_i + col :
+                     (direction == 1) ? k * n_dofs_1d_i + row :
+                                        k * n_dofs_1d_i + z) :
+                    ((direction == 0) ? col * n_dofs_1d_i + k :
+                     (direction == 1) ? row * n_dofs_1d_i + k :
+                                        z * n_dofs_1d_i + k);
 
                 const unsigned int source_idx =
-                  (direction == 0) ? (row * kernel_size_i + k + z * stride) :
-                  (direction == 1) ? (k * kernel_size_i + col + z * stride) :
-                                     (row * kernel_size_i + col + k * stride);
+                  (direction == 0) ? (row * n_dofs_1d_i + k + z * stride) :
+                  (direction == 1) ? (k * n_dofs_1d_i + col + z * stride) :
+                                     (row * n_dofs_1d_i + col + k * stride);
 
                 pval[z] += shape_data[shape_idx] * in[source_idx];
               }
           }
 
-      if (linear_tid < kernel_size_i * kernel_size_i)
-        for (unsigned int z = 0; z < kernel_size_i; ++z)
+      if (linear_tid < n_dofs_1d_i * n_dofs_1d_i)
+        for (unsigned int z = 0; z < n_dofs_1d_i; ++z)
           {
             const unsigned int destination_idx =
-              row * kernel_size_i + col + z * stride;
+              row * n_dofs_1d_i + col + z * stride;
 
             if (add)
               out[destination_idx] += pval[z];
@@ -1481,626 +1971,174 @@ namespace PSMF
     }
   };
 
-  /**
-   * @brief Functor. Local laplace operator based on tensor product structure.
-   *
-   * @tparam dim
-   * @tparam fe_degree
-   * @tparam Number
-   * @tparam kernel
-   * @tparam dof_layout
-   */
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  class LocalLaplace
+
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+
+  template <int dim, int fe_degree, typename Number, LaplaceVariant laplace>
+  __device__ void
+  evaluate_laplace(const unsigned int                local_patch,
+                   SharedMemData<dim, Number, true> *shared_data)
   {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
 
-    LocalLaplace()
-      : ndofs_per_dim(0)
-    {}
+    TPEvaluatorLaplace<laplace, Number, n_dofs_1d, dim> eval;
+    __syncthreads();
 
-    LocalLaplace(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(const unsigned int                                 patch,
-               const typename LevelVertexPatch<dim,
-                                               fe_degree,
-                                               Number,
-                                               kernel,
-                                               dof_layout>::Data *gpu_data,
-               SharedMemData<dim, Number, kernel> *shared_data) const
-    {}
-
-    unsigned int ndofs_per_dim;
-  };
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalLaplace<dim,
-                     fe_degree,
-                     Number,
-                     SmootherVariant::FUSED_L,
-                     DoFLayout::DGQ>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    LocalLaplace()
-      : ndofs_per_dim(0)
-    {}
-
-    LocalLaplace(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(
-      const unsigned int                                     patch,
-      const typename LevelVertexPatch<dim,
-                                      fe_degree,
-                                      Number,
-                                      SmootherVariant::FUSED_L,
-                                      DoFLayout::DGQ>::Data *gpu_data,
-      SharedMemData<dim, Number, SmootherVariant::FUSED_L>  *shared_data) const
-    {
-      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-
-      TPEvaluator_laplace<n_dofs_1d,
-                          Number,
-                          dim,
-                          SmootherVariant::FUSED_BASE,
-                          DoFLayout::DGQ>
-        eval;
-      __syncthreads();
-
-      eval.vmult(
-        &shared_data->local_dst[patch * local_dim],
-        &shared_data->local_src[patch * local_dim],
-        &shared_data->local_mass[patch * n_dofs_1d * n_dofs_1d * dim],
-        &shared_data->local_derivative[patch * n_dofs_1d * n_dofs_1d * dim],
-        &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
-
-
-
-  /**
-   * @brief Functor. Local smoother based on tensor product structure.
-   *
-   * @tparam dim
-   * @tparam fe_degree
-   * @tparam Number
-   * @tparam kernel
-   * @tparam dof_layout
-   */
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  class LocalSmoother
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
-
-    LocalSmoother()
-      : ndofs_per_dim(0)
-    {}
-
-    LocalSmoother(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(const unsigned int                                 patch,
-               const typename LevelVertexPatch<dim,
-                                               fe_degree,
-                                               Number,
-                                               kernel,
-                                               dof_layout>::Data *gpu_data,
-               SharedMemData<dim, Number, kernel> *shared_data) const
-    {}
-
-    unsigned int ndofs_per_dim;
-  };
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalSmoother<dim,
-                      fe_degree,
-                      Number,
-                      SmootherVariant::SEPERATE,
-                      DoFLayout::Q>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
-
-    LocalSmoother()
-      : ndofs_per_dim(0)
-    {}
-
-    LocalSmoother(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(
-      const unsigned int                                     patch,
-      const typename LevelVertexPatch<dim,
-                                      fe_degree,
-                                      Number,
-                                      SmootherVariant::SEPERATE,
-                                      DoFLayout::Q>::Data   *gpu_data,
-      SharedMemData<dim, Number, SmootherVariant::SEPERATE> *shared_data) const
-    {
-      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-
-      TPEvaluator_vmult<n_dofs_1d,
-                        Number,
-                        dim,
-                        SmootherVariant::SEPERATE,
-                        DoFLayout::Q>
-        eval;
-      __syncthreads();
-
-      eval.vmult(&shared_data->local_src[patch * local_dim],
-                 &shared_data->local_dst[patch * local_dim],
-                 shared_data->local_mass,
-                 shared_data->local_derivative,
-                 &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
+    eval.vmult(
+      &shared_data->local_dst[local_patch * local_dim],
+      &shared_data->local_src[local_patch * local_dim],
+      &shared_data->local_mass[local_patch * n_dofs_1d * n_dofs_1d * dim],
+      &shared_data->local_derivative[local_patch * n_dofs_1d * n_dofs_1d * dim],
+      &shared_data->tmp[local_patch * local_dim * (dim - 1)]);
+    __syncthreads();
+  }
 
   template <int dim,
             int fe_degree,
             typename Number,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  class LocalSmoother_inverse
+            LaplaceVariant  laplace,
+            SmootherVariant smooth>
+  __device__ void
+  evaluate_smooth(
+    const unsigned int                                             local_patch,
+    SharedMemData<dim, Number, false>                             *shared_data,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data *gpu_data)
   {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree - 1;
+    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
 
-    LocalSmoother_inverse()
-      : ndofs_per_dim(0)
-    {}
+    TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace, dim> eval_vmult;
+    TPEvaluatorSmootherInv<Number, n_dofs_1d, smooth, dim>    eval_inverse;
+    __syncthreads();
 
-    LocalSmoother_inverse(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
+    eval_vmult.vmult(&shared_data->local_src[local_patch * local_dim],
+                     &shared_data->local_dst[local_patch * local_dim],
+                     shared_data->local_mass,
+                     shared_data->local_derivative,
+                     &shared_data->tmp[local_patch * local_dim * (dim - 1)]);
+    __syncthreads();
 
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
+    const unsigned int linear_tid =
+      threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-    __device__ void
-    operator()(const unsigned int                                 patch,
-               const typename LevelVertexPatch<dim,
-                                               fe_degree,
-                                               Number,
-                                               kernel,
-                                               dof_layout>::Data *gpu_data,
-               SharedMemData<dim, Number, kernel> *shared_data) const
-    {
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+    if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+      {
+        const unsigned int row = linear_tid / (n_dofs_1d - 2);
+        const unsigned int col = linear_tid % (n_dofs_1d - 2);
 
-      TPEvaluator_inverse<n_dofs_1d,
-                          Number,
-                          dim,
-                          SmootherVariant::SEPERATE,
-                          dof_layout>
-        eval;
-      __syncthreads();
+        shared_data->local_mass[col + 1] = gpu_data->eigenvalues[col];
+        shared_data->local_derivative[(row + 1) * n_dofs_1d + col + 1] =
+          gpu_data->eigenvectors[row * (n_dofs_1d - 2) + col];
+      }
+    __syncthreads();
 
-      // local inverse
-      eval.apply_inverse(&shared_data->local_dst[patch * local_dim],
-                         &shared_data->local_src[patch * local_dim],
-                         shared_data->local_mass,
-                         shared_data->local_derivative,
-                         &shared_data->temp[patch * local_dim]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
+    eval_inverse.apply_inverse(
+      &shared_data->local_dst[local_patch * local_dim],
+      &shared_data->local_src[local_patch * local_dim],
+      shared_data->local_mass,
+      shared_data->local_derivative,
+      &shared_data->tmp[local_patch * local_dim * (dim - 1)]);
+    __syncthreads();
+  }
 
 
-  template <int dim, int fe_degree, typename Number>
-  class LocalSmoother<dim,
-                      fe_degree,
-                      Number,
-                      SmootherVariant::FUSED_BASE,
-                      DoFLayout::Q>
+  template <int dim,
+            int fe_degree,
+            typename Number,
+            LaplaceVariant  laplace,
+            SmootherVariant smooth>
+  __device__ void
+  evaluate_smooth_cf(
+    const unsigned int                                             local_patch,
+    SharedMemData<dim, Number, false>                             *shared_data,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data *gpu_data)
   {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
+    constexpr unsigned int n_dofs_1d   = 2 * fe_degree + 2;
+    constexpr unsigned int n_dofs_1d_z = dim == 2 ? 1 : n_dofs_1d - 2;
+    constexpr unsigned int local_dim   = Util::pow(n_dofs_1d, dim);
 
-    LocalSmoother()
-      : ndofs_per_dim(0)
-    {}
+    TPEvaluatorSmootherVmult<Number, n_dofs_1d, laplace, dim> eval_vmult;
+    TPEvaluatorSmootherInv<Number, n_dofs_1d, smooth, dim>    eval_inverse;
+    __syncthreads();
 
-    LocalSmoother(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
+    eval_vmult.vmult(&shared_data->local_src[local_patch * local_dim],
+                     &shared_data->local_dst[local_patch * local_dim],
+                     shared_data->local_mass,
+                     shared_data->local_derivative,
+                     &shared_data->tmp[local_patch * local_dim * (dim - 1)]);
+    __syncthreads();
 
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
+    const unsigned int linear_tid =
+      threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
-    __device__ void
-    operator()(const unsigned int                                   patch,
-               const typename LevelVertexPatch<dim,
-                                               fe_degree,
-                                               Number,
-                                               SmootherVariant::FUSED_BASE,
-                                               DoFLayout::Q>::Data *gpu_data,
-               SharedMemData<dim, Number, SmootherVariant::FUSED_BASE>
-                 *shared_data) const
-    {
-      constexpr unsigned int local_dim   = Util::pow(n_dofs_1d, dim);
-      const unsigned int     local_tid_x = threadIdx.x % n_dofs_1d;
+    if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+      {
+        unsigned int row = linear_tid / (n_dofs_1d - 2);
+        unsigned int col = linear_tid % (n_dofs_1d - 2);
 
-      TPEvaluator_vmult<n_dofs_1d,
-                        Number,
-                        dim,
-                        SmootherVariant::FUSED_BASE,
-                        DoFLayout::Q>
-        eval_vmult;
-      TPEvaluator_inverse<n_dofs_1d,
-                          Number,
-                          dim,
-                          SmootherVariant::FUSED_BASE,
-                          DoFLayout::Q>
-        eval_inverse;
-      __syncthreads();
+        shared_data->local_mass[col] = gpu_data->eigenvalues[col];
+        shared_data->local_derivative[row * (n_dofs_1d - 2) + col] =
+          gpu_data->eigenvectors[row * (n_dofs_1d - 2) + col];
+      }
+    // __syncthreads();
 
-      eval_vmult.vmult(&shared_data->local_src[patch * local_dim],
-                       &shared_data->local_dst[patch * local_dim],
+
+    if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+      {
+        unsigned int row = linear_tid / (n_dofs_1d - 2) + 1;
+        unsigned int col = linear_tid % (n_dofs_1d - 2) + 1;
+
+        for (unsigned int z = 0; z < n_dofs_1d_z; ++z)
+          {
+            shared_data
+              ->tmp[2 * local_patch * local_dim + z * n_dofs_1d * n_dofs_1d +
+                    (row - 1) * (n_dofs_1d - 2) + col - 1] =
+              shared_data->local_dst[local_patch * local_dim +
+                                     (z + dim - 2) * n_dofs_1d * n_dofs_1d +
+                                     row * n_dofs_1d + col];
+
+            shared_data->tmp[2 * local_patch * local_dim + local_dim +
+                             z * n_dofs_1d * n_dofs_1d +
+                             (row - 1) * (n_dofs_1d - 2) + col - 1] =
+              shared_data->local_src[local_patch * local_dim +
+                                     (z + dim - 2) * n_dofs_1d * n_dofs_1d +
+                                     row * n_dofs_1d + col];
+          }
+      }
+    __syncthreads();
+
+    eval_inverse.apply_inverse(
+      &shared_data->tmp[local_patch * local_dim * 2],
+      &shared_data->tmp[local_patch * local_dim * 2 + local_dim],
+      shared_data->local_mass,
+      shared_data->local_derivative,
+      &shared_data->local_src[local_patch * local_dim]);
+    __syncthreads();
+  }
+
+
+  template <int dim, int fe_degree, typename Number, SmootherVariant smooth>
+  __device__ void
+  evaluate_smooth_inv(const unsigned int                 local_patch,
+                      SharedMemData<dim, Number, false> *shared_data)
+  {
+    constexpr unsigned int n_dofs_1d = 2 * fe_degree;
+    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+
+    TPEvaluatorSmootherInv<Number, n_dofs_1d, smooth, dim> eval;
+    __syncthreads();
+
+    eval.apply_inverse(&shared_data->local_dst[local_patch * local_dim],
+                       &shared_data->local_src[local_patch * local_dim],
                        shared_data->local_mass,
                        shared_data->local_derivative,
-                       &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-
-      if (0 < local_tid_x && local_tid_x < n_dofs_1d - 1 && 0 < threadIdx.y &&
-          threadIdx.y < n_dofs_1d - 1)
-        {
-          shared_data->local_mass[local_tid_x] =
-            gpu_data->eigenvalues[local_tid_x - 1];
-          shared_data->local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
-            gpu_data->eigenvectors[(threadIdx.y - 1) * (n_dofs_1d - 2) +
-                                   local_tid_x - 1];
-        }
-      __syncthreads();
-
-      eval_inverse.apply_inverse(
-        &shared_data->local_dst[patch * local_dim],
-        &shared_data->local_src[patch * local_dim],
-        shared_data->local_mass,
-        shared_data->local_derivative,
-        &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalSmoother<dim,
-                      fe_degree,
-                      Number,
-                      SmootherVariant::FUSED_L,
-                      DoFLayout::DGQ>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    LocalSmoother()
-      : ndofs_per_dim(0)
-    {}
-
-    LocalSmoother(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(
-      const unsigned int                                     patch,
-      const typename LevelVertexPatch<dim,
-                                      fe_degree,
-                                      Number,
-                                      SmootherVariant::FUSED_L,
-                                      DoFLayout::DGQ>::Data *gpu_data,
-      SharedMemData<dim, Number, SmootherVariant::FUSED_L>  *shared_data) const
-    {
-      constexpr unsigned int local_dim   = Util::pow(n_dofs_1d, dim);
-      const unsigned int     local_tid_x = threadIdx.x % n_dofs_1d;
-
-      TPEvaluator_vmult<n_dofs_1d,
-                        Number,
-                        dim,
-                        SmootherVariant::FUSED_BASE,
-                        DoFLayout::DGQ>
-        eval_vmult;
-      TPEvaluator_inverse<n_dofs_1d,
-                          Number,
-                          dim,
-                          SmootherVariant::FUSED_L,
-                          DoFLayout::DGQ>
-        eval_inverse;
-      __syncthreads();
-
-      eval_vmult.vmult(&shared_data->local_src[patch * local_dim],
-                       &shared_data->local_dst[patch * local_dim],
-                       shared_data->local_mass,
-                       shared_data->local_derivative,
-                       &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-
-      unsigned int linear_tid = local_tid_x + threadIdx.y * n_dofs_1d;
-
-      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
-        {
-          int row = linear_tid / (n_dofs_1d - 2);
-          int col = linear_tid % (n_dofs_1d - 2);
-
-          shared_data->local_mass[col + 1] = gpu_data->eigenvalues[col];
-          shared_data->local_derivative[(row + 1) * n_dofs_1d + col + 1] =
-            gpu_data->eigenvectors[row * (n_dofs_1d - 2) + col];
-        }
-      // for (unsigned int z = 0; z < n_dofs_1d; ++z)
-      //   shared_data->local_dst[local_tid_x + threadIdx.y * n_dofs_1d +
-      //                          z * n_dofs_1d * n_dofs_1d] = 0;
-      __syncthreads();
-
-      eval_inverse.apply_inverse(
-        &shared_data->local_dst[patch * local_dim],
-        &shared_data->local_src[patch * local_dim],
-        shared_data->local_mass,
-        shared_data->local_derivative,
-        &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalSmoother<dim,
-                      fe_degree,
-                      Number,
-                      SmootherVariant::FUSED_3D,
-                      DoFLayout::Q>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
-
-    LocalSmoother()
-      : ndofs_per_dim(0)
-    {}
-
-    LocalSmoother(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(
-      const unsigned int                                     patch,
-      const typename LevelVertexPatch<dim,
-                                      fe_degree,
-                                      Number,
-                                      SmootherVariant::FUSED_3D,
-                                      DoFLayout::Q>::Data   *gpu_data,
-      SharedMemData<dim, Number, SmootherVariant::FUSED_3D> *shared_data) const
-    {
-      constexpr unsigned int local_dim   = Util::pow(n_dofs_1d, dim);
-      const unsigned int     local_tid_x = threadIdx.x % n_dofs_1d;
-
-      TPEvaluator_vmult<n_dofs_1d,
-                        Number,
-                        dim,
-                        SmootherVariant::FUSED_3D,
-                        DoFLayout::Q>
-        eval_vmult;
-      TPEvaluator_inverse<n_dofs_1d,
-                          Number,
-                          dim,
-                          SmootherVariant::FUSED_3D,
-                          DoFLayout::Q>
-        eval_inverse;
-      __syncthreads();
-
-      eval_vmult.vmult(&shared_data->local_src[patch * local_dim],
-                       &shared_data->local_dst[patch * local_dim],
-                       shared_data->local_mass,
-                       shared_data->local_derivative,
-                       &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-
-      unsigned int linear_tid = local_tid_x + threadIdx.y * n_dofs_1d;
-
-      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
-        {
-          int row = linear_tid / (n_dofs_1d - 2);
-          int col = linear_tid % (n_dofs_1d - 2);
-
-          shared_data->local_mass[col + 1] = gpu_data->eigenvalues[col];
-          shared_data->local_derivative[(row + 1) * n_dofs_1d + col + 1] =
-            gpu_data->eigenvectors[row * (n_dofs_1d - 2) + col];
-        }
-      __syncthreads();
-
-      eval_inverse.apply_inverse(
-        &shared_data->local_dst[patch * local_dim],
-        &shared_data->local_src[patch * local_dim],
-        shared_data->local_mass,
-        shared_data->local_derivative,
-        &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalSmoother<dim,
-                      fe_degree,
-                      Number,
-                      SmootherVariant::FUSED_CF,
-                      DoFLayout::Q>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
-
-    LocalSmoother()
-      : ndofs_per_dim(0)
-    {}
-
-    LocalSmoother(unsigned int ndofs_per_dim)
-      : ndofs_per_dim(ndofs_per_dim)
-    {}
-
-    __device__ inline unsigned int
-    get_ndofs()
-    {
-      return ndofs_per_dim;
-    }
-
-    __device__ void
-    operator()(
-      const unsigned int                                     patch,
-      const typename LevelVertexPatch<dim,
-                                      fe_degree,
-                                      Number,
-                                      SmootherVariant::FUSED_CF,
-                                      DoFLayout::Q>::Data   *gpu_data,
-      SharedMemData<dim, Number, SmootherVariant::FUSED_CF> *shared_data) const
-    {
-      constexpr unsigned int local_dim   = Util::pow(n_dofs_1d, dim);
-      const unsigned int     local_tid_x = threadIdx.x % n_dofs_1d;
-
-      TPEvaluator_vmult<n_dofs_1d,
-                        Number,
-                        dim,
-                        SmootherVariant::FUSED_CF,
-                        DoFLayout::Q>
-        eval_vmult;
-      TPEvaluator_inverse<n_dofs_1d,
-                          Number,
-                          dim,
-                          SmootherVariant::FUSED_CF,
-                          DoFLayout::Q>
-        eval_inverse;
-      __syncthreads();
-
-      eval_vmult.vmult(&shared_data->local_src[patch * local_dim],
-                       &shared_data->local_dst[patch * local_dim],
-                       shared_data->local_mass,
-                       shared_data->local_derivative,
-                       &shared_data->temp[patch * local_dim * (dim - 1)]);
-      __syncthreads();
-
-      unsigned int linear_tid = local_tid_x + threadIdx.y * n_dofs_1d;
-
-      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
-        {
-          int row = linear_tid / (n_dofs_1d - 2);
-          int col = linear_tid % (n_dofs_1d - 2);
-
-          shared_data->local_mass[col] = gpu_data->eigenvalues[col];
-          shared_data->local_derivative[row * (n_dofs_1d - 2) + col] =
-            gpu_data->eigenvectors[row * (n_dofs_1d - 2) + col];
-        }
-      __syncthreads();
-
-      if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
-        {
-          int row = linear_tid / (n_dofs_1d - 2) + 1;
-          int col = linear_tid % (n_dofs_1d - 2) + 1;
-
-          for (unsigned int z = 0; z < n_dofs_1d - 2; ++z)
-            {
-              shared_data->temp[(dim - 1) * patch * local_dim +
-                                z * n_dofs_1d * n_dofs_1d +
-                                (row - 1) * (n_dofs_1d - 2) + col - 1] =
-                shared_data->local_dst[patch * local_dim +
-                                       (z + 1) * n_dofs_1d * n_dofs_1d +
-                                       row * n_dofs_1d + col];
-
-              shared_data->temp[(dim - 1) * patch * local_dim + local_dim +
-                                z * n_dofs_1d * n_dofs_1d +
-                                (row - 1) * (n_dofs_1d - 2) + col - 1] =
-                shared_data->local_src[patch * local_dim +
-                                       (z + 1) * n_dofs_1d * n_dofs_1d +
-                                       row * n_dofs_1d + col];
-            }
-        }
-      __syncthreads();
-
-      eval_inverse.apply_inverse(
-        &shared_data->temp[patch * local_dim * (dim - 1)],
-        &shared_data->temp[patch * local_dim * (dim - 1) + local_dim],
-        shared_data->local_mass,
-        shared_data->local_derivative,
-        &shared_data->local_src[patch * local_dim]);
-      __syncthreads();
-    }
-
-    unsigned int ndofs_per_dim;
-  };
+                       &shared_data->tmp[local_patch * local_dim * (dim - 1)]);
+    __syncthreads();
+  }
 
 } // namespace PSMF
 

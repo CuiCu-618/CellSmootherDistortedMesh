@@ -14,25 +14,27 @@
 namespace PSMF
 {
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    LevelVertexPatch()
+  template <int dim, int fe_degree, typename Number>
+  LevelVertexPatch<dim, fe_degree, Number>::LevelVertexPatch()
   {}
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    ~LevelVertexPatch()
+  template <int dim, int fe_degree, typename Number>
+  LevelVertexPatch<dim, fe_degree, Number>::~LevelVertexPatch()
   {
     free();
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::free()
+  LevelVertexPatch<dim, fe_degree, Number>::free()
   {
-    for (auto &first_dof_color_ptr : first_dof)
+    for (auto &first_dof_color_ptr : first_dof_laplace)
       Utilities::CUDA::free(first_dof_color_ptr);
-    first_dof.clear();
+    first_dof_laplace.clear();
+
+    for (auto &first_dof_color_ptr : first_dof_smooth)
+      Utilities::CUDA::free(first_dof_color_ptr);
+    first_dof_smooth.clear();
 
     for (auto &patch_id_color_ptr : patch_id)
       Utilities::CUDA::free(patch_id_color_ptr);
@@ -42,10 +44,13 @@ namespace PSMF
       Utilities::CUDA::free(patch_type_color_ptr);
     patch_type.clear();
 
-    // Utilities::CUDA::free(eigenvalues);
-    // Utilities::CUDA::free(eigenvectors);
-    // Utilities::CUDA::free(global_mass_1d);
-    // Utilities::CUDA::free(global_derivative_1d);
+    Utilities::CUDA::free(laplace_mass_1d);
+    Utilities::CUDA::free(laplace_stiff_1d);
+    Utilities::CUDA::free(smooth_mass_1d);
+    Utilities::CUDA::free(smooth_stiff_1d);
+    Utilities::CUDA::free(eigenvalues);
+    Utilities::CUDA::free(eigenvectors);
+
 
     ordering_to_type.clear();
     patch_id_host.clear();
@@ -55,10 +60,9 @@ namespace PSMF
     l_to_h_host.clear();
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   std::size_t
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    memory_consumption() const
+  LevelVertexPatch<dim, fe_degree, Number>::memory_consumption() const
   {
     const unsigned int n_dofs_1d = 2 * fe_degree + 2;
 
@@ -68,20 +72,19 @@ namespace PSMF
     // and eigen{values,vectors}.
     for (unsigned int i = 0; i < n_colors; ++i)
       {
-        result += 2 * n_patches[i] * sizeof(unsigned int) +
+        result += 2 * n_patches_laplace[i] * sizeof(unsigned int) +
                   2 * n_dofs_1d * n_dofs_1d * (1 << level) * sizeof(Number) +
                   2 * n_dofs_1d * dim * sizeof(Number);
       }
     return result;
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   std::vector<std::vector<
-    typename LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-      CellIterator>>
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    gather_vertex_patches(const DoFHandler<dim> &dof_handler,
-                          const unsigned int     level) const
+    typename LevelVertexPatch<dim, fe_degree, Number>::CellIterator>>
+  LevelVertexPatch<dim, fe_degree, Number>::gather_vertex_patches(
+    const DoFHandler<dim> &dof_handler,
+    const unsigned int     level) const
   {
     // LAMBDA checks if a vertex is at the physical boundary
     auto &&is_boundary_vertex = [](const CellIterator &cell,
@@ -156,17 +159,18 @@ namespace PSMF
                 collection.resize(patch_size);
               if (patch_size == regular_vpatch_size) // regular patch
                 collection[regular_vpatch_size - 1 - v] = cell;
-              else // irregular patch
+              else                                   // irregular patch
                 AssertThrow(false, ExcMessage("TODO irregular vertex patches"));
             }
         }
     return cell_collections;
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    get_patch_data(const PatchIterator &patch, const unsigned int patch_id)
+  LevelVertexPatch<dim, fe_degree, Number>::get_patch_data(
+    const PatchIterator &patch,
+    const unsigned int   patch_id)
   {
     std::vector<unsigned int> local_dof_indices(Util::pow(fe_degree + 1, dim));
     std::vector<unsigned int> numbering(regular_vpatch_size);
@@ -222,9 +226,9 @@ namespace PSMF
       }
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::reinit(
+  LevelVertexPatch<dim, fe_degree, Number>::reinit(
     const DoFHandler<dim> &mg_dof,
     const unsigned int     mg_level,
     const AdditionalData  &additional_data)
@@ -239,10 +243,10 @@ namespace PSMF
     dof_handler = &mg_dof;
     level       = mg_level;
 
-    if (kernel == SmootherVariant::SEPERATE ||
-        kernel == SmootherVariant::GLOBAL)
-      tmp.reinit(mg_dof.n_dofs());
-    // matrix_free->initialize_dof_vector(tmp);
+    if (use_coloring)
+      n_colors = regular_vpatch_size;
+    else
+      n_colors = 1;
 
     switch (granularity_scheme)
       {
@@ -264,76 +268,102 @@ namespace PSMF
     std::vector<std::vector<CellIterator>> cell_collections;
     cell_collections = std::move(gather_vertex_patches(*dof_handler, level));
 
-    if (use_coloring)
-      {
-        graph_ptr.clear();
-        graph_ptr.resize(1 << dim);
-        n_colors = graph_ptr.size();
-        for (auto patch = cell_collections.begin();
-             patch != cell_collections.end();
-             ++patch)
-          {
-            auto first_cell = (*patch)[0];
+    graph_ptr_raw.clear();
+    graph_ptr_raw.resize(1);
+    for (auto patch = cell_collections.begin(); patch != cell_collections.end();
+         ++patch)
+      graph_ptr_raw[0].push_back(patch);
 
-            graph_ptr[first_cell->parent()->child_iterator_to_index(first_cell)]
-              .push_back(patch);
-          }
-      }
-    else
+    // coloring
+    graph_ptr_colored.clear();
+    graph_ptr_colored.resize(regular_vpatch_size);
+    for (auto patch = cell_collections.begin(); patch != cell_collections.end();
+         ++patch)
       {
-        n_colors = 1;
-        graph_ptr.clear();
-        graph_ptr.resize(n_colors);
+        auto first_cell = (*patch)[0];
 
-        for (auto patch = cell_collections.begin();
-             patch != cell_collections.end();
-             ++patch)
-          graph_ptr[0].push_back(patch);
+        graph_ptr_colored[first_cell->parent()->child_iterator_to_index(
+                            first_cell)]
+          .push_back(patch);
       }
+
 
     setup_color_arrays(n_colors);
+
+    for (unsigned int i = 0; i < regular_vpatch_size; ++i)
+      {
+        auto n_patches      = graph_ptr_colored[i].size();
+        n_patches_smooth[i] = n_patches;
+
+        patch_type_host.clear();
+        patch_id_host.clear();
+        first_dof_host.clear();
+        patch_id_host.resize(n_patches);
+        patch_type_host.resize(n_patches * dim);
+        first_dof_host.resize(n_patches * regular_vpatch_size);
+
+        auto patch     = graph_ptr_colored[i].begin(),
+             end_patch = graph_ptr_colored[i].end();
+        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+          get_patch_data(*patch, p_id);
+
+        alloc_arrays(&first_dof_smooth[i], n_patches * regular_vpatch_size);
+
+        cudaError_t error_code =
+          cudaMemcpy(first_dof_smooth[i],
+                     first_dof_host.data(),
+                     regular_vpatch_size * n_patches * sizeof(unsigned int),
+                     cudaMemcpyHostToDevice);
+        AssertCuda(error_code);
+      }
+
+    std::vector<std::vector<PatchIterator>> tmp_ptr;
+    tmp_ptr = use_coloring ? graph_ptr_colored : graph_ptr_raw;
 
     ordering_to_type.clear();
     ordering_types = 0;
     for (unsigned int i = 0; i < n_colors; ++i)
       {
-        n_patches[i] = graph_ptr[i].size();
+        auto n_patches       = tmp_ptr[i].size();
+        n_patches_laplace[i] = n_patches;
+
         patch_type_host.clear();
         patch_id_host.clear();
         first_dof_host.clear();
-        patch_id_host.resize(n_patches[i]);
-        patch_type_host.resize(n_patches[i] * dim);
-        first_dof_host.resize(n_patches[i] * regular_vpatch_size);
+        patch_id_host.resize(n_patches);
+        patch_type_host.resize(n_patches * dim);
+        first_dof_host.resize(n_patches * regular_vpatch_size);
 
-        setup_patch_arrays(i);
-        auto patch = graph_ptr[i].begin(), end_patch = graph_ptr[i].end();
+        auto patch = tmp_ptr[i].begin(), end_patch = tmp_ptr[i].end();
         for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
           get_patch_data(*patch, p_id);
 
         // alloc_and_copy_arrays(i);
-        alloc_arrays(&first_dof[i], n_patches[i] * regular_vpatch_size);
-        alloc_arrays(&patch_id[i], n_patches[i]);
-        alloc_arrays(&patch_type[i], n_patches[i] * dim);
+        alloc_arrays(&first_dof_laplace[i], n_patches * regular_vpatch_size);
+        alloc_arrays(&patch_id[i], n_patches);
+        alloc_arrays(&patch_type[i], n_patches * dim);
 
         cudaError_t error_code = cudaMemcpy(patch_id[i],
                                             patch_id_host.data(),
-                                            n_patches[i] * sizeof(unsigned int),
+                                            n_patches * sizeof(unsigned int),
                                             cudaMemcpyHostToDevice);
         AssertCuda(error_code);
 
         error_code =
-          cudaMemcpy(first_dof[i],
+          cudaMemcpy(first_dof_laplace[i],
                      first_dof_host.data(),
-                     regular_vpatch_size * n_patches[i] * sizeof(unsigned int),
+                     regular_vpatch_size * n_patches * sizeof(unsigned int),
                      cudaMemcpyHostToDevice);
         AssertCuda(error_code);
 
         error_code = cudaMemcpy(patch_type[i],
                                 patch_type_host.data(),
-                                dim * n_patches[i] * sizeof(unsigned int),
+                                dim * n_patches * sizeof(unsigned int),
                                 cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
+
+    setup_configuration(n_colors);
 
     // Mapping
     if (dim == 2)
@@ -406,387 +436,104 @@ namespace PSMF
 
     alloc_arrays(&eigenvalues, n_dofs_1d);
     alloc_arrays(&eigenvectors, n_dofs_2d);
-    alloc_arrays(&global_mass_1d, n_dofs_2d * 3);
-    alloc_arrays(&global_derivative_1d, n_dofs_2d * 3);
+    alloc_arrays(&smooth_mass_1d, n_dofs_2d);
+    alloc_arrays(&smooth_stiff_1d, n_dofs_2d);
+    alloc_arrays(&laplace_mass_1d, n_dofs_2d * 3);
+    alloc_arrays(&laplace_stiff_1d, n_dofs_2d * 3);
+
+    reinit_tensor_product_laplace();
+    reinit_tensor_product_smoother();
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::Data
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::get_data(
+  template <int dim, int fe_degree, typename Number>
+  LevelVertexPatch<dim, fe_degree, Number>::Data
+  LevelVertexPatch<dim, fe_degree, Number>::get_laplace_data(
     unsigned int color) const
   {
     Data data_copy;
 
-    data_copy.n_patches            = n_patches[color];
-    data_copy.patch_per_block      = patch_per_block;
-    data_copy.relaxation           = relaxation;
-    data_copy.first_dof            = first_dof[color];
-    data_copy.patch_id             = patch_id[color];
-    data_copy.patch_type           = patch_type[color];
-    data_copy.l_to_h               = l_to_h;
-    data_copy.h_to_l               = h_to_l;
-    data_copy.eigenvalues          = eigenvalues;
-    data_copy.eigenvectors         = eigenvectors;
-    data_copy.global_mass_1d       = global_mass_1d;
-    data_copy.global_derivative_1d = global_derivative_1d;
+    data_copy.n_patches        = n_patches_laplace[color];
+    data_copy.patch_per_block  = patch_per_block;
+    data_copy.first_dof        = first_dof_laplace[color];
+    data_copy.patch_id         = patch_id[color];
+    data_copy.patch_type       = patch_type[color];
+    data_copy.l_to_h           = l_to_h;
+    data_copy.h_to_l           = h_to_l;
+    data_copy.laplace_mass_1d  = laplace_mass_1d;
+    data_copy.laplace_stiff_1d = laplace_stiff_1d;
 
     return data_copy;
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  template <typename Functor, typename VectorType, typename Functor_inv>
-  void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::patch_loop(
-    const Functor     &func,
-    const VectorType  &src,
-    VectorType        &dst,
-    const Functor_inv &func_inv) const
+  template <int dim, int fe_degree, typename Number>
+  LevelVertexPatch<dim, fe_degree, Number>::Data
+  LevelVertexPatch<dim, fe_degree, Number>::get_smooth_data(
+    unsigned int color) const
   {
-    switch (kernel)
-      {
-        case SmootherVariant::SEPERATE:
-          patch_loop_seperate(func, func_inv, src, dst);
-          break;
-        case SmootherVariant::FUSED_BASE:
-          patch_loop_fused(func, src, dst);
-          break;
-        case SmootherVariant::FUSED_L:
-          patch_loop_fused(func, src, dst);
-          break;
-        case SmootherVariant::FUSED_3D:
-          patch_loop_fused(func, src, dst);
-          break;
-        case SmootherVariant::FUSED_CF:
-          patch_loop_fused(func, src, dst);
-          break;
-        default:
-          AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
-          break;
-      }
+    Data data_copy;
+
+    data_copy.n_patches       = n_patches_smooth[color];
+    data_copy.patch_per_block = patch_per_block;
+    data_copy.relaxation      = relaxation;
+    data_copy.first_dof       = first_dof_smooth[color];
+    data_copy.l_to_h          = l_to_h;
+    data_copy.h_to_l          = h_to_l;
+    data_copy.eigenvalues     = eigenvalues;
+    data_copy.eigenvectors    = eigenvectors;
+    data_copy.smooth_mass_1d  = smooth_mass_1d;
+    data_copy.smooth_stiff_1d = smooth_stiff_1d;
+
+    return data_copy;
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  template <typename Functor, typename VectorType>
+  template <int dim, int fe_degree, typename Number>
+  template <typename Operator, typename VectorType>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    patch_loop_fused(const Functor    &func,
-                     const VectorType &src,
-                     VectorType       &dst) const
+  LevelVertexPatch<dim, fe_degree, Number>::patch_loop(const Operator   &op,
+                                                       const VectorType &src,
+                                                       VectorType &dst) const
   {
-    auto shared_mem = [&]() {
-      std::size_t mem = 0;
+    op.setup_kernel(patch_per_block);
 
-      const unsigned int n_dofs_1d = 2 * fe_degree + 2;
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      mem += 1 * patch_per_block * local_dim * sizeof(unsigned int);
-      // local_src, local_dst, local_residual
-      mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_mass, local_derivative, local_eigenvectors, local_eigenvalues
-      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * dim * sizeof(Number);
-      // temp
-      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
-
-      return mem;
-    };
-
-    // loop over all patches
-    switch (kernel)
-      {
-        case SmootherVariant::FUSED_BASE:
-          AssertCuda(
-            cudaFuncSetAttribute(loop_kernel_fused_base<dim,
-                                                        fe_degree,
-                                                        Number,
-                                                        kernel,
-                                                        Functor,
-                                                        DoFLayout::DGQ>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 shared_mem()));
-          for (unsigned int i = 0; i < n_colors; ++i)
-            if (n_patches[i] > 0)
-              loop_kernel_fused_base<dim,
-                                     fe_degree,
-                                     Number,
-                                     kernel,
-                                     Functor,
-                                     DoFLayout::DGQ>
-                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
-                                                              src.get_values(),
-                                                              dst.get_values(),
-                                                              get_data(i));
-          break;
-        case SmootherVariant::FUSED_L:
-          AssertCuda(
-            cudaFuncSetAttribute(loop_kernel_fused_l<dim,
-                                                     fe_degree,
-                                                     Number,
-                                                     kernel,
-                                                     Functor,
-                                                     DoFLayout::DGQ>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 shared_mem()));
-          for (unsigned int i = 0; i < n_colors; ++i)
-            if (n_patches[i] > 0)
-              loop_kernel_fused_l<dim,
-                                  fe_degree,
-                                  Number,
-                                  kernel,
-                                  Functor,
-                                  DoFLayout::DGQ>
-                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
-                                                              src.get_values(),
-                                                              dst.get_values(),
-                                                              get_data(i));
-          break;
-        case SmootherVariant::FUSED_3D:
-          AssertCuda(
-            cudaFuncSetAttribute(loop_kernel_fused_3d<dim,
-                                                      fe_degree,
-                                                      Number,
-                                                      kernel,
-                                                      Functor,
-                                                      DoFLayout::DGQ>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 shared_mem()));
-          for (unsigned int i = 0; i < n_colors; ++i)
-            if (n_patches[i] > 0)
-              loop_kernel_fused_3d<dim,
-                                   fe_degree,
-                                   Number,
-                                   kernel,
-                                   Functor,
-                                   DoFLayout::DGQ>
-                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
-                                                              src.get_values(),
-                                                              dst.get_values(),
-                                                              get_data(i));
-          break;
-        case SmootherVariant::FUSED_CF:
-          AssertCuda(
-            cudaFuncSetAttribute(loop_kernel_fused_cf<dim,
-                                                      fe_degree,
-                                                      Number,
-                                                      kernel,
-                                                      Functor,
-                                                      DoFLayout::DGQ>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 shared_mem()));
-          for (unsigned int i = 0; i < n_colors; ++i)
-            if (n_patches[i] > 0)
-              loop_kernel_fused_cf<dim,
-                                   fe_degree,
-                                   Number,
-                                   kernel,
-                                   Functor,
-                                   DoFLayout::DGQ>
-                <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
-                                                              src.get_values(),
-                                                              dst.get_values(),
-                                                              get_data(i));
-          break;
-        default:
-          AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
-      }
-
-    AssertCudaKernel();
-  }
-
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  template <typename Functor, typename VectorType>
-  void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::cell_loop(
-    const Functor    &func,
-    const VectorType &src,
-    VectorType       &dst) const
-  {
-    auto shared_mem = [&]() {
-      std::size_t mem = 0;
-
-      const unsigned int n_dofs_1d = 2 * fe_degree + 2;
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // global_dof_indices;
-      // For global_dof_indices_ori and l_to_h, unsigned int is enough.
-      mem += 1 * patch_per_block * local_dim * sizeof(unsigned int);
-      // local_src, local_dst
-      mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_mass, local_derivative
-      mem += 2 * patch_per_block * n_dofs_1d * n_dofs_1d * dim * sizeof(Number);
-      // temp
-      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
-
-      return mem;
-    };
-
-    AssertCuda(cudaFuncSetAttribute(laplace_kernel_base<dim,
-                                                        fe_degree,
-                                                        Number,
-                                                        kernel,
-                                                        Functor,
-                                                        DoFLayout::DGQ>,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    shared_mem()));
-
-    for (unsigned int i = 0; i < n_colors; ++i)
-      if (n_patches[i] > 0)
+    for (unsigned int i = 0; i < regular_vpatch_size; ++i)
+      if (n_patches_smooth[i] > 0)
         {
-          laplace_kernel_base<dim,
-                              fe_degree,
-                              Number,
-                              kernel,
-                              Functor,
-                              DoFLayout::DGQ>
-            <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
-                                                          src.get_values(),
-                                                          dst.get_values(),
-                                                          get_data(i));
+          op.loop_kernel(src,
+                         dst,
+                         get_smooth_data(i),
+                         grid_dim_smooth[i],
+                         block_dim_smooth[i]);
+
           AssertCudaKernel();
         }
   }
 
-  // TODO:
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  template <typename Functor, typename Functor_inv, typename VectorType>
+  template <int dim, int fe_degree, typename Number>
+  template <typename Operator, typename VectorType>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    patch_loop_seperate(const Functor     &func,
-                        const Functor_inv &func_inv,
-                        const VectorType  &src,
-                        VectorType        &dst) const
+  LevelVertexPatch<dim, fe_degree, Number>::cell_loop(const Operator   &op,
+                                                      const VectorType &src,
+                                                      VectorType &dst) const
   {
-    auto shared_mem = [&]() {
-      std::size_t mem = 0;
+    op.setup_kernel(patch_per_block);
 
-      const unsigned int n_dofs_1d = 2 * fe_degree + 1;
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst, local_residual
-      mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_mass, local_derivative
-      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
-      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
-
-      return mem;
-    };
-
-    auto shared_mem_inv = [&]() {
-      std::size_t mem = 0;
-
-      const unsigned int n_dofs_1d = 2 * fe_degree - 1;
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst, local_residual
-      mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_eigenvectors, local_eigenvalues
-      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
-      mem += patch_per_block * local_dim * sizeof(Number);
-
-      return mem;
-    };
-
-
-    AssertCuda(cudaFuncSetAttribute(loop_kernel_seperate<dim,
-                                                         fe_degree,
-                                                         Number,
-                                                         kernel,
-                                                         Functor,
-                                                         DoFLayout::DGQ>,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    shared_mem()));
-
-    AssertCuda(cudaFuncSetAttribute(loop_kernel_seperate_inv<dim,
-                                                             fe_degree,
-                                                             Number,
-                                                             kernel,
-                                                             Functor_inv,
-                                                             DoFLayout::DGQ>,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    shared_mem_inv()));
-
-    // loop over all patches
     for (unsigned int i = 0; i < n_colors; ++i)
-      if (n_patches[i] > 0)
+      if (n_patches_laplace[i] > 0)
         {
-          loop_kernel_seperate<dim,
-                               fe_degree,
-                               Number,
-                               kernel,
-                               Functor,
-                               DoFLayout::DGQ>
-            <<<grid_dim[i], block_dim[i], shared_mem()>>>(func,
-                                                          src.get_values(),
-                                                          dst.get_values(),
-                                                          tmp.get_values(),
-                                                          get_data(i));
-          AssertCudaKernel();
+          op.loop_kernel(src,
+                         dst,
+                         get_laplace_data(i),
+                         grid_dim_lapalce[i],
+                         block_dim_laplace[i]);
 
-          loop_kernel_seperate_inv<dim,
-                                   fe_degree,
-                                   Number,
-                                   kernel,
-                                   Functor_inv,
-                                   DoFLayout::DGQ>
-            <<<grid_dim[i], block_dim_inv[i], shared_mem_inv()>>>(
-              func_inv, tmp.get_values(), dst.get_values(), get_data(i));
           AssertCudaKernel();
         }
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  template <typename MatrixType, typename Functor_inv, typename VectorType>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    patch_loop_global(const MatrixType  &A,
-                      const Functor_inv &func_inv,
-                      const VectorType  &src,
-                      VectorType        &dst) const
-  {
-    auto shared_mem_inv = [&]() {
-      std::size_t mem = 0;
-
-      const unsigned int n_dofs_1d = 2 * fe_degree - 1;
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst, local_residual
-      mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_eigenvectors, local_eigenvalues
-      mem += 2 * 1 * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
-      mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
-
-      return mem;
-    };
-
-    AssertCuda(cudaFuncSetAttribute(loop_kernel_seperate_inv<dim,
-                                                             fe_degree,
-                                                             Number,
-                                                             kernel,
-                                                             Functor_inv,
-                                                             DoFLayout::DGQ>,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    shared_mem_inv()));
-
-    // loop over all patches
-    for (unsigned int i = 0; i < n_colors; ++i)
-      if (n_patches[i] > 0)
-        {
-          A->vmult(tmp, dst);
-          tmp.sadd(-1., src);
-
-          loop_kernel_seperate_inv<dim,
-                                   fe_degree,
-                                   Number,
-                                   kernel,
-                                   Functor_inv,
-                                   DoFLayout::DGQ>
-            <<<grid_dim[i], block_dim_inv[i], shared_mem_inv()>>>(
-              func_inv, tmp.get_values(), dst.get_values(), get_data(i));
-          AssertCudaKernel();
-        }
-  }
-
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    reinit_tensor_product_smoother() const
+  LevelVertexPatch<dim, fe_degree, Number>::reinit_tensor_product_smoother()
+    const
   {
     std::string name = dof_handler->get_fe().get_name();
     name.replace(name.find('<') + 1, 1, "1");
@@ -817,7 +564,8 @@ namespace PSMF
       if (type == 0)
         boundary_factor_left = 2.;
       else if (type == 1)
-        {}
+        {
+        }
       else if (type == 2)
         boundary_factor_right = 2.;
       else
@@ -991,21 +739,17 @@ namespace PSMF
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
-    error_code = cudaMemcpy(global_mass_1d,
+    error_code = cudaMemcpy(smooth_mass_1d,
                             mass,
                             n_dofs_1d * n_dofs_1d * sizeof(Number),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
-    error_code = cudaMemcpy(global_derivative_1d,
+    error_code = cudaMemcpy(smooth_stiff_1d,
                             laplace,
                             n_dofs_1d * n_dofs_1d * sizeof(Number),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
-
-    // for (unsigned int i = 0; i < n_dofs_1d * n_dofs_1d; ++i)
-    //   std::cout << mass[i] << " " << laplace[i] << " " << vectors[i]
-    //             << std::endl;
 
     delete[] mass;
     delete[] laplace;
@@ -1014,10 +758,10 @@ namespace PSMF
   }
 
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    reinit_tensor_product_laplace() const
+  LevelVertexPatch<dim, fe_degree, Number>::reinit_tensor_product_laplace()
+    const
   {
     std::string name = dof_handler->get_fe().get_name();
     name.replace(name.find('<') + 1, 1, "1");
@@ -1188,96 +932,75 @@ namespace PSMF
                    [](const Number m) -> Number { return m; });
 
 
-    cudaError_t error_code = cudaMemcpy(global_mass_1d,
+    cudaError_t error_code = cudaMemcpy(laplace_mass_1d,
                                         mass,
                                         3 * n_dofs_2d * sizeof(Number),
                                         cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
-    error_code = cudaMemcpy(global_derivative_1d,
+    error_code = cudaMemcpy(laplace_stiff_1d,
                             laplace,
                             3 * n_dofs_2d * sizeof(Number),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
-    // for (unsigned int i = 0; i < 3 * n_dofs_2d; ++i)
-    //   std::cout << mass[i] << " " << laplace[i] << std::endl;
-
     delete[] mass;
     delete[] laplace;
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    setup_color_arrays(const unsigned int n_colors)
+  LevelVertexPatch<dim, fe_degree, Number>::setup_color_arrays(
+    const unsigned int n_colors)
   {
-    this->n_patches.resize(n_colors);
-    this->grid_dim.resize(n_colors);
-    this->block_dim.resize(n_colors);
-    this->block_dim_inv.resize(n_colors);
-    this->first_dof.resize(n_colors);
+    this->n_patches_laplace.resize(n_colors);
+    this->grid_dim_lapalce.resize(n_colors);
+    this->block_dim_laplace.resize(n_colors);
+    this->first_dof_laplace.resize(n_colors);
     this->patch_id.resize(n_colors);
     this->patch_type.resize(n_colors);
+
+    this->n_patches_smooth.resize(regular_vpatch_size);
+    this->grid_dim_smooth.resize(regular_vpatch_size);
+    this->block_dim_smooth.resize(regular_vpatch_size);
+    this->first_dof_smooth.resize(regular_vpatch_size);
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    setup_patch_arrays(const unsigned int color)
+  LevelVertexPatch<dim, fe_degree, Number>::setup_configuration(
+    const unsigned int n_colors)
   {
-    const unsigned int n_patch = n_patches[color];
+    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
 
-    // Setup kernel parameters
-    const double apply_n_blocks = std::ceil(
-      static_cast<double>(n_patch) / static_cast<double>(patch_per_block));
-    const unsigned int apply_x_n_blocks = std::round(std::sqrt(apply_n_blocks));
-    const unsigned int apply_y_n_blocks =
-      std::ceil(apply_n_blocks / static_cast<double>(apply_x_n_blocks));
-
-    grid_dim[color] = dim3(apply_n_blocks);
-
-    constexpr unsigned int n_dofs_1d     = 2 * fe_degree + 2;
-    constexpr unsigned int n_dofs_1d_inv = 2 * fe_degree - 1;
-
-    switch (kernel)
+    for (unsigned int i = 0; i < n_colors; ++i)
       {
-        case SmootherVariant::FUSED_BASE:
-          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
-          break;
-        case SmootherVariant::FUSED_L:
-          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
-          break;
-        case SmootherVariant::FUSED_3D:
-          Assert(fe_degree < 5, ExcNotImplemented());
-          AssertDimension(dim, 3);
-          block_dim[color] =
-            dim3(patch_per_block * n_dofs_1d, n_dofs_1d, n_dofs_1d);
-          break;
-        case SmootherVariant::FUSED_CF:
-          Assert(dim == 2 || fe_degree < 8, ExcNotImplemented());
-          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
-          break;
-        case SmootherVariant::SEPERATE:
-          block_dim[color] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
-          block_dim_inv[color] =
-            dim3(patch_per_block * n_dofs_1d_inv, n_dofs_1d_inv);
-          break;
-        case SmootherVariant::GLOBAL:
-          block_dim_inv[color] =
-            dim3(patch_per_block * n_dofs_1d_inv, n_dofs_1d_inv);
-          break;
-        default:
-          AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
-          break;
+        auto         n_patches = n_patches_laplace[i];
+        const double apply_n_blocks =
+          std::ceil(static_cast<double>(n_patches) /
+                    static_cast<double>(patch_per_block));
+
+        grid_dim_lapalce[i]  = dim3(apply_n_blocks);
+        block_dim_laplace[i] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+      }
+
+    for (unsigned int i = 0; i < regular_vpatch_size; ++i)
+      {
+        auto         n_patches = n_patches_smooth[i];
+        const double apply_n_blocks =
+          std::ceil(static_cast<double>(n_patches) /
+                    static_cast<double>(patch_per_block));
+
+        grid_dim_smooth[i]  = dim3(apply_n_blocks);
+        block_dim_smooth[i] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
       }
   }
 
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
+  template <int dim, int fe_degree, typename Number>
   template <typename Number1>
   void
-  LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>::
-    alloc_arrays(Number1 **array_device, const unsigned int n)
+  LevelVertexPatch<dim, fe_degree, Number>::alloc_arrays(Number1 **array_device,
+                                                         const unsigned int n)
   {
     cudaError_t error_code = cudaMalloc(array_device, n * sizeof(Number1));
     AssertCuda(error_code);
@@ -1285,7 +1008,7 @@ namespace PSMF
 
 } // namespace PSMF
 
-/**
- * \page patch_base.template
- * \include patch_base.template.cuh
- */
+  /**
+   * \page patch_base.template
+   * \include patch_base.template.cuh
+   */

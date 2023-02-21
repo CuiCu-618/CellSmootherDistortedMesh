@@ -25,6 +25,8 @@ using namespace dealii;
 namespace Util
 {
 
+  constexpr unsigned int padding = 0;
+
   template <typename T>
   __host__ __device__ constexpr T
   pow(const T base, const int iexp)
@@ -49,14 +51,16 @@ namespace Util
   __device__ unsigned int
   compute_indices(unsigned int *first_dofs,
                   unsigned int  local_patch,
-                  unsigned int  tid_z = 0)
+                  unsigned int  local_tid_x,
+                  unsigned int  tid_y,
+                  unsigned int  tid_z)
   {
     const unsigned int z_off = tid_z / (fe_degree + 1);
-    const unsigned int y_off = threadIdx.y / (fe_degree + 1);
-    const unsigned int x_off = threadIdx.x / (fe_degree + 1) - 2 * local_patch;
+    const unsigned int y_off = tid_y / (fe_degree + 1);
+    const unsigned int x_off = local_tid_x / (fe_degree + 1);
     const unsigned int z     = tid_z % (fe_degree + 1);
-    const unsigned int y     = threadIdx.y % (fe_degree + 1);
-    const unsigned int x     = threadIdx.x % (fe_degree + 1);
+    const unsigned int y     = tid_y % (fe_degree + 1);
+    const unsigned int x     = local_tid_x % (fe_degree + 1);
 
     return first_dofs[z_off * 4 + y_off * 2 + x_off] +
            z * (fe_degree + 1) * (fe_degree + 1) + y * (fe_degree + 1) + x;

@@ -12,6 +12,7 @@
 #ifndef LOOP_KERNEL_CUH
 #define LOOP_KERNEL_CUH
 
+#include "evaluate_kernel.cuh"
 #include "patch_base.cuh"
 
 namespace PSMF
@@ -45,24 +46,14 @@ namespace PSMF
   }
 
 
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
+  template <int dim, int fe_degree, typename Number, LaplaceVariant laplace>
   __global__ void
-  laplace_kernel_base(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
+  laplace_kernel_basic(
+    const Number                                                 *src,
+    Number                                                       *dst,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
-    constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
+    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
 
@@ -71,8 +62,10 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
+    SharedMemData<dim, Number, true> shared_data(get_shared_data_ptr<Number>(),
+                                                 patch_per_block,
+                                                 n_dofs_1d,
+                                                 local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -81,18 +74,17 @@ namespace PSMF
             shared_data
               .local_mass[(local_patch * dim + d) * n_dofs_1d * n_dofs_1d +
                           threadIdx.y * n_dofs_1d + local_tid_x] =
-              gpu_data.global_mass_1d[gpu_data.patch_type[patch * dim + d] *
-                                        n_dofs_1d * n_dofs_1d +
-                                      threadIdx.y * n_dofs_1d + local_tid_x];
+              gpu_data.laplace_mass_1d[gpu_data.patch_type[patch * dim + d] *
+                                         n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x];
 
             shared_data
               .local_derivative[(local_patch * dim + d) * n_dofs_1d *
                                   n_dofs_1d +
                                 threadIdx.y * n_dofs_1d + local_tid_x] =
-              gpu_data
-                .global_derivative_1d[gpu_data.patch_type[patch * dim + d] *
-                                        n_dofs_1d * n_dofs_1d +
-                                      threadIdx.y * n_dofs_1d + local_tid_x];
+              gpu_data.laplace_stiff_1d[gpu_data.patch_type[patch * dim + d] *
+                                          n_dofs_1d * n_dofs_1d +
+                                        threadIdx.y * n_dofs_1d + local_tid_x];
           }
 
         for (unsigned int z = 0; z < n_dofs_z; ++z)
@@ -101,143 +93,152 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            shared_data.global_dof_indices[index] =
+            const unsigned int global_dof_indices =
               Util::compute_indices<dim, fe_degree>(
-                &gpu_data.first_dof[patch * (1 << dim)], local_patch, z);
+                &gpu_data.first_dof[patch * (1 << dim)],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
 
-            shared_data.local_src[index] =
-              src[shared_data.global_dof_indices[index]];
+            shared_data.local_src[index] = src[global_dof_indices];
 
             shared_data.local_dst[index] = 0.;
           }
 
-        func(local_patch, &gpu_data, &shared_data);
+        evaluate_laplace<dim, fe_degree, Number, laplace>(local_patch,
+                                                          &shared_data);
 
         for (unsigned int z = 0; z < n_dofs_z; ++z)
           {
-            const unsigned int local_index =
-              z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d + local_tid_x;
+            const unsigned int index = local_patch * local_dim +
+                                       z * n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x;
 
-            auto l_to_h =
-              gpu_data
-                .l_to_h[gpu_data.patch_id[patch] * local_dim + local_index];
+            const unsigned int global_dof_indices =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * (1 << dim)],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
 
-            auto global_dof_indices_ori =
-              shared_data.global_dof_indices[local_patch * local_dim + l_to_h];
-
-            // if (threadIdx.y == 0)
-            //   printf("%f ",
-            //          shared_data.local_src[local_patch * local_dim +
-            //          l_to_h]);
-
-            atomicAdd(&dst[global_dof_indices_ori],
-                      shared_data.local_dst[local_patch * local_dim + l_to_h]);
+            atomicAdd(&dst[global_dof_indices], shared_data.local_dst[index]);
           }
       }
   }
 
-
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
+  template <int dim, int fe_degree, typename Number>
   __global__ void
-  loop_kernel_seperate(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    Number                                           *tmp,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
+  laplace_kernel_tensorcore(
+    const Number                                                 *src,
+    Number                                                       *dst,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
-    constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
-    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
+    constexpr unsigned int n_dofs_1d         = 2 * fe_degree + 2;
+    constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
+    constexpr unsigned int local_dim         = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int local_dim_padding =
+      Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
+    constexpr unsigned int n_dofs_z = dim == 2 ? 1 : n_dofs_1d;
 
     const unsigned int patch_per_block = gpu_data.patch_per_block;
     const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
+    SharedMemData<dim, Number, true> shared_data(get_shared_data_ptr<Number>(),
+                                                 patch_per_block,
+                                                 n_dofs_1d,
+                                                 local_dim_padding);
 
     if (patch < gpu_data.n_patches)
       {
-        shared_data.local_mass[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-        shared_data.local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_derivative_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-
-        // #pragma unroll
-        for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int d = 0; d < dim; ++d)
           {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
+            shared_data
+              .local_mass[(local_patch * dim + d) * n_dofs_1d *
+                            n_dofs_1d_padding +
+                          threadIdx.y * n_dofs_1d_padding + local_tid_x] =
+              gpu_data.laplace_mass_1d[gpu_data.patch_type[patch * dim + d] *
+                                         n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x];
 
-            unsigned int global_dof_indices =
-              z * func.get_ndofs() * func.get_ndofs() +
-              threadIdx.y * func.get_ndofs() + local_tid_x +
-              gpu_data.first_dof[patch];
-
-            shared_data.local_src[index] = src[global_dof_indices];
-
-            shared_data.local_dst[index] = dst[global_dof_indices];
+            shared_data
+              .local_derivative[(local_patch * dim + d) * n_dofs_1d *
+                                  n_dofs_1d_padding +
+                                threadIdx.y * n_dofs_1d_padding + local_tid_x] =
+              gpu_data.laplace_stiff_1d[gpu_data.patch_type[patch * dim + d] *
+                                          n_dofs_1d * n_dofs_1d +
+                                        threadIdx.y * n_dofs_1d + local_tid_x];
           }
 
-        func(local_patch, &gpu_data, &shared_data);
-
-        // #pragma unroll
         for (unsigned int z = 0; z < n_dofs_z; ++z)
           {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
+            const unsigned int index_padding =
+              local_patch * local_dim_padding +
+              z * n_dofs_1d * n_dofs_1d_padding +
+              threadIdx.y * n_dofs_1d_padding + local_tid_x;
 
-            unsigned int global_dof_indices =
-              z * func.get_ndofs() * func.get_ndofs() +
-              threadIdx.y * func.get_ndofs() + local_tid_x +
-              gpu_data.first_dof[patch];
+            const unsigned int global_dof_indices =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * (1 << dim)],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
 
-            tmp[global_dof_indices] = shared_data.local_src[index];
+            shared_data.local_src[index_padding] = src[global_dof_indices];
+
+            shared_data.local_dst[index_padding] = 0.;
+          }
+
+        evaluate_laplace<dim, fe_degree, Number, LaplaceVariant::TensorCore>(
+          local_patch, &shared_data);
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int index_padding =
+              local_patch * local_dim_padding +
+              z * n_dofs_1d * n_dofs_1d_padding +
+              threadIdx.y * n_dofs_1d_padding + local_tid_x;
+
+            const unsigned int global_dof_indices =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * (1 << dim)],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
+
+            atomicAdd(&dst[global_dof_indices],
+                      shared_data.local_dst[index_padding]);
           }
       }
   }
 
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
+
+  template <int dim, int fe_degree, typename Number>
   __global__ void
   loop_kernel_seperate_inv(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
+    const Number                                                 *src,
+    Number                                                       *dst,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
-    constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
-    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
+    constexpr unsigned int n_dofs_1d           = 2 * fe_degree;
+    constexpr unsigned int local_dim           = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int regular_vpatch_size = Util::pow(2, dim);
+    constexpr unsigned int n_dofs_z            = dim == 2 ? 1 : n_dofs_1d;
 
     const unsigned int patch_per_block = gpu_data.patch_per_block;
     const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
+    SharedMemData<dim, Number, false> shared_data(get_shared_data_ptr<Number>(),
+                                                  patch_per_block,
+                                                  n_dofs_1d,
+                                                  local_dim);
 
     if (patch < gpu_data.n_patches)
       {
@@ -248,33 +249,40 @@ namespace PSMF
         // #pragma unroll
         for (unsigned int z = 0; z < n_dofs_z; ++z)
           {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
+            const unsigned int index = local_patch * local_dim +
+                                       z * n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x;
 
-            unsigned int global_dof_indices =
-              (z + dim - 2) * func.get_ndofs() * func.get_ndofs() +
-              (threadIdx.y + 1) * func.get_ndofs() + local_tid_x + 1 +
-              gpu_data.first_dof[patch];
+            const unsigned int global_dof_indices =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * regular_vpatch_size],
+                local_patch,
+                local_tid_x + 1,
+                threadIdx.y + 1,
+                z + dim - 2);
 
             shared_data.local_src[index] = src[global_dof_indices];
 
             shared_data.local_dst[index] = dst[global_dof_indices];
           }
 
-        func(local_patch, &gpu_data, &shared_data);
+        evaluate_smooth_inv<dim, fe_degree, Number, SmootherVariant::GLOBAL>(
+          local_patch, &shared_data);
 
         // #pragma unroll
         for (unsigned int z = 0; z < n_dofs_z; ++z)
           {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
+            const unsigned int index = local_patch * local_dim +
+                                       z * n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x;
 
-            unsigned int global_dof_indices =
-              (z + dim - 2) * func.get_ndofs() * func.get_ndofs() +
-              (threadIdx.y + 1) * func.get_ndofs() + local_tid_x + 1 +
-              gpu_data.first_dof[patch];
+            const unsigned int global_dof_indices =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * regular_vpatch_size],
+                local_patch,
+                local_tid_x + 1,
+                threadIdx.y + 1,
+                z + dim - 2);
 
             dst[global_dof_indices] =
               shared_data.local_dst[index] * gpu_data.relaxation;
@@ -282,116 +290,14 @@ namespace PSMF
       }
   }
 
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
-  __global__ void
-  loop_kernel_fused_base(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
-  {
-    constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
-    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
-
-    const unsigned int patch_per_block = gpu_data.patch_per_block;
-    const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
-    const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
-    const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
-
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
-
-    if (patch < gpu_data.n_patches)
-      {
-        shared_data.local_mass[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-        shared_data.local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_derivative_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-
-        for (unsigned int z = 0; z < n_dofs_z; ++z)
-          {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
-
-            unsigned int global_dof_indices =
-              z * func.get_ndofs() * func.get_ndofs() +
-              threadIdx.y * func.get_ndofs() + local_tid_x +
-              gpu_data.first_dof[patch];
-
-            shared_data.local_src[index] = src[global_dof_indices];
-
-            shared_data.local_dst[index] = dst[global_dof_indices];
-          }
-
-        func(local_patch, &gpu_data, &shared_data);
-
-        if (dim == 2)
-          {
-            if (0 < local_tid_x && local_tid_x < n_dofs_1d - 1 &&
-                0 < threadIdx.y && threadIdx.y < n_dofs_1d - 1)
-              {
-                unsigned int index = local_patch * local_dim +
-                                     threadIdx.y * n_dofs_1d + local_tid_x;
-
-                unsigned int global_dof_indices =
-                  threadIdx.y * func.get_ndofs() + local_tid_x +
-                  gpu_data.first_dof[patch];
-
-                dst[global_dof_indices] =
-                  shared_data.local_dst[index] * gpu_data.relaxation;
-              }
-          }
-        else if (dim == 3)
-          {
-            if (0 < local_tid_x && local_tid_x < n_dofs_1d - 1 &&
-                0 < threadIdx.y && threadIdx.y < n_dofs_1d - 1)
-              for (unsigned int z = 1; z < n_dofs_1d - 1; ++z)
-                {
-                  unsigned int index = local_patch * local_dim +
-                                       z * n_dofs_1d * n_dofs_1d +
-                                       threadIdx.y * n_dofs_1d + local_tid_x;
-
-                  unsigned int global_dof_indices =
-                    z * func.get_ndofs() * func.get_ndofs() +
-                    threadIdx.y * func.get_ndofs() + local_tid_x +
-                    gpu_data.first_dof[patch];
-
-                  dst[global_dof_indices] =
-                    shared_data.local_dst[index] * gpu_data.relaxation;
-                }
-          }
-      }
-  }
-
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
+  template <int dim, int fe_degree, typename Number, LaplaceVariant lapalace>
   __global__ void
   loop_kernel_fused_l(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
+    const Number                                                 *src,
+    Number                                                       *dst,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
-    constexpr unsigned int n_dofs_1d           = Functor::n_dofs_1d;
+    constexpr unsigned int n_dofs_1d           = 2 * fe_degree + 2;
     constexpr unsigned int local_dim           = Util::pow(n_dofs_1d, dim);
     constexpr unsigned int regular_vpatch_size = Util::pow(2, dim);
     constexpr unsigned int n_dofs_z            = dim == 2 ? 1 : n_dofs_1d;
@@ -401,183 +307,151 @@ namespace PSMF
     const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
 
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
+    SharedMemData<dim, Number, false> shared_data(get_shared_data_ptr<Number>(),
+                                                  patch_per_block,
+                                                  n_dofs_1d,
+                                                  local_dim);
 
     if (patch < gpu_data.n_patches)
       {
         shared_data.local_mass[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
+          gpu_data.smooth_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
         shared_data.local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_derivative_1d[threadIdx.y * n_dofs_1d + local_tid_x];
+          gpu_data.smooth_stiff_1d[threadIdx.y * n_dofs_1d + local_tid_x];
 
         for (unsigned int z = 0; z < n_dofs_z; ++z)
           {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
+            const unsigned int index = local_patch * local_dim +
+                                       z * n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x;
 
-            shared_data.global_dof_indices[index] =
+            const unsigned int global_dof_indices =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * regular_vpatch_size],
                 local_patch,
+                local_tid_x,
+                threadIdx.y,
                 z);
-
-            shared_data.local_src[index] =
-              src[shared_data.global_dof_indices[index]];
-
-            shared_data.local_dst[index] =
-              dst[shared_data.global_dof_indices[index]];
-          }
-
-        func(local_patch, &gpu_data, &shared_data);
-
-        for (unsigned int z = 0; z < n_dofs_z; ++z)
-          {
-            auto l_to_h =
-              gpu_data.l_to_h[gpu_data.patch_id[patch] * local_dim +
-                              z * n_dofs_1d * n_dofs_1d +
-                              threadIdx.y * n_dofs_1d + local_tid_x];
-
-            auto global_dof_indices_ori =
-              shared_data.global_dof_indices[local_patch * local_dim + l_to_h];
-
-            dst[global_dof_indices_ori] =
-              shared_data.local_dst[local_patch * local_dim + l_to_h] *
-              gpu_data.relaxation;
-          }
-      }
-  }
-
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
-  __global__ void
-  loop_kernel_fused_3d(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
-  {
-    constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
-    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-
-    const unsigned int patch_per_block = gpu_data.patch_per_block;
-    const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
-    const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
-    const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
-
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
-
-    if (patch < gpu_data.n_patches)
-      {
-        shared_data.local_mass[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-        shared_data.local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_derivative_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-
-        unsigned int index = local_patch * local_dim +
-                             threadIdx.z * n_dofs_1d * n_dofs_1d +
-                             threadIdx.y * n_dofs_1d + local_tid_x;
-
-        unsigned int global_dof_indices =
-          threadIdx.z * func.get_ndofs() * func.get_ndofs() +
-          threadIdx.y * func.get_ndofs() + local_tid_x +
-          gpu_data.first_dof[patch];
-
-        shared_data.local_src[index] = src[global_dof_indices];
-
-        shared_data.local_dst[index] = dst[global_dof_indices];
-
-        func(local_patch, &gpu_data, &shared_data);
-
-        const unsigned int linear_tid =
-          local_tid_x + (threadIdx.y + threadIdx.z * n_dofs_1d) * n_dofs_1d;
-
-        if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2) * (n_dofs_1d - 2))
-          {
-            const unsigned int row =
-              (linear_tid / (n_dofs_1d - 2)) % ((n_dofs_1d - 2)) + 1;
-            const unsigned int col = linear_tid % (n_dofs_1d - 2) + 1;
-            const unsigned int z =
-              linear_tid / ((n_dofs_1d - 2) * (n_dofs_1d - 2)) + 1;
-
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d + row * n_dofs_1d +
-                                 col;
-
-            unsigned int global_dof_indices =
-              z * func.get_ndofs() * func.get_ndofs() + row * func.get_ndofs() +
-              col + gpu_data.first_dof[patch];
-
-            dst[global_dof_indices] =
-              shared_data.local_dst[index] * gpu_data.relaxation;
-          }
-      }
-  }
-
-
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            typename Functor,
-            DoFLayout dof_layout>
-  __global__ void
-  loop_kernel_fused_cf(
-    Functor                                           func,
-    const Number                                     *src,
-    Number                                           *dst,
-    const typename LevelVertexPatch<dim,
-                                    fe_degree,
-                                    Number,
-                                    kernel,
-                                    dof_layout>::Data gpu_data)
-  {
-    constexpr unsigned int n_dofs_1d = Functor::n_dofs_1d;
-    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
-
-    const unsigned int patch_per_block = gpu_data.patch_per_block;
-    const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
-    const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
-    const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
-
-    SharedMemData<dim, Number, kernel> shared_data(
-      get_shared_data_ptr<Number>(), patch_per_block, n_dofs_1d, local_dim);
-
-    if (patch < gpu_data.n_patches)
-      {
-        shared_data.local_mass[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-        shared_data.local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
-          gpu_data.global_derivative_1d[threadIdx.y * n_dofs_1d + local_tid_x];
-
-        for (unsigned int z = 0; z < n_dofs_z; ++z)
-          {
-            unsigned int index = local_patch * local_dim +
-                                 z * n_dofs_1d * n_dofs_1d +
-                                 threadIdx.y * n_dofs_1d + local_tid_x;
-
-            unsigned int global_dof_indices =
-              z * func.get_ndofs() * func.get_ndofs() +
-              threadIdx.y * func.get_ndofs() + local_tid_x +
-              gpu_data.first_dof[patch];
 
             shared_data.local_src[index] = src[global_dof_indices];
 
             shared_data.local_dst[index] = dst[global_dof_indices];
           }
 
-        func(local_patch, &gpu_data, &shared_data);
+        evaluate_smooth<dim,
+                        fe_degree,
+                        Number,
+                        lapalace,
+                        SmootherVariant::FUSED_L>(local_patch,
+                                                  &shared_data,
+                                                  &gpu_data);
+
+        const unsigned int linear_tid = local_tid_x + threadIdx.y * n_dofs_1d;
+        if (dim == 2)
+          {
+            if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+              {
+                int row = linear_tid / (n_dofs_1d - 2) + 1;
+                int col = linear_tid % (n_dofs_1d - 2) + 1;
+
+                const unsigned int index =
+                  local_patch * local_dim + row * n_dofs_1d + col;
+
+                const unsigned int global_dof_indices =
+                  Util::compute_indices<dim, fe_degree>(
+                    &gpu_data.first_dof[patch * regular_vpatch_size],
+                    local_patch,
+                    col,
+                    row,
+                    0);
+
+                dst[global_dof_indices] =
+                  shared_data.local_dst[index] * gpu_data.relaxation;
+              }
+          }
+        else if (dim == 3)
+          {
+            if (linear_tid < (n_dofs_1d - 2) * (n_dofs_1d - 2))
+              for (unsigned int z = 1; z < n_dofs_1d - 1; ++z)
+                {
+                  int row = linear_tid / (n_dofs_1d - 2) + 1;
+                  int col = linear_tid % (n_dofs_1d - 2) + 1;
+
+                  unsigned int index = local_patch * local_dim +
+                                       z * n_dofs_1d * n_dofs_1d +
+                                       row * n_dofs_1d + col;
+
+                  const unsigned int global_dof_indices =
+                    Util::compute_indices<dim, fe_degree>(
+                      &gpu_data.first_dof[patch * regular_vpatch_size],
+                      local_patch,
+                      col,
+                      row,
+                      z);
+
+                  dst[global_dof_indices] =
+                    shared_data.local_dst[index] * gpu_data.relaxation;
+                }
+          }
+      }
+  }
+
+
+  template <int dim, int fe_degree, typename Number, LaplaceVariant lapalace>
+  __global__ void
+  loop_kernel_fused_cf(
+    const Number                                                 *src,
+    Number                                                       *dst,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
+  {
+    constexpr unsigned int n_dofs_1d           = 2 * fe_degree + 2;
+    constexpr unsigned int local_dim           = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int regular_vpatch_size = Util::pow(2, dim);
+    constexpr unsigned int n_dofs_z            = dim == 2 ? 1 : n_dofs_1d;
+
+    const unsigned int patch_per_block = gpu_data.patch_per_block;
+    const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
+    const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
+    const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
+
+    SharedMemData<dim, Number, false> shared_data(get_shared_data_ptr<Number>(),
+                                                  patch_per_block,
+                                                  n_dofs_1d,
+                                                  local_dim);
+
+    if (patch < gpu_data.n_patches)
+      {
+        shared_data.local_mass[threadIdx.y * n_dofs_1d + local_tid_x] =
+          gpu_data.smooth_mass_1d[threadIdx.y * n_dofs_1d + local_tid_x];
+        shared_data.local_derivative[threadIdx.y * n_dofs_1d + local_tid_x] =
+          gpu_data.smooth_stiff_1d[threadIdx.y * n_dofs_1d + local_tid_x];
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int index = local_patch * local_dim +
+                                       z * n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x;
+
+            const unsigned int global_dof_indices =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * regular_vpatch_size],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
+
+            shared_data.local_src[index] = src[global_dof_indices];
+
+            shared_data.local_dst[index] = dst[global_dof_indices];
+          }
+
+        evaluate_smooth_cf<dim,
+                           fe_degree,
+                           Number,
+                           lapalace,
+                           SmootherVariant::ConflictFree>(local_patch,
+                                                          &shared_data,
+                                                          &gpu_data);
 
         if (dim == 2)
           {
@@ -588,14 +462,20 @@ namespace PSMF
                 int row = linear_tid / (n_dofs_1d - 2) + 1;
                 int col = linear_tid % (n_dofs_1d - 2) + 1;
 
-                unsigned int index =
-                  local_patch * local_dim + row * n_dofs_1d + col;
+                const unsigned int index = 2 * local_patch * local_dim +
+                                           (row - 1) * (n_dofs_1d - 2) + col -
+                                           1;
 
-                unsigned int global_dof_indices =
-                  row * func.get_ndofs() + col + gpu_data.first_dof[patch];
+                const unsigned int global_dof_indices =
+                  Util::compute_indices<dim, fe_degree>(
+                    &gpu_data.first_dof[patch * regular_vpatch_size],
+                    local_patch,
+                    col,
+                    row,
+                    0);
 
                 dst[global_dof_indices] =
-                  shared_data.local_dst[index] * gpu_data.relaxation;
+                  shared_data.tmp[index] * gpu_data.relaxation;
               }
           }
         else if (dim == 3)
@@ -613,12 +493,16 @@ namespace PSMF
                                          z * n_dofs_1d * n_dofs_1d +
                                          (row - 1) * (n_dofs_1d - 2) + col - 1;
 
-                    unsigned int global_dof_indices =
-                      (z + 1) * func.get_ndofs() * func.get_ndofs() +
-                      row * func.get_ndofs() + col + gpu_data.first_dof[patch];
+                    const unsigned int global_dof_indices =
+                      Util::compute_indices<dim, fe_degree>(
+                        &gpu_data.first_dof[patch * regular_vpatch_size],
+                        local_patch,
+                        col,
+                        row,
+                        z + 1);
 
                     dst[global_dof_indices] =
-                      shared_data.temp[index] * gpu_data.relaxation;
+                      shared_data.tmp[index] * gpu_data.relaxation;
                   }
               }
           }

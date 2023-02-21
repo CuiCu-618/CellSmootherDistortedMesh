@@ -14,17 +14,207 @@
 
 using namespace dealii;
 
-extern double smoother_mem = 0;
-
 namespace PSMF
 {
+  template <typename MatrixType,
+            int dim,
+            int fe_degree,
+            typename Number,
+            LaplaceVariant  lapalace,
+            SmootherVariant smooth>
+  struct LocalSmoother;
+
+
+  template <typename MatrixType,
+            int dim,
+            int fe_degree,
+            typename Number,
+            LaplaceVariant lapalace>
+  struct LocalSmoother<MatrixType,
+                       dim,
+                       fe_degree,
+                       Number,
+                       lapalace,
+                       SmootherVariant::GLOBAL>
+  {
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree;
+
+    LocalSmoother() = default;
+
+    LocalSmoother(const SmartPointer<const MatrixType> A)
+      : A(A)
+    {
+      A->initialize_dof_vector(tmp);
+    }
+
+    void
+    setup_kernel(const unsigned int patch_per_block) const
+    {
+      shared_mem = 0;
+
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst, local_residual
+      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_eigenvectors, local_eigenvalues
+      shared_mem +=
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
+      // temp
+      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+
+      AssertCuda(
+        cudaFuncSetAttribute(loop_kernel_seperate_inv<dim, fe_degree, Number>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_mem));
+
+      block_dim = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+    }
+
+    template <typename VectorType, typename DataType>
+    void
+    loop_kernel(const VectorType &src,
+                VectorType       &dst,
+                const DataType   &gpu_data,
+                const dim3       &grid_dim,
+                const dim3 &) const
+    {
+      A->vmult(tmp, dst);
+      tmp.sadd(-1., src);
+
+      loop_kernel_seperate_inv<dim, fe_degree, Number>
+        <<<grid_dim, block_dim, shared_mem>>>(tmp.get_values(),
+                                              dst.get_values(),
+                                              gpu_data);
+    }
+    mutable std::size_t                  shared_mem;
+    mutable dim3                         block_dim;
+    const SmartPointer<const MatrixType> A;
+    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> tmp;
+  };
+
+
+  template <typename MatrixType,
+            int dim,
+            int fe_degree,
+            typename Number,
+            LaplaceVariant lapalace>
+  struct LocalSmoother<MatrixType,
+                       dim,
+                       fe_degree,
+                       Number,
+                       lapalace,
+                       SmootherVariant::FUSED_L>
+  {
+  public:
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    mutable std::size_t shared_mem;
+
+    LocalSmoother() = default;
+
+    LocalSmoother(const SmartPointer<const MatrixType>)
+    {}
+
+    void
+    setup_kernel(const unsigned int patch_per_block) const
+    {
+      shared_mem = 0;
+
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst
+      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_eigenvectors, local_eigenvalues
+      shared_mem +=
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
+      // temp
+      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+
+      AssertCuda(cudaFuncSetAttribute(
+        loop_kernel_fused_l<dim, fe_degree, Number, lapalace>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shared_mem));
+    }
+
+    template <typename VectorType, typename DataType>
+    void
+    loop_kernel(const VectorType &src,
+                VectorType       &dst,
+                const DataType   &gpu_data,
+                const dim3       &grid_dim,
+                const dim3       &block_dim) const
+    {
+      loop_kernel_fused_l<dim, fe_degree, Number, lapalace>
+        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
+                                              dst.get_values(),
+                                              gpu_data);
+    }
+  };
+
+
+  template <typename MatrixType,
+            int dim,
+            int fe_degree,
+            typename Number,
+            LaplaceVariant lapalace>
+  struct LocalSmoother<MatrixType,
+                       dim,
+                       fe_degree,
+                       Number,
+                       lapalace,
+                       SmootherVariant::ConflictFree>
+  {
+  public:
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    mutable std::size_t shared_mem;
+
+    LocalSmoother() = default;
+
+    LocalSmoother(const SmartPointer<const MatrixType>)
+    {}
+
+    void
+    setup_kernel(const unsigned int patch_per_block) const
+    {
+      shared_mem = 0;
+
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst
+      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_eigenvectors, local_eigenvalues
+      shared_mem +=
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
+      // temp
+      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+
+      AssertCuda(cudaFuncSetAttribute(
+        loop_kernel_fused_cf<dim, fe_degree, Number, lapalace>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shared_mem));
+    }
+
+    template <typename VectorType, typename DataType>
+    void
+    loop_kernel(const VectorType &src,
+                VectorType       &dst,
+                const DataType   &gpu_data,
+                const dim3       &grid_dim,
+                const dim3       &block_dim) const
+    {
+      loop_kernel_fused_cf<dim, fe_degree, Number, lapalace>
+        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
+                                              dst.get_values(),
+                                              gpu_data);
+    }
+  };
+
+
 
   // Forward declaration
   template <typename MatrixType,
             int             dim,
             int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
+            LaplaceVariant  laplace,
+            SmootherVariant smooth>
   class PatchSmoother;
 
   /**
@@ -33,24 +223,27 @@ namespace PSMF
   template <typename MatrixType,
             int             dim,
             int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
+            LaplaceVariant  laplace,
+            SmootherVariant smooth>
   class PatchSmootherImpl
   {
   public:
     using Number = typename MatrixType::value_type;
-    using LevelVertexPatch =
-      LevelVertexPatch<dim, fe_degree, Number, kernel, dof_layout>;
-    using AdditionalData =
-      typename PatchSmoother<MatrixType, dim, fe_degree, kernel, dof_layout>::
-        AdditionalData;
 
-    PatchSmootherImpl(const MatrixType     &A,
-                      const AdditionalData &additional_data = AdditionalData());
+    PatchSmootherImpl(
+      const MatrixType                                               &A,
+      std::shared_ptr<const LevelVertexPatch<dim, fe_degree, Number>> data_)
+      : A(&A)
+      , data(data_)
+    {}
 
     template <typename VectorType>
     void
-    vmult(VectorType &dst, const VectorType &src) const;
+    vmult(VectorType &dst, const VectorType &src) const
+    {
+      dst = 0.;
+      step(dst, src);
+    }
 
     template <typename VectorType>
     void
@@ -59,7 +252,13 @@ namespace PSMF
 
     template <typename VectorType>
     void
-    step(VectorType &dst, const VectorType &src) const;
+    step(VectorType &dst, const VectorType &src) const
+    {
+      LocalSmoother<MatrixType, dim, fe_degree, Number, laplace, smooth>
+        local_smoother(A);
+
+      data->patch_loop(local_smoother, src, dst);
+    }
 
     template <typename VectorType>
     void
@@ -67,17 +266,14 @@ namespace PSMF
     {}
 
     std::size_t
-    memory_consumption() const;
+    memory_consumption() const
+    {
+      return sizeof(*this);
+    }
 
   private:
-    template <typename VectorType>
-    void
-    step_impl(VectorType &dst, const VectorType &src) const;
-
-    const SmartPointer<const MatrixType> A;
-    LevelVertexPatch                     level_vertex_patch;
-
-    const Number relaxation;
+    const SmartPointer<const MatrixType>                            A;
+    std::shared_ptr<const LevelVertexPatch<dim, fe_degree, Number>> data;
   };
 
   /**
@@ -86,33 +282,24 @@ namespace PSMF
   template <typename MatrixType,
             int             dim,
             int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
+            LaplaceVariant  laplace,
+            SmootherVariant smooth>
   class PatchSmoother
     : public PreconditionRelaxation<
         MatrixType,
-        PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>>
+        PatchSmootherImpl<MatrixType, dim, fe_degree, laplace, smooth>>
   {
     using Number = typename MatrixType::value_type;
     using PreconditionerType =
-      PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>;
+      PatchSmootherImpl<MatrixType, dim, fe_degree, laplace, smooth>;
 
   public:
     class AdditionalData
     {
     public:
-      AdditionalData(
-        const Number            relaxation         = 1.,
-        const bool              use_coloring       = true,
-        const unsigned int      n_iterations       = 1,
-        const unsigned int      patch_per_block    = 1,
-        const GranularityScheme granularity_scheme = GranularityScheme::none);
+      AdditionalData() = default;
 
-      Number            relaxation;
-      bool              use_coloring;
-      unsigned int      n_iterations;
-      unsigned int      patch_per_block;
-      GranularityScheme granularity_scheme;
+      std::shared_ptr<LevelVertexPatch<dim, fe_degree, Number>> data;
       /*
        * Preconditioner.
        */
@@ -121,205 +308,22 @@ namespace PSMF
     // using AdditionalData = typename BaseClass::AdditionalData;
 
     void
-    initialize(const MatrixType     &A,
-               const AdditionalData &parameters = AdditionalData());
+    initialize(const MatrixType &A, const AdditionalData &parameters_in)
+    {
+      Assert(parameters_in.preconditioner == nullptr, ExcInternalError());
+
+      AdditionalData parameters;
+      parameters.preconditioner =
+        std::make_shared<PreconditionerType>(A, parameters_in.data);
+
+      this->A            = &A;
+      this->relaxation   = 1;
+      this->n_iterations = 1;
+
+      Assert(parameters.preconditioner, ExcNotInitialized());
+      this->preconditioner = parameters.preconditioner;
+    }
   };
-
-  /*--------------------- Implementation ------------------------*/
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>::
-    PatchSmootherImpl(const MatrixType     &A,
-                      const AdditionalData &additional_data_in)
-    : A(&A)
-    , relaxation(additional_data_in.relaxation)
-  {
-    typename LevelVertexPatch::AdditionalData additional_data;
-
-    additional_data.relaxation         = additional_data_in.relaxation;
-    additional_data.use_coloring       = additional_data_in.use_coloring;
-    additional_data.patch_per_block    = additional_data_in.patch_per_block;
-    additional_data.granularity_scheme = additional_data_in.granularity_scheme;
-
-    level_vertex_patch.reinit(*(A.get_dof_handler()),
-                              A.get_mg_level(),
-                              additional_data);
-
-    level_vertex_patch.reinit_tensor_product_smoother();
-  }
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  template <typename VectorType>
-  void
-  PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>::vmult(
-    VectorType       &dst,
-    const VectorType &src) const
-  {
-    dst = 0.;
-    step(dst, src);
-  }
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  template <typename VectorType>
-  void
-  PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>::step(
-    VectorType       &dst,
-    const VectorType &src) const
-  {
-    Assert(this->A != nullptr, ExcNotInitialized());
-    step_impl(dst, src);
-  }
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  template <typename VectorType>
-  void
-  PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>::step_impl(
-    VectorType       &dst,
-    const VectorType &src) const
-  {
-    unsigned int       level          = A->get_mg_level();
-    unsigned int       n_dofs_per_dim = (1 << level) * (fe_degree + 2);
-    // const unsigned int n_patches_1d   = (1 << level) - 1;
-
-    switch (kernel)
-      {
-        case SmootherVariant::GLOBAL:
-          {
-            LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother_inverse(n_dofs_per_dim);
-            level_vertex_patch.patch_loop_global(A,
-                                                 local_smoother_inverse,
-                                                 src,
-                                                 dst);
-            break;
-          }
-        case SmootherVariant::SEPERATE:
-          {
-            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother(n_dofs_per_dim);
-
-            LocalSmoother_inverse<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother_inverse(n_dofs_per_dim);
-            level_vertex_patch.patch_loop(local_smoother,
-                                          src,
-                                          dst,
-                                          local_smoother_inverse);
-            break;
-          }
-        case SmootherVariant::FUSED_BASE:
-          {
-            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother(n_dofs_per_dim);
-
-            level_vertex_patch.patch_loop(local_smoother, src, dst);
-            break;
-          }
-        case SmootherVariant::FUSED_L:
-          {
-            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother(n_dofs_per_dim);
-
-            level_vertex_patch.patch_loop(local_smoother, src, dst);
-            break;
-          }
-        case SmootherVariant::FUSED_3D:
-          {
-            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother(n_dofs_per_dim);
-
-            level_vertex_patch.patch_loop(local_smoother, src, dst);
-            break;
-          }
-        case SmootherVariant::FUSED_CF:
-          {
-            LocalSmoother<dim, fe_degree, Number, kernel, dof_layout>
-              local_smoother(n_dofs_per_dim);
-
-            level_vertex_patch.patch_loop(local_smoother, src, dst);
-            break;
-          }
-        default:
-          AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
-          break;
-      }
-  }
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  std::size_t
-  PatchSmootherImpl<MatrixType, dim, fe_degree, kernel, dof_layout>::
-    memory_consumption() const
-  {
-    std::size_t result = sizeof(*this);
-    result += level_vertex_patch.memory_consumption();
-    return result;
-  }
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  void
-  PatchSmoother<MatrixType, dim, fe_degree, kernel, dof_layout>::initialize(
-    const MatrixType                    &A,
-    const PatchSmoother::AdditionalData &parameters_in)
-  {
-    Assert(parameters_in.preconditioner == nullptr, ExcInternalError());
-
-    AdditionalData parameters;
-    parameters.relaxation   = parameters_in.relaxation;
-    parameters.n_iterations = parameters_in.n_iterations;
-    parameters.preconditioner =
-      std::make_shared<PreconditionerType>(A, parameters_in);
-
-    // this->BaseClass::initialize(A, parameters);
-    this->A          = &A;
-    this->relaxation = parameters.relaxation;
-
-    Assert(parameters.preconditioner, ExcNotInitialized());
-
-    this->preconditioner = parameters.preconditioner;
-    this->n_iterations   = parameters.n_iterations;
-    smoother_mem += this->preconditioner->memory_consumption();
-  }
-
-  template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  inline PatchSmoother<MatrixType, dim, fe_degree, kernel, dof_layout>::
-    AdditionalData::AdditionalData(const Number            relaxation,
-                                   const bool              use_coloring,
-                                   const unsigned int      n_iterations,
-                                   const unsigned int      patch_per_block,
-                                   const GranularityScheme granularity_scheme)
-    : relaxation(relaxation)
-    , use_coloring(use_coloring)
-    , n_iterations(n_iterations)
-    , patch_per_block(patch_per_block)
-    , granularity_scheme(granularity_scheme)
-  {}
 
 } // namespace PSMF
 

@@ -26,6 +26,29 @@ namespace PSMF
 {
 
   /**
+   * @brief Laplace Variant: kernel type for Laplace operator.
+   */
+  enum class LaplaceVariant
+  {
+    /**
+     * Basic implementation.
+     */
+    Basic,
+
+    /**
+     * A conflict-free implementation by restructuring shared memory access.
+     */
+    ConflictFree,
+
+    /**
+     * Using the Warp Matrix Multiply and Accumulate (WMMA) API introduced in
+     * CUDA 11.0.
+     */
+    TensorCore
+  };
+
+
+  /**
    * @brief Smoother Variant: kernel type for
    * Multiplicative Schwarz Smoother.
    */
@@ -38,31 +61,21 @@ namespace PSMF
     GLOBAL,
 
     /**
-     * Compute the residual locally, using two kernels.
-     */
-    SEPERATE,
-
-    /**
-     * Compute the residual locally, combining two kernels into one.
-     */
-    FUSED_BASE,
-
-    /**
      * Same as above, but with linear thread indicex instead of tmasking
      * boundary threads for local solver.
      */
     FUSED_L,
 
     /**
-     * Same as above, using 3D thread-block for lower order degree in 3D
-     * instread of 2D thread-block used above.
-     */
-    FUSED_3D,
-
-    /**
      * A conflict-free implementation by restructuring shared memory access.
      */
-    FUSED_CF
+    ConflictFree,
+
+    /**
+     * Using the Warp Matrix Multiply and Accumulate (WMMA) API introduced in
+     * CUDA 11.0.
+     */
+    TensorCore
   };
 
 
@@ -102,24 +115,15 @@ namespace PSMF
   };
 
 
-  template <int dim,
-            int fe_degree,
-            typename Number,
-            SmootherVariant kernel,
-            DoFLayout       dof_layout>
-  class LevelVertexPatch;
-
   /**
-   * @brief Implementation for Continuous Galerkin(CG) element
+   * @brief Implementation for Discontinuous Galerkin(DG) element
    *
    * @tparam dim
    * @tparam fe_degree
    * @tparam Number
-   * @tparam kernel kernel type
    */
-  template <int dim, int fe_degree, typename Number, SmootherVariant kernel>
-  class LevelVertexPatch<dim, fe_degree, Number, kernel, DoFLayout::DGQ>
-    : public Subscriptor
+  template <int dim, int fe_degree, typename Number>
+  class LevelVertexPatch : public Subscriptor
   {
   public:
     using CellIterator = typename DoFHandler<dim>::level_cell_iterator;
@@ -155,7 +159,7 @@ namespace PSMF
       /**
        * If true, use coloring. Otherwise, use atomic operations.
        * Coloring ensures bitwise reproducibility but is slower on Pascal and
-       * newer architectures (need to be checked).
+       * newer architectures (need to check).
        */
       bool use_coloring;
 
@@ -219,22 +223,32 @@ namespace PSMF
       unsigned int *h_to_l;
 
       /**
-       * Pointer to 1D global mass matrix.
+       * Pointer to 1D mass matrix for lapalace operator.
        */
-      Number *global_mass_1d;
+      Number *laplace_mass_1d;
 
       /**
-       * Pointer to 1D global derivative matrix.
+       * Pointer to 1D stiffness matrix for lapalace operator.
        */
-      Number *global_derivative_1d;
+      Number *laplace_stiff_1d;
 
       /**
-       * Pointer to 1D eigenvalues.
+       * Pointer to 1D mass matrix for smoothing operator.
+       */
+      Number *smooth_mass_1d;
+
+      /**
+       * Pointer to 1D stiffness matrix for smoothing operator.
+       */
+      Number *smooth_stiff_1d;
+
+      /**
+       * Pointer to 1D eigenvalues for smoothing operator.
        */
       Number *eigenvalues;
 
       /**
-       * Pointer to 1D eigenvectors.
+       * Pointer to 1D eigenvectors for smoothing operator.
        */
       Number *eigenvectors;
     };
@@ -250,10 +264,16 @@ namespace PSMF
     ~LevelVertexPatch();
 
     /**
-     * Return the Data structure associated with @p color.
+     * Return the Data structure associated with @p color for lapalce operator.
      */
     Data
-    get_data(unsigned int color) const;
+    get_laplace_data(unsigned int color) const;
+
+    /**
+     * Return the Data structure associated with @p color for smoothing operator.
+     */
+    Data
+    get_smooth_data(unsigned int color) const;
 
     /**
      * Extracts the information needed to perform loops over cells.
@@ -267,33 +287,17 @@ namespace PSMF
      * @brief This method runs the loop over all patches and apply the local operation on
      * each element in parallel.
      *
-     * @tparam Functor a functor which is applied on each patch
+     * @tparam Operator a operator which is applied on each patch
      * @tparam VectorType
-     * @tparam Functor_inv a functor which is applied on each patch
      * @param func
      * @param src
      * @param dst
-     * @param func_inv
      */
-    template <typename Functor,
-              typename VectorType,
-              typename Functor_inv = Functor>
+    template <typename Operator, typename VectorType>
     void
-    patch_loop(const Functor     &func,
-               const VectorType  &src,
-               VectorType        &dst,
-               const Functor_inv &func_inv = Functor_inv()) const;
-
-    /**
-     * Helper function. Loop over all the patches and apply the functor on
-     * each element in parallel. GLOBAL kernel.
-     */
-    template <typename MatrixType, typename Functor_inv, typename VectorType>
-    void
-    patch_loop_global(const MatrixType  &A,
-                      const Functor_inv &func_inv,
-                      const VectorType  &src,
-                      VectorType        &dst) const;
+    patch_loop(const Operator   &op,
+               const VectorType &src,
+               VectorType       &dst) const;
 
     /**
      * This method runs the loop over all cells and compute tensor product on
@@ -302,11 +306,9 @@ namespace PSMF
      * some of the cells are updated, thus avoiding the duplication of face
      * integrals.
      */
-    template <typename Functor, typename VectorType>
+    template <typename Operator, typename VectorType>
     void
-    cell_loop(const Functor    &func,
-              const VectorType &src,
-              VectorType       &dst) const;
+    cell_loop(const Operator &op, const VectorType &src, VectorType &dst) const;
 
     /**
      * @brief Initializes the tensor product matrix for local smoothing.
@@ -335,37 +337,16 @@ namespace PSMF
 
   private:
     /**
-     * Helper function. Loop over all the patches and apply the functor on
-     * each element in parallel. FUSED kernel.
-     */
-    template <typename Functor, typename VectorType>
-    void
-    patch_loop_fused(const Functor    &func,
-                     const VectorType &src,
-                     VectorType       &dst) const;
-
-    /**
-     * Helper function. Loop over all the patches and apply the functor on
-     * each element in parallel. SEPERATE kernel.
-     */
-    template <typename Functor, typename Functor_inv, typename VectorType>
-    void
-    patch_loop_seperate(const Functor     &func,
-                        const Functor_inv &func_inv,
-                        const VectorType  &src,
-                        VectorType        &dst) const;
-
-    /**
      * Helper function. Setup color arrays for collecting data.
      */
     void
     setup_color_arrays(const unsigned int n_colors);
 
     /**
-     * Helper function. Setup patch arrays for each color.
+     * Helper function. Setup color arrays for collecting data.
      */
     void
-    setup_patch_arrays(const unsigned int color);
+    setup_configuration(const unsigned int n_colors);
 
     /**
      * Helper function. Get tensor product data for each patch.
@@ -425,14 +406,15 @@ namespace PSMF
      * Grid dimensions associated to the different colors. The grid dimensions
      * are used to launch the CUDA kernels.
      */
-    std::vector<dim3> grid_dim;
+    std::vector<dim3> grid_dim_lapalce;
+    std::vector<dim3> grid_dim_smooth;
 
     /**
      * Block dimensions associated to the different colors. The block
      * dimensions are used to launch the CUDA kernels.
      */
-    std::vector<dim3> block_dim;
-    std::vector<dim3> block_dim_inv;
+    std::vector<dim3> block_dim_laplace;
+    std::vector<dim3> block_dim_smooth;
 
     /**
      * Number of patches per thread block.
@@ -444,21 +426,21 @@ namespace PSMF
      */
     mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> tmp;
 
+    /**
+     * Raw graphed of locally owned active patches.
+     */
+    std::vector<std::vector<PatchIterator>> graph_ptr_raw;
 
     /**
      * Colored graphed of locally owned active patches.
      */
-    std::vector<std::vector<unsigned int>> graph;
-
-    /**
-     * Colored graphed of locally owned active patches.
-     */
-    std::vector<std::vector<PatchIterator>> graph_ptr;
+    std::vector<std::vector<PatchIterator>> graph_ptr_colored;
 
     /**
      * Number of patches in each color.
      */
-    std::vector<unsigned int> n_patches;
+    std::vector<unsigned int> n_patches_laplace;
+    std::vector<unsigned int> n_patches_smooth;
 
     /**
      * Pointer to the DoFHandler associated with the object.
@@ -472,7 +454,8 @@ namespace PSMF
      * @note For DG case, the first degree of freedom index of
      *       four cells in a patch is stored consecutively.
      */
-    std::vector<unsigned int *> first_dof;
+    std::vector<unsigned int *> first_dof_laplace;
+    std::vector<unsigned int *> first_dof_smooth;
 
     /**
      * Vector of the the first degree of freedom
@@ -533,30 +516,41 @@ namespace PSMF
     std::vector<unsigned int> h_to_l_host;
 
     /**
-     * Pointer to 1D global mass matrix.
+     * Pointer to 1D mass matrix for lapalace operator.
      */
-    Number *global_mass_1d;
+    Number *laplace_mass_1d;
 
     /**
-     * Pointer to 1D global derivative matrix.
+     * Pointer to 1D stiffness matrix for lapalace operator.
      */
-    Number *global_derivative_1d;
+    Number *laplace_stiff_1d;
 
     /**
-     * Vector of pointer to 1D eigenvalues of each color.
+     * Pointer to 1D mass matrix for smoothing operator.
+     */
+    Number *smooth_mass_1d;
+
+    /**
+     * Pointer to 1D stiffness matrix for smoothing operator.
+     */
+    Number *smooth_stiff_1d;
+
+    /**
+     * Pointer to 1D eigenvalues for smoothing operator.
      */
     Number *eigenvalues;
 
     /**
-     * Vector of pointer to 1D eigenvectors of each color.
+     * Pointer to 1D eigenvectors for smoothing operator.
      */
     Number *eigenvectors;
   };
 
   /**
    * Structure to pass the shared memory into a general user function.
+   * TODO: specialize for cell loop and patch loop
    */
-  template <int dim, typename Number, SmootherVariant kernel>
+  template <int dim, typename Number, bool is_laplace>
   struct SharedMemData
   {
     /**
@@ -568,15 +562,14 @@ namespace PSMF
                   unsigned int n_dofs_1d,
                   unsigned int local_dim)
     {
+      constexpr unsigned int n = is_laplace ? 3 : 1;
+
       local_src = data;
       local_dst = local_src + n_buff * local_dim;
 
       local_mass       = local_dst + n_buff * local_dim;
-      local_derivative = local_mass + n_buff * n_dofs_1d * n_dofs_1d * dim;
-      temp = local_derivative + n_buff * n_dofs_1d * n_dofs_1d * dim;
-
-      global_dof_indices =
-        (unsigned int *)(temp + n_buff * local_dim * (dim - 1));
+      local_derivative = local_mass + n_buff * n_dofs_1d * n_dofs_1d * n;
+      tmp              = local_derivative + n_buff * n_dofs_1d * n_dofs_1d * n;
     }
 
 
@@ -618,12 +611,7 @@ namespace PSMF
     /**
      * Shared memory for internal buffer.
      */
-    Number *temp;
-
-    /**
-     * Shared memory for local to global dof indices with l ordoring.
-     */
-    unsigned int *global_dof_indices;
+    Number *tmp;
   };
 
   /**

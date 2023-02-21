@@ -98,16 +98,8 @@ namespace Step64
   public:
     using full_number   = double;
     using vcycle_number = CT::VCYCLE_NUMBER_;
-    using MatrixTypeDP  = PSMF::LaplaceOperator<dim,
-                                               fe_degree,
-                                               full_number,
-                                               PSMF::SmootherVariant::FUSED_L,
-                                               CT::DOF_LAYOUT_>;
-    using MatrixTypeSP  = PSMF::LaplaceOperator<dim,
-                                               fe_degree,
-                                               vcycle_number,
-                                               PSMF::SmootherVariant::FUSED_L,
-                                               CT::DOF_LAYOUT_>;
+    using MatrixFreeDP  = PSMF::LevelVertexPatch<dim, fe_degree, full_number>;
+    using MatrixFreeSP  = PSMF::LevelVertexPatch<dim, fe_degree, vcycle_number>;
 
     LaplaceProblem();
     ~LaplaceProblem();
@@ -122,6 +114,15 @@ namespace Step64
     void
     solve_mg(unsigned int n_mg_cycles);
 
+    template <PSMF::LaplaceVariant  laplace,
+              PSMF::LaplaceVariant  smooth_vmult,
+              PSMF::SmootherVariant smooth_inv>
+    void
+    do_solve(unsigned int k,
+             unsigned int j,
+             unsigned int i,
+             unsigned int call_count);
+
     Triangulation<dim>                  triangulation;
     std::shared_ptr<FiniteElement<dim>> fe;
     DoFHandler<dim>                     dof_handler;
@@ -133,9 +134,11 @@ namespace Step64
     std::fstream                        fout;
     std::shared_ptr<ConditionalOStream> pcout;
 
-    MGLevelObject<MatrixTypeDP> matrix_dp;
-    MGLevelObject<MatrixTypeSP> matrix;
-    MGConstrainedDoFs           mg_constrained_dofs;
+    MGLevelObject<std::shared_ptr<MatrixFreeDP>> mfdata_dp;
+    MGLevelObject<std::shared_ptr<MatrixFreeSP>> mfdata_sp;
+    MGConstrainedDoFs                            mg_constrained_dofs;
+
+    PSMF::MGTransferCUDA<dim, vcycle_number, CT::DOF_LAYOUT_> transfer;
   };
 
   template <int dim, int fe_degree>
@@ -145,7 +148,7 @@ namespace Step64
       if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::Q)
         return std::make_shared<FE_Q<dim>>(fe_degree);
       else if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::DGQ)
-        return std::make_shared<FE_DGQ<dim>>(fe_degree);
+        return std::make_shared<FE_DGQHermite<dim>>(fe_degree);
       return std::shared_ptr<FiniteElement<dim>>();
     }())
     , dof_handler(triangulation)
@@ -156,7 +159,8 @@ namespace Step64
     fout.open(filename + ".log", std::ios_base::out);
     pcout = std::make_shared<ConditionalOStream>(fout, true);
 
-    info_table.resize(CT::KERNEL_TYPE_.size());
+    info_table.resize(CT::LAPLACE_TYPE_.size() * CT::SMOOTH_VMULT_.size() *
+                      CT::SMOOTH_INV_.size());
   }
 
   template <int dim, int fe_degree>
@@ -201,18 +205,18 @@ namespace Step64
     unsigned int minlevel = 1;
     unsigned int maxlevel = triangulation.n_global_levels() - 1;
 
-    matrix_dp.resize(1, maxlevel);
+    mfdata_dp.resize(1, maxlevel);
 
     if (std::is_same_v<vcycle_number, float>)
-      matrix.resize(1, maxlevel);
+      mfdata_sp.resize(1, maxlevel);
 
     Timer time;
     for (unsigned int level = minlevel; level <= maxlevel; ++level)
       {
-        IndexSet relevant_dofs;
-        DoFTools::extract_locally_relevant_level_dofs(dof_handler,
-                                                      level,
-                                                      relevant_dofs);
+        // IndexSet relevant_dofs;
+        // DoFTools::extract_locally_relevant_level_dofs(dof_handler,
+        //                                               level,
+        //                                               relevant_dofs);
         // double-precision matrix-free data
         {
           // AffineConstraints<full_number> level_constraints;
@@ -221,21 +225,14 @@ namespace Step64
           //   mg_constrained_dofs.get_boundary_indices(level));
           // level_constraints.close();
 
-          using MatrixFreeType =
-            PSMF::LevelVertexPatch<dim,
-                                   fe_degree,
-                                   full_number,
-                                   PSMF::SmootherVariant::FUSED_L,
-                                   PSMF::DoFLayout::DGQ>;
-
-          typename MatrixFreeType::AdditionalData additional_data;
-          additional_data.relaxation   = 1.;
-          additional_data.use_coloring = false;
-          additional_data.patch_per_block =
-            fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+          typename MatrixFreeDP::AdditionalData additional_data;
+          additional_data.relaxation         = 1.;
+          additional_data.use_coloring       = false;
+          additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
           additional_data.granularity_scheme = CT::GRANULARITY_;
 
-          matrix_dp[level].initialize(dof_handler, level, additional_data);
+          mfdata_dp[level] = std::make_shared<MatrixFreeDP>();
+          mfdata_dp[level]->reinit(dof_handler, level, additional_data);
         }
 
         // single-precision matrix-free data
@@ -247,226 +244,144 @@ namespace Step64
             //   mg_constrained_dofs.get_boundary_indices(level));
             // level_constraints.close();
 
-            using MatrixFreeType =
-              PSMF::LevelVertexPatch<dim,
-                                     fe_degree,
-                                     vcycle_number,
-                                     PSMF::SmootherVariant::FUSED_L,
-                                     PSMF::DoFLayout::DGQ>;
-
-            typename MatrixFreeType::AdditionalData additional_data;
-            additional_data.relaxation   = 1.;
-            additional_data.use_coloring = false;
-            additional_data.patch_per_block =
-              fe_degree == 1 ? 16 : (fe_degree == 2 ? 2 : 1);
+            typename MatrixFreeSP::AdditionalData additional_data;
+            additional_data.relaxation         = 1.;
+            additional_data.use_coloring       = false;
+            additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
             additional_data.granularity_scheme = CT::GRANULARITY_;
 
-            matrix[level].initialize(dof_handler, level, additional_data);
+            mfdata_sp[level] = std::make_shared<MatrixFreeSP>();
+            mfdata_sp[level]->reinit(dof_handler, level, additional_data);
           }
       }
 
     *pcout << "Matrix-free setup time: " << time.wall_time() << "s"
            << std::endl;
-  }
-  template <int dim, int fe_degree>
-  void
-  LaplaceProblem<dim, fe_degree>::solve_mg(unsigned int n_mg_cycles)
-  {
-    Timer time;
 
-    PSMF::MGTransferCUDA<dim, vcycle_number, CT::DOF_LAYOUT_> transfer;
+    time.restart();
 
     transfer.initialize_constraints(mg_constrained_dofs);
     transfer.build(dof_handler);
 
     *pcout << "MG transfer setup time: " << time.wall_time() << "s"
            << std::endl;
+  }
 
-    static unsigned int call_count = 0;
+  template <int dim, int fe_degree>
+  template <PSMF::LaplaceVariant  laplace,
+            PSMF::LaplaceVariant  smooth_vmult,
+            PSMF::SmootherVariant smooth_inv>
+  void
+  LaplaceProblem<dim, fe_degree>::do_solve(unsigned int k,
+                                           unsigned int j,
+                                           unsigned int i,
+                                           unsigned int call_count)
+  {
+    PSMF::MultigridSolver<dim,
+                          fe_degree,
+                          CT::DOF_LAYOUT_,
+                          full_number,
+                          laplace,
+                          smooth_vmult,
+                          smooth_inv,
+                          vcycle_number>
+      solver(dof_handler,
+             mfdata_dp,
+             mfdata_sp,
+             transfer,
+             Functions::ZeroFunction<dim, full_number>(),
+             Functions::ConstantFunction<dim, full_number>(1.),
+             pcout,
+             1);
 
-    auto do_solver = [&](auto solver, unsigned int k) {
-      *pcout << "\nMG with smooth variant ["
-             << SmootherToString(CT::KERNEL_TYPE_[k]) << "]\n";
+    *pcout << "\nMG with [" << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " "
+           << LaplaceToString(CT::SMOOTH_VMULT_[j]) << " "
+           << SmootherToString(CT::SMOOTH_INV_[i]) << "]\n";
 
-      info_table[k].add_value("level", triangulation.n_global_levels());
-      info_table[k].add_value("cells", triangulation.n_global_active_cells());
-      info_table[k].add_value("dofs", dof_handler.n_dofs());
+    unsigned int index =
+      (k * CT::SMOOTH_VMULT_.size() + j) * CT::SMOOTH_INV_.size() + i;
 
-      std::vector<PSMF::SolverData> comp_data = solver.static_comp();
-      for (auto &data : comp_data)
-        {
-          *pcout << data.print_comp();
+    info_table[index].add_value("level", triangulation.n_global_levels());
+    info_table[index].add_value("cells", triangulation.n_global_active_cells());
+    info_table[index].add_value("dofs", dof_handler.n_dofs());
 
-          auto times = data.solver_name + "[s]";
-          auto perfs = data.solver_name + "Perf[Dof/s]";
-
-          info_table[k].add_value(times, data.timing);
-          info_table[k].add_value(perfs, data.perf);
-
-          if (call_count == 0)
-            {
-              info_table[k].set_scientific(times, true);
-              info_table[k].set_precision(times, 3);
-              info_table[k].set_scientific(perfs, true);
-              info_table[k].set_precision(perfs, 3);
-
-              info_table[k].add_column_to_supercolumn(times, data.solver_name);
-              info_table[k].add_column_to_supercolumn(perfs, data.solver_name);
-            }
-        }
-
-      *pcout << std::endl;
-
-      std::vector<PSMF::SolverData> solver_data = solver.solve();
-      for (auto &data : solver_data)
-        {
-          *pcout << data.print_solver();
-
-          auto it    = data.solver_name + "it";
-          auto step  = data.solver_name + "step";
-          auto times = data.solver_name + "[s]";
-          auto mem   = data.solver_name + "Mem Usage[MB]";
-
-          info_table[k].add_value(it, data.n_iteration);
-          info_table[k].add_value(step, data.n_step);
-          info_table[k].add_value(times, data.timing);
-          info_table[k].add_value(mem, data.mem_usage);
-
-          if (call_count == 0)
-            {
-              info_table[k].set_scientific(times, true);
-              info_table[k].set_precision(times, 3);
-
-              info_table[k].add_column_to_supercolumn(it, data.solver_name);
-              info_table[k].add_column_to_supercolumn(step, data.solver_name);
-              info_table[k].add_column_to_supercolumn(times, data.solver_name);
-              info_table[k].add_column_to_supercolumn(mem, data.solver_name);
-            }
-        }
-    };
-
-    for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
+    std::vector<PSMF::SolverData> comp_data = solver.static_comp();
+    for (auto &data : comp_data)
       {
-        switch (CT::KERNEL_TYPE_[k])
+        *pcout << data.print_comp();
+
+        auto times = data.solver_name + "[s]";
+        auto perfs = data.solver_name + "Perf[Dof/s]";
+
+        info_table[index].add_value(times, data.timing);
+        info_table[index].add_value(perfs, data.perf);
+
+        if (call_count == 0)
           {
-            // case PSMF::SmootherVariant::GLOBAL:
-            //   {
-            //     PSMF::MultigridSolver<dim,
-            //                           fe_degree,
-            //                           CT::DOF_LAYOUT_,
-            //                           full_number,
-            //                           PSMF::SmootherVariant::GLOBAL,
-            //                           vcycle_number>
-            //       solver(dof_handler,
-            //              matrix_dp,
-            //              matrix,
-            //              transfer,
-            //              Functions::ZeroFunction<dim, full_number>(),
-            //              Functions::ConstantFunction<dim, full_number>(1.),
-            //              pcout,
-            //              n_mg_cycles);
-            //     do_solver(solver, k);
-            //     break;
-            //   }
-            // case PSMF::SmootherVariant::SEPERATE:
-            //   {
-            //     PSMF::MultigridSolver<dim,
-            //                           fe_degree,
-            //                           CT::DOF_LAYOUT_,
-            //                           full_number,
-            //                           PSMF::SmootherVariant::SEPERATE,
-            //                           vcycle_number>
-            //       solver(dof_handler,
-            //              matrix_dp,
-            //              matrix,
-            //              transfer,
-            //              Functions::ZeroFunction<dim, full_number>(),
-            //              Functions::ConstantFunction<dim, full_number>(1.),
-            //              pcout,
-            //              n_mg_cycles);
-            //     do_solver(solver, k);
-            //     break;
-            //   }
-            // case PSMF::SmootherVariant::FUSED_BASE:
-            //   {
-            //     PSMF::MultigridSolver<dim,
-            //                           fe_degree,
-            //                           CT::DOF_LAYOUT_,
-            //                           full_number,
-            //                           PSMF::SmootherVariant::FUSED_BASE,
-            //                           vcycle_number>
-            //       solver(dof_handler,
-            //              matrix_dp,
-            //              matrix,
-            //              transfer,
-            //              Functions::ZeroFunction<dim, full_number>(),
-            //              Functions::ConstantFunction<dim, full_number>(1.),
-            //              pcout,
-            //              n_mg_cycles);
-            //     do_solver(solver, k);
-            //     break;
-            //   }
-            case PSMF::SmootherVariant::FUSED_L:
-              {
-                PSMF::MultigridSolver<dim,
-                                      fe_degree,
-                                      CT::DOF_LAYOUT_,
-                                      full_number,
-                                      PSMF::SmootherVariant::FUSED_L,
-                                      vcycle_number>
-                  solver(dof_handler,
-                         matrix_dp,
-                         matrix,
-                         transfer,
-                         Solution<dim, full_number>(),
-                         RightHandSide<dim, full_number>(),
-                         pcout,
-                         n_mg_cycles);
-                do_solver(solver, k);
-                break;
-              }
-            // case PSMF::SmootherVariant::FUSED_3D:
-            //   {
-            //     PSMF::MultigridSolver<dim,
-            //                           fe_degree,
-            //                           CT::DOF_LAYOUT_,
-            //                           full_number,
-            //                           PSMF::SmootherVariant::FUSED_3D,
-            //                           vcycle_number>
-            //       solver(dof_handler,
-            //              matrix_dp,
-            //              matrix,
-            //              transfer,
-            //              Functions::ZeroFunction<dim, full_number>(),
-            //              Functions::ConstantFunction<dim, full_number>(1.),
-            //              pcout,
-            //              n_mg_cycles);
-            //     do_solver(solver, k);
-            //     break;
-            //   }
-            // case PSMF::SmootherVariant::FUSED_CF:
-            //   {
-            //     PSMF::MultigridSolver<dim,
-            //                           fe_degree,
-            //                           CT::DOF_LAYOUT_,
-            //                           full_number,
-            //                           PSMF::SmootherVariant::FUSED_CF,
-            //                           vcycle_number>
-            //       solver(dof_handler,
-            //              matrix_dp,
-            //              matrix,
-            //              transfer,
-            //              Functions::ZeroFunction<dim, full_number>(),
-            //              Functions::ConstantFunction<dim, full_number>(1.),
-            //              pcout,
-            //              n_mg_cycles);
-            //     do_solver(solver, k);
-            //     break;
-            //   }
-            default:
-              AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
+            info_table[index].set_scientific(times, true);
+            info_table[index].set_precision(times, 3);
+            info_table[index].set_scientific(perfs, true);
+            info_table[index].set_precision(perfs, 3);
+
+            info_table[index].add_column_to_supercolumn(times,
+                                                        data.solver_name);
+            info_table[index].add_column_to_supercolumn(perfs,
+                                                        data.solver_name);
           }
       }
+
+    *pcout << std::endl;
+
+    std::vector<PSMF::SolverData> solver_data = solver.solve();
+    for (auto &data : solver_data)
+      {
+        *pcout << data.print_solver();
+
+        auto it    = data.solver_name + "it";
+        auto step  = data.solver_name + "step";
+        auto times = data.solver_name + "[s]";
+        auto mem   = data.solver_name + "Mem Usage[MB]";
+
+        info_table[index].add_value(it, data.n_iteration);
+        info_table[index].add_value(step, data.n_step);
+        info_table[index].add_value(times, data.timing);
+        info_table[index].add_value(mem, data.mem_usage);
+
+        if (call_count == 0)
+          {
+            info_table[index].set_scientific(times, true);
+            info_table[index].set_precision(times, 3);
+
+            info_table[index].add_column_to_supercolumn(it, data.solver_name);
+            info_table[index].add_column_to_supercolumn(step, data.solver_name);
+            info_table[index].add_column_to_supercolumn(times,
+                                                        data.solver_name);
+            info_table[index].add_column_to_supercolumn(mem, data.solver_name);
+          }
+      }
+  }
+
+  template <int dim, int fe_degree>
+  void
+  LaplaceProblem<dim, fe_degree>::solve_mg(unsigned int n_mg_cycles)
+  {
+    static unsigned int call_count = 0;
+
+    using LA = PSMF::LaplaceVariant;
+    using SM = PSMF::SmootherVariant;
+
+    do_solve<CT::LAPLACE_TYPE_[0], CT::SMOOTH_VMULT_[0], CT::SMOOTH_INV_[0]>(
+      0, 0, 0, call_count);
+
+    // for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+    //   for (unsigned int j = 0; j < CT::SMOOTH_VMULT_.size(); ++j)
+    //     for (unsigned int i = 0; i < CT::SMOOTH_INV_.size(); ++i)
+    //       {
+    //         if (LAPLACE_TYPE_[i] == LA::Basic)
+
+    //       }
+
+
 
     call_count++;
   }
@@ -479,8 +394,6 @@ namespace Step64
 
     for (unsigned int cycle = 0; cycle < n_cycles; ++cycle)
       {
-        smoother_mem = 0;
-
         *pcout << "Cycle " << cycle << std::endl;
 
         long long unsigned int n_dofs = std::pow(
@@ -491,15 +404,23 @@ namespace Step64
             *pcout << "Max size reached, terminating." << std::endl;
             *pcout << std::endl;
 
-            for (unsigned int k = 0; k < CT::KERNEL_TYPE_.size(); ++k)
-              {
-                std::ostringstream oss;
+            for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+              for (unsigned int j = 0; j < CT::SMOOTH_VMULT_.size(); ++j)
+                for (unsigned int i = 0; i < CT::SMOOTH_INV_.size(); ++i)
+                  {
+                    unsigned int index = (k * CT::SMOOTH_VMULT_.size() + j) *
+                                           CT::SMOOTH_INV_.size() +
+                                         i;
 
-                oss << "\n[" << SmootherToString(CT::KERNEL_TYPE_[k]) << "]\n";
-                info_table[k].write_text(oss);
+                    std::ostringstream oss;
 
-                *pcout << oss.str() << std::endl;
-              }
+                    oss << "\n[" << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " "
+                        << LaplaceToString(CT::SMOOTH_VMULT_[j]) << " "
+                        << SmootherToString(CT::SMOOTH_INV_[i]) << "]\n";
+                    info_table[index].write_text(oss);
+
+                    *pcout << oss.str() << std::endl;
+                  }
 
             return;
           }
