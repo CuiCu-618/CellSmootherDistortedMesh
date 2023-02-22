@@ -66,6 +66,28 @@ namespace Util
            z * (fe_degree + 1) * (fe_degree + 1) + y * (fe_degree + 1) + x;
   }
 
+
+  /**
+   * Compute dofs in a patch based on first_dof.
+   * Data layout for local vectors:
+   * 10 11 | 14 15
+   *  8  9 | 12 13
+   * ------|------
+   *  2  3 |  6  7
+   *  0  1 |  4  5
+   */
+  template <int dim, int fe_degree>
+  __device__ unsigned int
+  compute_indices_cell(unsigned int *first_dofs, unsigned int linear_tid)
+  {
+    constexpr unsigned int cell_dofs = pow(fe_degree + 1, dim);
+
+    const unsigned int cell           = linear_tid / cell_dofs;
+    const unsigned int local_cell_tid = linear_tid % cell_dofs;
+
+    return first_dofs[cell] + local_cell_tid;
+  }
+
 } // namespace Util
 
 #endif // UTILITIES_CUH

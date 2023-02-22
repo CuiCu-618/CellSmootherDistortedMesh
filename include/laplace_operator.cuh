@@ -47,7 +47,7 @@ namespace PSMF
       shared_mem += n * patch_per_block * local_dim * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_basic<dim, fe_degree, Number, kernel>,
+        laplace_kernel_basic_cell<dim, fe_degree, Number, kernel>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
@@ -60,7 +60,7 @@ namespace PSMF
                 const dim3       &grid_dim,
                 const dim3       &block_dim) const
     {
-      laplace_kernel_basic<dim, fe_degree, Number, kernel>
+      laplace_kernel_basic_cell<dim, fe_degree, Number, kernel>
         <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
                                               dst.get_values(),
                                               gpu_data);
