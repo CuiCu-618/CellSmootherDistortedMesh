@@ -17,6 +17,22 @@
 #include "ct_parameter.h"
 #include "git_version.h"
 
+#define LA_MACRO(name, v1, v2, v3, v4, v5)                 \
+  enum class name                                          \
+  {                                                        \
+    v1,                                                    \
+    v2,                                                    \
+    v3,                                                    \
+    v4,                                                    \
+    v5,                                                    \
+  };                                                       \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5}; \
+  template <typename T>                                    \
+  constexpr const char *name##ToString(T value)            \
+  {                                                        \
+    return name##Strings[static_cast<int>(value)];         \
+  }
+
 #define SMO_MACRO(name, v1, v2, v3, v4)               \
   enum class name                                     \
   {                                                   \
@@ -47,7 +63,7 @@
   }
 
 SMO_MACRO(Smoother, GLOBAL, FUSED_L, ConflictFree, TensorCore);
-ENUM_MACRO(Laplace, Basic, ConflictFree, TensorCore);
+LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);
 

@@ -205,7 +205,7 @@ namespace PSMF
       }
   }
 
-  template <int dim, int fe_degree, typename Number>
+  template <int dim, int fe_degree, typename Number, LaplaceVariant laplace>
   __global__ void
   laplace_kernel_tensorcore(
     const Number                                                 *src,
@@ -270,8 +270,8 @@ namespace PSMF
             shared_data.local_dst[index_padding] = 0.;
           }
 
-        evaluate_laplace<dim, fe_degree, Number, LaplaceVariant::TensorCore>(
-          local_patch, &shared_data);
+        evaluate_laplace<dim, fe_degree, Number, laplace>(local_patch,
+                                                          &shared_data);
 
         for (unsigned int z = 0; z < n_dofs_z; ++z)
           {

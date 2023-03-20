@@ -228,6 +228,9 @@ LaplaceProblem<dim, fe_degree>::do_Ax()
       best_time = std::min(time.wall_time() / n_mv, best_time);
     }
 
+  // solution_dp.print(std::cout);
+  // std::cout << solution_dp.l2_norm() << std::endl;
+
   info_table[0].add_value("Name", std::string(LaplaceToString(kernel)) + " DP");
   info_table[0].add_value("Time[s]", best_time);
   info_table[0].add_value("Perf[Dof/s]", n_dofs / best_time);
@@ -268,8 +271,14 @@ LaplaceProblem<dim, fe_degree>::bench_Ax()
         case PSMF::LaplaceVariant::Basic:
           do_Ax<PSMF::LaplaceVariant::Basic>();
           break;
+        case PSMF::LaplaceVariant::BasicCell:
+          do_Ax<PSMF::LaplaceVariant::BasicCell>();
+          break;
         case PSMF::LaplaceVariant::TensorCore:
           do_Ax<PSMF::LaplaceVariant::TensorCore>();
+          break;
+        case PSMF::LaplaceVariant::TensorCoreMMA:
+          do_Ax<PSMF::LaplaceVariant::TensorCoreMMA>();
           break;
         case PSMF::LaplaceVariant::ConflictFree:
           do_Ax<PSMF::LaplaceVariant::ConflictFree>();

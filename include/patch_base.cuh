@@ -36,6 +36,11 @@ namespace PSMF
     Basic,
 
     /**
+     * Basic implementation. Load data cell by cell.
+     */
+    BasicCell,
+
+    /**
      * A conflict-free implementation by restructuring shared memory access.
      */
     ConflictFree,
@@ -44,7 +49,12 @@ namespace PSMF
      * Using the Warp Matrix Multiply and Accumulate (WMMA) API introduced in
      * CUDA 11.0.
      */
-    TensorCore
+    TensorCore,
+
+    /**
+     * Using the Matrix Multiply and Accumulate ISA with inline PTX.
+     */
+    TensorCoreMMA
   };
 
 

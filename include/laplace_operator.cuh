@@ -47,7 +47,7 @@ namespace PSMF
       shared_mem += n * patch_per_block * local_dim * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_basic_cell<dim, fe_degree, Number, kernel>,
+        laplace_kernel_basic<dim, fe_degree, Number, kernel>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
@@ -60,7 +60,57 @@ namespace PSMF
                 const dim3       &grid_dim,
                 const dim3       &block_dim) const
     {
-      laplace_kernel_basic_cell<dim, fe_degree, Number, kernel>
+      laplace_kernel_basic<dim, fe_degree, Number, kernel>
+        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
+                                              dst.get_values(),
+                                              gpu_data);
+    }
+  };
+
+  template <int dim, int fe_degree, typename Number>
+  struct LocalLaplace<dim, fe_degree, Number, LaplaceVariant::BasicCell>
+  {
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    mutable std::size_t shared_mem;
+
+    LocalLaplace()
+      : shared_mem(0){};
+
+    void
+    setup_kernel(const unsigned int patch_per_block) const
+    {
+      constexpr unsigned int n = dim - 1;
+
+      shared_mem = 0;
+
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst
+      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_mass, local_derivative
+      shared_mem +=
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
+      // temp
+      shared_mem += n * patch_per_block * local_dim * sizeof(Number);
+
+      AssertCuda(
+        cudaFuncSetAttribute(laplace_kernel_basic_cell<dim,
+                                                       fe_degree,
+                                                       Number,
+                                                       LaplaceVariant::Basic>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_mem));
+    }
+
+    template <typename VectorType, typename DataType>
+    void
+    loop_kernel(const VectorType &src,
+                VectorType       &dst,
+                const DataType   &gpu_data,
+                const dim3       &grid_dim,
+                const dim3       &block_dim) const
+    {
+      laplace_kernel_basic_cell<dim, fe_degree, Number, LaplaceVariant::Basic>
         <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
                                               dst.get_values(),
                                               gpu_data);
@@ -89,12 +139,15 @@ namespace PSMF
       shared_mem +=
         2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
       // temp
-      shared_mem += (dim - 2) * patch_per_block * local_dim * sizeof(Number);
+      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
 
-      AssertCuda(
-        cudaFuncSetAttribute(laplace_kernel_tensorcore<dim, fe_degree, Number>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             shared_mem));
+      AssertCuda(cudaFuncSetAttribute(
+        laplace_kernel_tensorcore<dim,
+                                  fe_degree,
+                                  Number,
+                                  LaplaceVariant::TensorCore>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shared_mem));
     }
 
     template <typename VectorType, typename DataType>
@@ -105,7 +158,62 @@ namespace PSMF
                 const dim3       &grid_dim,
                 const dim3       &block_dim) const
     {
-      laplace_kernel_tensorcore<dim, fe_degree, Number>
+      laplace_kernel_tensorcore<dim,
+                                fe_degree,
+                                Number,
+                                LaplaceVariant::TensorCore>
+        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
+                                              dst.get_values(),
+                                              gpu_data);
+    }
+  };
+
+
+  template <int dim, int fe_degree, typename Number>
+  struct LocalLaplace<dim, fe_degree, Number, LaplaceVariant::TensorCoreMMA>
+  {
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    mutable std::size_t shared_mem;
+
+    LocalLaplace()
+      : shared_mem(0){};
+
+    void
+    setup_kernel(const unsigned int patch_per_block) const
+    {
+      shared_mem = 0;
+
+      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      // local_src, local_dst
+      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      // local_mass, local_derivative
+      shared_mem +=
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
+      // temp
+      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+
+      AssertCuda(cudaFuncSetAttribute(
+        laplace_kernel_tensorcore<dim,
+                                  fe_degree,
+                                  Number,
+                                  LaplaceVariant::TensorCoreMMA>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shared_mem));
+    }
+
+    template <typename VectorType, typename DataType>
+    void
+    loop_kernel(const VectorType &src,
+                VectorType       &dst,
+                const DataType   &gpu_data,
+                const dim3       &grid_dim,
+                const dim3       &block_dim) const
+    {
+      laplace_kernel_tensorcore<dim,
+                                fe_degree,
+                                Number,
+                                LaplaceVariant::TensorCoreMMA>
         <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
                                               dst.get_values(),
                                               gpu_data);

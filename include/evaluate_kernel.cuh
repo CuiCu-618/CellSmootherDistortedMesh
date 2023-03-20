@@ -21,6 +21,14 @@ using namespace nvcuda;
 
 namespace PSMF
 {
+
+  template <int dim_m, int dim_n>
+  struct Shape
+  {
+    static constexpr unsigned int m = dim_m;
+    static constexpr unsigned int n = dim_n;
+  };
+
   ////////////////////////////////////////////////////////////////////
   /////////////////////// TPEvaluatorBase ////////////////////////////
   ////////////////////////////////////////////////////////////////////
@@ -49,6 +57,17 @@ namespace PSMF
           const Number *mass_matrix,
           const Number *derivative_matrix,
           Number       *tmp)
+    {}
+
+    template <typename shapeA,
+              typename shapeB,
+              bool add,
+              int  dir,
+              int  g_row,
+              int  g_col,
+              int  cycle>
+    __device__ void
+    mma_op(const Number *shape_data, const Number *in, Number *out)
     {}
 
     template <int direction, bool add, bool sub = false>
@@ -310,6 +329,228 @@ namespace PSMF
   };
 
 
+  template <typename T>
+  struct TPEvaluatorBase<T, 8, double, LaplaceVariant::TensorCoreMMA, 2>
+  {
+    using Number = double;
+    using s8x4   = Shape<8, 4>;
+
+    static constexpr unsigned int n_dofs_1d = 8;
+
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <typename shapeA,
+              typename shapeB,
+              bool add,
+              int  dir,
+              int  g_row,
+              int  g_col,
+              int  cycle>
+    __device__ void
+    mma_op(const Number *shape_data, const Number *in, Number *out)
+    {
+      const unsigned int tid = (threadIdx.y * 8 + threadIdx.x);
+
+      const unsigned int row = tid / 4;
+      const unsigned int col = tid % 4;
+
+      // const unsigned int a_idx =
+      //   (row + g_row * 8) * n_dofs_1d + col + cycle * 4;
+      // const unsigned int b_idx =
+      //   (dir == 0) ? (row + g_col * 8) * n_dofs_1d + col + cycle * 4 :
+      //                (col + cycle * 4) * n_dofs_1d + row + g_col * 8;
+      // const unsigned int cd_idx =
+      //   (dir == 0) ? (2 * col + g_col * 8) * n_dofs_1d + row + g_row * 8 :
+      //                (row + g_row * 8) * n_dofs_1d + 2 * col + g_col * 8;
+
+      const unsigned int a_idx = (row)*n_dofs_1d + col + cycle * 4;
+      const unsigned int b_idx = (dir == 0) ?
+                                   (row)*n_dofs_1d + col + cycle * 4 :
+                                   (col + cycle * 4) * n_dofs_1d + row;
+      const unsigned int cd_idx =
+        (dir == 0) ? (2 * col) * n_dofs_1d + row : (row)*n_dofs_1d + 2 * col;
+
+      // const bool is_avtive_a = row < shapeA::m && col < shapeA::n;
+      // const bool is_avtive_b = row < shapeB::m && col < shapeB::n;
+
+      // const bool is_avtive_cd = row < shapeA::m && col < shapeB::m / 2;
+
+      // Number tmp = 0;
+
+      constexpr unsigned int stride = (dir == 0) ? n_dofs_1d : 1;
+
+      // auto &d0 = is_avtive_cd ? out[cd_idx] : tmp;
+      // auto &d1 = is_avtive_cd ? out[cd_idx + stride] : tmp;
+
+      // auto a0 = is_avtive_a ? shape_data[a_idx] : 0;
+      // auto b0 = is_avtive_b ? in[b_idx] : 0;
+
+      // auto c0 = (is_avtive_cd && add) ? out[cd_idx] : 0;
+      // auto c1 = (is_avtive_cd && add) ? out[cd_idx + stride] : 0;
+
+      auto &d0 = out[cd_idx];
+      auto &d1 = out[cd_idx + stride];
+
+      // auto a0 = shape_data[a_idx];
+      // auto b0 = in[b_idx];
+
+      auto c0 = (add) ? out[cd_idx] : 0;
+      auto c1 = (add) ? out[cd_idx + stride] : 0;
+
+      if (tid > 31)
+        return;
+
+      asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+          "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+          : "=d"(d0), "=d"(d1)
+          : "d"(shape_data[a_idx]), "d"(in[b_idx]), "d"(c0), "d"(c1));
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      // constexpr unsigned int skew_double = Util::padding;
+
+      // mma_op<s8x4, s8x4, add, direction, 0, 0, 0>(shape_data, in, out);
+      // __syncthreads();
+      // mma_op<s8x4, s8x4, true, direction, 0, 0, 1>(shape_data, in, out);
+
+      const unsigned int tid = (threadIdx.y * 8 + threadIdx.x);
+
+      const unsigned int row = tid / 4;
+      const unsigned int col = tid % 4;
+
+      constexpr unsigned int stride = (direction == 0) ? n_dofs_1d : 1;
+
+      for (unsigned int cycle = 0; cycle < 2; ++cycle)
+        {
+          const unsigned int a_idx  = (row)*n_dofs_1d + col + cycle * 4;
+          const unsigned int b_idx  = (direction == 0) ?
+                                        (row)*n_dofs_1d + col + cycle * 4 :
+                                        (col + cycle * 4) * n_dofs_1d + row;
+          const unsigned int cd_idx = (direction == 0) ?
+                                        (2 * col) * n_dofs_1d + row :
+                                        (row)*n_dofs_1d + 2 * col;
+
+          auto &d0 = out[cd_idx];
+          auto &d1 = out[cd_idx + stride];
+
+          auto a0 = shape_data[a_idx];
+          auto b0 = in[b_idx];
+
+          auto c0 = (add || cycle == 1) ? out[cd_idx] : 0;
+          auto c1 = (add || cycle == 1) ? out[cd_idx + stride] : 0;
+
+          if (tid > 31)
+            return;
+
+          asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+              "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+              : "=d"(d0), "=d"(d1)
+              : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
+        }
+    }
+  };
+
+
+
+  template <typename T>
+  struct TPEvaluatorBase<T, 8, double, LaplaceVariant::TensorCoreMMA, 3>
+  {
+    using Number = double;
+    using s8x4   = Shape<8, 4>;
+
+    static constexpr unsigned int n_dofs_1d = 8;
+
+    /**
+     * Default constructor.
+     */
+    __device__
+    TPEvaluatorBase() = default;
+
+    /**
+     * Implements a matrix-vector product for Laplacian.
+     */
+    __device__ void
+    vmult(Number       *dst,
+          const Number *src,
+          const Number *mass_matrix,
+          const Number *derivative_matrix,
+          Number       *tmp)
+    {
+      static_cast<T *>(this)->vmult_impl(
+        dst, src, mass_matrix, derivative_matrix, tmp);
+    }
+
+    template <int direction, bool add, bool sub = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      const unsigned int tid    = (threadIdx.y * 8 + threadIdx.x) % 32;
+      const unsigned int warpId = (threadIdx.y * 8 + threadIdx.x) / 32;
+
+      const unsigned int row = tid / 4;
+      const unsigned int col = tid % 4;
+
+      constexpr unsigned int stride = (direction == 0) ? n_dofs_1d : 1;
+      constexpr unsigned int offset = n_dofs_1d * n_dofs_1d;
+
+      for (unsigned int cycle = 0; cycle < 2; ++cycle)
+        {
+          const unsigned int a_idx = row * n_dofs_1d + col + cycle * 4;
+          auto               a0 = sub ? -shape_data[a_idx] : shape_data[a_idx];
+
+          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+            {
+              const unsigned int b_idx =
+                (direction == 0) ? row * n_dofs_1d + col + cycle * 4 +
+                                     (z * 2 + warpId) * offset :
+                (direction == 1) ? (col + cycle * 4) * n_dofs_1d + row +
+                                     (z * 2 + warpId) * offset :
+                                   (z * 2 + warpId) * n_dofs_1d + row +
+                                     (col + cycle * 4) * offset;
+              const unsigned int cd_idx =
+                (direction == 0) ?
+                  (2 * col) * n_dofs_1d + row + (z * 2 + warpId) * offset :
+                (direction == 1) ?
+                  row * n_dofs_1d + 2 * col + (z * 2 + warpId) * offset :
+                  (z * 2 + warpId) * n_dofs_1d + 2 * col + row * offset;
+
+              auto  b0 = in[b_idx];
+              auto &d0 = out[cd_idx];
+              auto &d1 = out[cd_idx + stride];
+              auto  c0 = (add || sub || cycle == 1) ? out[cd_idx] : 0;
+              auto  c1 = (add || sub || cycle == 1) ? out[cd_idx + stride] : 0;
+
+              asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                  "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                  : "=d"(d0), "=d"(d1)
+                  : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
+            }
+        }
+    }
+  };
+
+
 
   template <typename T>
   struct TPEvaluatorBase<T, 8, double, LaplaceVariant::TensorCore, 2>
@@ -347,9 +588,6 @@ namespace PSMF
           const unsigned int warpId =
             (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
 
-          if (warpId != 0)
-            return;
-
           wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
             a_frag;
           wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major>
@@ -357,6 +595,9 @@ namespace PSMF
           wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
 
           wmma::fill_fragment(c_frag, 0.0f);
+
+          if (warpId != 0)
+            return;
 
           for (int i = 0; i < 2; ++i)
             {
@@ -382,9 +623,6 @@ namespace PSMF
           const unsigned int warpId =
             (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
 
-          if (warpId != 0)
-            return;
-
           wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
             a_frag;
           wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major>
@@ -401,6 +639,9 @@ namespace PSMF
 
           if (add)
             __syncthreads();
+
+          if (warpId != 0)
+            return;
 
           for (int i = 0; i < 2; ++i)
             {
@@ -621,9 +862,6 @@ namespace PSMF
             (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
           const unsigned int subId = warpId % 4;
 
-          if (warpId > 3)
-            return;
-
           wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
             a_frag;
           wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major>
@@ -631,6 +869,9 @@ namespace PSMF
           wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
 
           wmma::fill_fragment(c_frag, 0.0f);
+
+          if (warpId > 3)
+            return;
 
           for (int i = 0; i < 4; ++i)
             {
@@ -659,16 +900,12 @@ namespace PSMF
             (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
           const unsigned int subId = warpId % 4;
 
-          if (warpId > 3)
-            return;
-
           wmma::fragment<wmma::matrix_a, 8, 8, 4, double, wmma::row_major>
             a_frag;
           wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major>
                                                              b_frag;
           wmma::fragment<wmma::accumulator, 8, 8, 4, double> c_frag;
 
-          // TODO: bug?
           if (add)
             wmma::load_matrix_sync(
               c_frag,
@@ -680,6 +917,9 @@ namespace PSMF
 
           if (add)
             __syncthreads();
+
+          if (warpId > 3)
+            return;
 
           for (int i = 0; i < 4; ++i)
             {
@@ -913,9 +1153,6 @@ namespace PSMF
           const unsigned int warpId =
             (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
 
-          if (warpId != 0)
-            return;
-
           wmma::fragment<wmma::matrix_a,
                          16,
                          16,
@@ -933,6 +1170,9 @@ namespace PSMF
           wmma::fragment<wmma::accumulator, 16, 16, 8, float> c_frag;
 
           wmma::fill_fragment(c_frag, 0.0f);
+
+          if (warpId != 0)
+            return;
 
           for (int i = 0; i < 2; ++i)
             {
@@ -968,9 +1208,6 @@ namespace PSMF
           const unsigned int warpId =
             (threadIdx.y * n_dofs_1d + threadIdx.x) / 32;
 
-          if (warpId != 0)
-            return;
-
           wmma::fragment<wmma::matrix_a,
                          16,
                          16,
@@ -994,6 +1231,9 @@ namespace PSMF
                                    wmma::mem_row_major);
           else
             wmma::fill_fragment(c_frag, 0.0f);
+
+          if (warpId != 0)
+            return;
 
           if (add)
             __syncthreads();

@@ -80,7 +80,7 @@ def parse_args():
     parser.add_argument('-LA','--laplace_type',
                         default='B',
                         nargs='+',
-                        choices=['Basic','ConflictFree','TensorCore'],
+                        choices=['Basic','Cell','ConflictFree','TensorCore','TensorCoreMMA'],
                         help="variant of the Laplace operator kernel"
     )
     parser.add_argument('-SMV','--smooth_vmult',
@@ -153,12 +153,18 @@ class Parameter:
             if kernel.startswith('B'):
                 kernel_str += r'PSMF::LaplaceVariant::Basic, '
                 count += 1
+            elif kernel.endswith('Cell'):
+                kernel_str += r'PSMF::LaplaceVariant::BasicCell, '
+                count += 1
             elif kernel.endswith('Free'):
                 kernel_str += r'PSMF::LaplaceVariant::ConflictFree, '
                 count += 1
             elif kernel.endswith('Core'):
                 kernel_str += r'PSMF::LaplaceVariant::TensorCore, '
                 count += 1    
+            elif kernel.endswith('MMA'):
+                kernel_str += r'PSMF::LaplaceVariant::TensorCoreMMA, '
+                count += 1 
         self.laplace_type = ('constexpr std::array<PSMF::LaplaceVariant, ' + str(count) + '>', kernel_str + '}')
 
     def smooth_vmult_prm(self,variant):
