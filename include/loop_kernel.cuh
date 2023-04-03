@@ -93,13 +93,16 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * (1 << dim)],
                 local_patch,
                 local_tid_x,
                 threadIdx.y,
                 z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             shared_data.local_src[index] = src[global_dof_indices];
 
@@ -115,13 +118,16 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * (1 << dim)],
                 local_patch,
                 local_tid_x,
                 threadIdx.y,
                 z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             atomicAdd(&dst[global_dof_indices], shared_data.local_dst[index]);
           }
@@ -177,9 +183,12 @@ namespace PSMF
             const unsigned int index =
               local_patch * local_dim + gpu_data.l_to_h[linear_tid];
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices_cell<dim, fe_degree>(
                 &gpu_data.first_dof[patch * (1 << dim)], linear_tid);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             shared_data.local_src[index] = src[global_dof_indices];
 
@@ -196,9 +205,12 @@ namespace PSMF
             const unsigned int index =
               local_patch * local_dim + gpu_data.l_to_h[linear_tid];
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices_cell<dim, fe_degree>(
                 &gpu_data.first_dof[patch * (1 << dim)], linear_tid);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             atomicAdd(&dst[global_dof_indices], shared_data.local_dst[index]);
           }
@@ -257,13 +269,16 @@ namespace PSMF
               z * n_dofs_1d * n_dofs_1d_padding +
               threadIdx.y * n_dofs_1d_padding + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * (1 << dim)],
                 local_patch,
                 local_tid_x,
                 threadIdx.y,
                 z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             shared_data.local_src[index_padding] = src[global_dof_indices];
 
@@ -280,13 +295,16 @@ namespace PSMF
               z * n_dofs_1d * n_dofs_1d_padding +
               threadIdx.y * n_dofs_1d_padding + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * (1 << dim)],
                 local_patch,
                 local_tid_x,
                 threadIdx.y,
                 z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             atomicAdd(&dst[global_dof_indices],
                       shared_data.local_dst[index_padding]);
@@ -300,6 +318,7 @@ namespace PSMF
   loop_kernel_seperate_inv(
     const Number                                                 *src,
     Number                                                       *dst,
+    Number                                                       *solution,
     const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
     constexpr unsigned int n_dofs_1d           = 2 * fe_degree;
@@ -330,13 +349,16 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * regular_vpatch_size],
                 local_patch,
                 local_tid_x + 1,
                 threadIdx.y + 1,
                 z + dim - 2);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             shared_data.local_src[index] = src[global_dof_indices];
 
@@ -353,7 +375,7 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * regular_vpatch_size],
                 local_patch,
@@ -361,7 +383,10 @@ namespace PSMF
                 threadIdx.y + 1,
                 z + dim - 2);
 
-            dst[global_dof_indices] =
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
+
+            solution[global_dof_indices] =
               shared_data.local_dst[index] * gpu_data.relaxation;
           }
       }
@@ -372,6 +397,7 @@ namespace PSMF
   loop_kernel_fused_l(
     const Number                                                 *src,
     Number                                                       *dst,
+    Number                                                       *solution,
     const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
     constexpr unsigned int n_dofs_1d           = 2 * fe_degree + 2;
@@ -402,13 +428,16 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * regular_vpatch_size],
                 local_patch,
                 local_tid_x,
                 threadIdx.y,
                 z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             shared_data.local_src[index] = src[global_dof_indices];
 
@@ -434,7 +463,7 @@ namespace PSMF
                 const unsigned int index =
                   local_patch * local_dim + row * n_dofs_1d + col;
 
-                const unsigned int global_dof_indices =
+                const unsigned int global_index =
                   Util::compute_indices<dim, fe_degree>(
                     &gpu_data.first_dof[patch * regular_vpatch_size],
                     local_patch,
@@ -442,7 +471,10 @@ namespace PSMF
                     row,
                     0);
 
-                dst[global_dof_indices] =
+                const unsigned int global_dof_indices =
+                  gpu_data.global_to_local(global_index);
+
+                solution[global_dof_indices] =
                   shared_data.local_dst[index] * gpu_data.relaxation;
               }
           }
@@ -458,7 +490,7 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        row * n_dofs_1d + col;
 
-                  const unsigned int global_dof_indices =
+                  const unsigned int global_index =
                     Util::compute_indices<dim, fe_degree>(
                       &gpu_data.first_dof[patch * regular_vpatch_size],
                       local_patch,
@@ -466,7 +498,10 @@ namespace PSMF
                       row,
                       z);
 
-                  dst[global_dof_indices] =
+                  const unsigned int global_dof_indices =
+                    gpu_data.global_to_local(global_index);
+
+                  solution[global_dof_indices] =
                     shared_data.local_dst[index] * gpu_data.relaxation;
                 }
           }
@@ -479,6 +514,7 @@ namespace PSMF
   loop_kernel_fused_cf(
     const Number                                                 *src,
     Number                                                       *dst,
+    Number                                                       *solution,
     const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
   {
     constexpr unsigned int n_dofs_1d           = 2 * fe_degree + 2;
@@ -509,13 +545,16 @@ namespace PSMF
                                        z * n_dofs_1d * n_dofs_1d +
                                        threadIdx.y * n_dofs_1d + local_tid_x;
 
-            const unsigned int global_dof_indices =
+            const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(
                 &gpu_data.first_dof[patch * regular_vpatch_size],
                 local_patch,
                 local_tid_x,
                 threadIdx.y,
                 z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
 
             shared_data.local_src[index] = src[global_dof_indices];
 
@@ -543,7 +582,7 @@ namespace PSMF
                                            (row - 1) * (n_dofs_1d - 2) + col -
                                            1;
 
-                const unsigned int global_dof_indices =
+                const unsigned int global_index =
                   Util::compute_indices<dim, fe_degree>(
                     &gpu_data.first_dof[patch * regular_vpatch_size],
                     local_patch,
@@ -551,7 +590,10 @@ namespace PSMF
                     row,
                     0);
 
-                dst[global_dof_indices] =
+                const unsigned int global_dof_indices =
+                  gpu_data.global_to_local(global_index);
+
+                solution[global_dof_indices] =
                   shared_data.tmp[index] * gpu_data.relaxation;
               }
           }
@@ -570,7 +612,7 @@ namespace PSMF
                                          z * n_dofs_1d * n_dofs_1d +
                                          (row - 1) * (n_dofs_1d - 2) + col - 1;
 
-                    const unsigned int global_dof_indices =
+                    const unsigned int global_index =
                       Util::compute_indices<dim, fe_degree>(
                         &gpu_data.first_dof[patch * regular_vpatch_size],
                         local_patch,
@@ -578,7 +620,10 @@ namespace PSMF
                         row,
                         z + 1);
 
-                    dst[global_dof_indices] =
+                    const unsigned int global_dof_indices =
+                      gpu_data.global_to_local(global_index);
+
+                    solution[global_dof_indices] =
                       shared_data.tmp[index] * gpu_data.relaxation;
                   }
               }

@@ -16,13 +16,14 @@
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
 
+#include <deal.II/distributed/tria.h>
+
 #include <deal.II/dofs/dof_tools.h>
 
 #include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/fe_q.h>
 
 #include <deal.II/grid/grid_generator.h>
-#include <deal.II/grid/tria.h>
 
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/la_parallel_vector.h>
@@ -91,11 +92,14 @@ private:
   template <PSMF::LaplaceVariant smooth_vmult, PSMF::SmootherVariant smooth_inv>
   void
   do_smooth();
+  size_t
+  disp_gpu_usage();
 
-  Triangulation<dim>                  triangulation;
-  std::shared_ptr<FiniteElement<dim>> fe;
-  DoFHandler<dim>                     dof_handler;
-  MappingQ1<dim>                      mapping;
+  MPI_Comm                                  mpi_communicator;
+  parallel::distributed::Triangulation<dim> triangulation;
+  std::shared_ptr<FiniteElement<dim>>       fe;
+  DoFHandler<dim>                           dof_handler;
+  MappingQ1<dim>                            mapping;
 
   MGConstrainedDoFs mg_constrained_dofs;
 
@@ -111,6 +115,8 @@ private:
   double base_time_dp;
   double base_time_sp;
 
+  double max_gpu_usage;
+
   unsigned int N;
   unsigned int n_mv;
   unsigned int n_dofs;
@@ -124,7 +130,11 @@ private:
 
 template <int dim, int fe_degree>
 LaplaceProblem<dim, fe_degree>::LaplaceProblem()
-  : triangulation(Triangulation<dim>::limit_level_difference_at_vertices)
+  : mpi_communicator(MPI_COMM_WORLD)
+  , triangulation(
+      MPI_COMM_WORLD,
+      Triangulation<dim>::limit_level_difference_at_vertices,
+      parallel::distributed::Triangulation<dim>::construct_multigrid_hierarchy)
   , fe([&]() -> std::shared_ptr<FiniteElement<dim>> {
     if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::Q)
       return std::make_shared<FE_Q<dim>>(fe_degree);
@@ -138,13 +148,18 @@ LaplaceProblem<dim, fe_degree>::LaplaceProblem()
   , pcout(std::make_shared<ConditionalOStream>(std::cout, false))
 {
   const auto filename = Util::get_filename();
-  fout.open("Benchmark_" + filename + ".log", std::ios_base::out);
-  pcout = std::make_shared<ConditionalOStream>(fout, true);
+  if (Utilities::MPI::this_mpi_process(mpi_communicator) == 0)
+    {
+      fout.open("Benchmark_" + filename + ".log", std::ios_base::out);
+      pcout = std::make_shared<ConditionalOStream>(
+        fout, Utilities::MPI::this_mpi_process(mpi_communicator) == 0);
+    }
 }
 template <int dim, int fe_degree>
 LaplaceProblem<dim, fe_degree>::~LaplaceProblem()
 {
-  fout.close();
+  if (Utilities::MPI::this_mpi_process(mpi_communicator) == 0)
+    fout.close();
 }
 template <int dim, int fe_degree>
 void
@@ -159,10 +174,21 @@ LaplaceProblem<dim, fe_degree>::setup_system()
 
   const unsigned int nlevels = triangulation.n_global_levels();
 
-  *pcout << "Setting up dofs...\n";
-  *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = ("
-         << (1 << (nlevels - 1)) << " x (" << fe->degree << " + 1))^" << dim
-         << std::endl;
+  auto n_replicate =
+    CT::IS_REPLICATE_ ? Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD) : 1;
+
+  *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = "
+         << n_replicate << " x (" << (1 << (nlevels - 1)) << " x ("
+         << fe->degree << " + 1))^" << dim << std::endl;
+
+  Utilities::System::MemoryStats stats;
+  Utilities::System::get_memory_stats(stats);
+  Utilities::MPI::MinMaxAvg memory =
+    Utilities::MPI::min_max_avg(stats.VmRSS / 1024., MPI_COMM_WORLD);
+
+  *pcout << "Memory stats [MB]: " << memory.min << " [p" << memory.min_index
+         << "] " << memory.avg << " " << memory.max << " [p" << memory.max_index
+         << "]" << std::endl;
 
   *pcout << "Setting up Matrix-Free...\n";
   // Initialization of Dirichlet boundaries
@@ -200,64 +226,80 @@ LaplaceProblem<dim, fe_degree>::setup_system()
     mfdata_sp = std::make_shared<MatrixFreeSP>();
     mfdata_sp->reinit(dof_handler, maxlevel, additional_data);
   }
+
+  *pcout << "Memory stats [MB]: " << memory.min << " [p" << memory.min_index
+         << "] " << memory.avg << " " << memory.max << " [p" << memory.max_index
+         << "]" << std::endl;
 }
 template <int dim, int fe_degree>
 template <PSMF::LaplaceVariant kernel>
 void
 LaplaceProblem<dim, fe_degree>::do_Ax()
 {
-  PSMF::LaplaceOperator<dim, fe_degree, full_number, kernel> matrix_dp;
-  matrix_dp.initialize(mfdata_dp, dof_handler, maxlevel);
-  matrix_dp.initialize_dof_vector(system_rhs_dp);
-  solution_dp.reinit(system_rhs_dp);
+  {
+    PSMF::LaplaceOperator<dim, fe_degree, full_number, kernel> matrix_dp;
+    matrix_dp.initialize(mfdata_dp, dof_handler, maxlevel);
+    matrix_dp.initialize_dof_vector(system_rhs_dp);
+    solution_dp.reinit(system_rhs_dp);
 
-  system_rhs_dp = 1.;
-  solution_dp   = 0.;
+    system_rhs_dp = 1.;
+    solution_dp   = 0.;
 
-  Timer  time;
-  double best_time = 1e10;
+    Timer  time;
+    double best_time = 1e10;
 
-  for (unsigned int i = 0; i < N; ++i)
-    {
-      time.restart();
-      for (unsigned int i = 0; i < n_mv; ++i)
-        {
-          matrix_dp.vmult(solution_dp, system_rhs_dp);
-          cudaDeviceSynchronize();
-        }
-      best_time = std::min(time.wall_time() / n_mv, best_time);
-    }
+    for (unsigned int i = 0; i < N; ++i)
+      {
+        time.restart();
+        for (unsigned int i = 0; i < n_mv; ++i)
+          {
+            matrix_dp.vmult(solution_dp, system_rhs_dp);
+            cudaDeviceSynchronize();
+          }
+        best_time = std::min(time.wall_time() / n_mv, best_time);
+      }
 
-  // solution_dp.print(std::cout);
-  // std::cout << solution_dp.l2_norm() << std::endl;
+    // solution_dp.print(std::cout);
+    // *pcout << solution_dp.l2_norm() << std::endl;
 
-  info_table[0].add_value("Name", std::string(LaplaceToString(kernel)) + " DP");
-  info_table[0].add_value("Time[s]", best_time);
-  info_table[0].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[0].add_value("Name",
+                            std::string(LaplaceToString(kernel)) + " DP");
+    info_table[0].add_value("Time[s]", best_time);
+    info_table[0].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[0].add_value("Perf[s/Dof]", best_time / n_dofs);
+    info_table[0].add_value("Mem Usage", disp_gpu_usage());
+  }
 
+  {
+    PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, kernel> matrix_sp;
+    matrix_sp.initialize(mfdata_sp, dof_handler, maxlevel);
+    matrix_sp.initialize_dof_vector(system_rhs_sp);
+    solution_sp.reinit(system_rhs_sp);
 
-  PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, kernel> matrix_sp;
-  matrix_sp.initialize(mfdata_sp, dof_handler, maxlevel);
-  matrix_sp.initialize_dof_vector(system_rhs_sp);
-  solution_sp.reinit(system_rhs_sp);
+    system_rhs_sp = 1.;
+    solution_sp   = 0.;
 
-  system_rhs_sp = 1.;
-  solution_sp   = 0.;
+    Timer  time;
+    double best_time = 1e10;
 
-  for (unsigned int i = 0; i < N; ++i)
-    {
-      time.restart();
-      for (unsigned int i = 0; i < n_mv; ++i)
-        {
-          matrix_sp.vmult(solution_sp, system_rhs_sp);
-          cudaDeviceSynchronize();
-        }
-      best_time = std::min(time.wall_time() / n_mv, best_time);
-    }
+    for (unsigned int i = 0; i < N; ++i)
+      {
+        time.restart();
+        for (unsigned int i = 0; i < n_mv; ++i)
+          {
+            matrix_sp.vmult(solution_sp, system_rhs_sp);
+            cudaDeviceSynchronize();
+          }
+        best_time = std::min(time.wall_time() / n_mv, best_time);
+      }
 
-  info_table[1].add_value("Name", std::string(LaplaceToString(kernel)) + " SP");
-  info_table[1].add_value("Time[s]", best_time);
-  info_table[1].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[1].add_value("Name",
+                            std::string(LaplaceToString(kernel)) + " SP");
+    info_table[1].add_value("Time[s]", best_time);
+    info_table[1].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[1].add_value("Perf[s/Dof]", best_time / n_dofs);
+    info_table[1].add_value("Mem Usage", disp_gpu_usage());
+  }
 }
 template <int dim, int fe_degree>
 void
@@ -291,59 +333,80 @@ template <int dim, int fe_degree>
 void
 LaplaceProblem<dim, fe_degree>::bench_transfer()
 {
-  *pcout << "Benchmarking Transfer in double precision...\n";
+  unsigned int max_level  = triangulation.n_levels() - 1;
+  auto locally_owned_dofs = dof_handler.locally_owned_mg_dofs(max_level - 1);
+  auto locally_relevant_dofs =
+    DoFTools::extract_locally_relevant_level_dofs(dof_handler, max_level - 1);
 
-  unsigned int max_level = triangulation.n_levels() - 1;
-  VectorTypeDP u_coarse(dof_handler.n_dofs(max_level - 1));
-  VectorTypeSP u_coarse_(dof_handler.n_dofs(max_level - 1));
-  u_coarse  = 1.;
-  u_coarse_ = 1.;
+  {
+    *pcout << "Benchmarking Transfer in double precision...\n";
 
-  PSMF::MGTransferCUDA<dim, full_number, CT::DOF_LAYOUT_> mg_transfer(
-    mg_constrained_dofs);
-  mg_transfer.build(dof_handler);
+    VectorTypeDP u_coarse(dof_handler.n_dofs(max_level - 1));
 
-  Timer  time;
-  double best_time  = 1e10;
-  double best_time2 = 1e10;
+    u_coarse.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
+    u_coarse = 1.;
 
-  for (unsigned int i = 0; i < N; ++i)
-    {
-      time.restart();
-      for (unsigned int i = 0; i < n_mv; ++i)
-        {
-          mg_transfer.prolongate(max_level, system_rhs_dp, u_coarse);
-          mg_transfer.restrict_and_add(max_level, u_coarse, system_rhs_dp);
-          cudaDeviceSynchronize();
-        }
-      best_time = std::min(time.wall_time() / n_mv, best_time);
-    }
+    PSMF::MGTransferCUDA<dim, full_number, CT::DOF_LAYOUT_> mg_transfer(
+      mg_constrained_dofs);
+    mg_transfer.build(dof_handler);
 
-  info_table[2].add_value("Name", "Transfer DP");
-  info_table[2].add_value("Time[s]", best_time);
-  info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time);
+    Timer  time;
+    double best_time = 1e10;
 
-  *pcout << "Benchmarking Transfer in single precision...\n";
+    for (unsigned int i = 0; i < N; ++i)
+      {
+        time.restart();
+        for (unsigned int i = 0; i < n_mv; ++i)
+          {
+            mg_transfer.prolongate(max_level, system_rhs_dp, u_coarse);
+            mg_transfer.restrict_and_add(max_level, u_coarse, system_rhs_dp);
+            cudaDeviceSynchronize();
+          }
+        best_time = std::min(time.wall_time() / n_mv, best_time);
+      }
 
-  PSMF::MGTransferCUDA<dim, vcycle_number, CT::DOF_LAYOUT_> mg_transfer_(
-    mg_constrained_dofs);
-  mg_transfer_.build(dof_handler);
+    // *pcout << u_coarse.l2_norm() << std::endl;
 
-  for (unsigned int i = 0; i < N; ++i)
-    {
-      time.restart();
-      for (unsigned int i = 0; i < n_mv; ++i)
-        {
-          mg_transfer_.prolongate(max_level, system_rhs_sp, u_coarse_);
-          mg_transfer_.restrict_and_add(max_level, u_coarse_, system_rhs_sp);
-          cudaDeviceSynchronize();
-        }
-      best_time2 = std::min(time.wall_time() / n_mv, best_time2);
-    }
+    info_table[2].add_value("Name", "Transfer DP");
+    info_table[2].add_value("Time[s]", best_time);
+    info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[2].add_value("Perf[s/Dof]", best_time / n_dofs);
+    info_table[2].add_value("Mem Usage", disp_gpu_usage());
+  }
 
-  info_table[2].add_value("Name", "Transfer SP");
-  info_table[2].add_value("Time[s]", best_time2);
-  info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time2);
+  {
+    *pcout << "Benchmarking Transfer in single precision...\n";
+
+    VectorTypeSP u_coarse_(dof_handler.n_dofs(max_level - 1));
+
+    u_coarse_.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
+    u_coarse_ = 1.;
+
+    PSMF::MGTransferCUDA<dim, vcycle_number, CT::DOF_LAYOUT_> mg_transfer_(
+      mg_constrained_dofs);
+    mg_transfer_.build(dof_handler);
+
+    Timer  time;
+    double best_time2 = 1e10;
+
+    for (unsigned int i = 0; i < N; ++i)
+      {
+        time.restart();
+        for (unsigned int i = 0; i < n_mv; ++i)
+          {
+            mg_transfer_.prolongate(max_level, system_rhs_sp, u_coarse_);
+            mg_transfer_.restrict_and_add(max_level, u_coarse_, system_rhs_sp);
+            cudaDeviceSynchronize();
+          }
+        best_time2 = std::min(time.wall_time() / n_mv, best_time2);
+      }
+
+    info_table[2].add_value("Name", "Transfer SP");
+    info_table[2].add_value("Time[s]", best_time2);
+    info_table[2].add_value("Perf[Dof/s]", n_dofs / best_time2);
+    info_table[2].add_value("Perf[s/Dof]", best_time2 / n_dofs);
+    info_table[2].add_value("Mem Usage", disp_gpu_usage());
+  }
 }
 
 template <int dim, int fe_degree>
@@ -351,72 +414,89 @@ template <PSMF::LaplaceVariant smooth_vmult, PSMF::SmootherVariant smooth_inv>
 void
 LaplaceProblem<dim, fe_degree>::do_smooth()
 {
-  // DP
-  using MatrixTypeDP = PSMF::LaplaceOperator<dim, fe_degree, full_number, smooth_vmult>;
-  MatrixTypeDP matrix_dp;
-  matrix_dp.initialize(mfdata_dp, dof_handler, maxlevel);
+  {
+    // DP
+    using MatrixTypeDP =
+      PSMF::LaplaceOperator<dim, fe_degree, full_number, smooth_vmult>;
+    MatrixTypeDP matrix_dp;
+    matrix_dp.initialize(mfdata_dp, dof_handler, maxlevel);
 
-  using SmootherTypeDP =
-    PSMF::PatchSmoother<MatrixTypeDP, dim, fe_degree, smooth_vmult, smooth_inv>;
-  SmootherTypeDP                          smooth_dp;
-  typename SmootherTypeDP::AdditionalData smoother_data_dp;
-  smoother_data_dp.data = mfdata_dp;
+    using SmootherTypeDP = PSMF::
+      PatchSmoother<MatrixTypeDP, dim, fe_degree, smooth_vmult, smooth_inv>;
+    SmootherTypeDP                          smooth_dp;
+    typename SmootherTypeDP::AdditionalData smoother_data_dp;
+    smoother_data_dp.data = mfdata_dp;
 
-  smooth_dp.initialize(matrix_dp, smoother_data_dp);
+    smooth_dp.initialize(matrix_dp, smoother_data_dp);
 
-  Timer  time;
-  double best_time = 1e10;
+    Timer  time;
+    double best_time = 1e10;
 
-  system_rhs_dp = 1.;
+    system_rhs_dp = 1.;
 
-  for (unsigned int i = 0; i < N; ++i)
-    {
-      time.restart();
-      for (unsigned int i = 0; i < n_mv; ++i)
-        {
-          smooth_dp.step(solution_dp, system_rhs_dp);
-          cudaDeviceSynchronize();
-        }
-      best_time = std::min(time.wall_time() / n_mv, best_time);
-    }
+    for (unsigned int i = 0; i < N; ++i)
+      {
+        time.restart();
+        for (unsigned int i = 0; i < n_mv; ++i)
+          {
+            smooth_dp.step(solution_dp, system_rhs_dp);
+            cudaDeviceSynchronize();
+          }
+        best_time = std::min(time.wall_time() / n_mv, best_time);
+      }
 
-  info_table[3].add_value("Name",
-                          std::string(LaplaceToString(smooth_vmult)) + " " +
-                            std::string(SmootherToString(smooth_inv)) + " DP");
-  info_table[3].add_value("Time[s]", best_time);
-  info_table[3].add_value("Perf[Dof/s]", n_dofs / best_time);
+    // *pcout << solution_dp.l2_norm() << std::endl;
 
-  // SP
-  using MatrixTypeSP = PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, smooth_vmult>;
-  MatrixTypeSP matrix_sp;
-  matrix_sp.initialize(mfdata_sp, dof_handler, maxlevel);
+    info_table[3].add_value("Name",
+                            std::string(LaplaceToString(smooth_vmult)) + " " +
+                              std::string(SmootherToString(smooth_inv)) +
+                              " DP");
+    info_table[3].add_value("Time[s]", best_time);
+    info_table[3].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[3].add_value("Perf[s/Dof]", best_time / n_dofs);
+    info_table[3].add_value("Mem Usage", disp_gpu_usage());
+  }
 
-  using SmootherTypeSP =
-    PSMF::PatchSmoother<MatrixTypeSP, dim, fe_degree, smooth_vmult, smooth_inv>;
-  SmootherTypeSP                          smooth_sp;
-  typename SmootherTypeSP::AdditionalData smoother_data_sp;
-  smoother_data_sp.data = mfdata_sp;
+  {
+    // SP
+    using MatrixTypeSP =
+      PSMF::LaplaceOperator<dim, fe_degree, vcycle_number, smooth_vmult>;
+    MatrixTypeSP matrix_sp;
+    matrix_sp.initialize(mfdata_sp, dof_handler, maxlevel);
 
-  smooth_sp.initialize(matrix_sp, smoother_data_sp);
+    using SmootherTypeSP = PSMF::
+      PatchSmoother<MatrixTypeSP, dim, fe_degree, smooth_vmult, smooth_inv>;
+    SmootherTypeSP                          smooth_sp;
+    typename SmootherTypeSP::AdditionalData smoother_data_sp;
+    smoother_data_sp.data = mfdata_sp;
 
-  system_rhs_sp = 1.;
+    smooth_sp.initialize(matrix_sp, smoother_data_sp);
 
-  for (unsigned int i = 0; i < N; ++i)
-    {
-      time.restart();
-      for (unsigned int i = 0; i < n_mv; ++i)
-        {
-          smooth_sp.step(solution_sp, system_rhs_sp);
-          cudaDeviceSynchronize();
-        }
-      best_time = std::min(time.wall_time() / n_mv, best_time);
-    }
+    system_rhs_sp = 1.;
 
-  info_table[4].add_value("Name",
-                          std::string(LaplaceToString(smooth_vmult)) + " " +
-                            std::string(SmootherToString(smooth_inv)) + " SP");
-  info_table[4].add_value("Time[s]", best_time);
-  info_table[4].add_value("Perf[Dof/s]", n_dofs / best_time);
+    Timer  time;
+    double best_time = 1e10;
+
+    for (unsigned int i = 0; i < N; ++i)
+      {
+        time.restart();
+        for (unsigned int i = 0; i < n_mv; ++i)
+          {
+            smooth_sp.step(solution_sp, system_rhs_sp);
+            cudaDeviceSynchronize();
+          }
+        best_time = std::min(time.wall_time() / n_mv, best_time);
+      }
+
+    info_table[4].add_value("Name",
+                            std::string(LaplaceToString(smooth_vmult)) + " " +
+                              std::string(SmootherToString(smooth_inv)) +
+                              " SP");
+    info_table[4].add_value("Time[s]", best_time);
+    info_table[4].add_value("Perf[Dof/s]", n_dofs / best_time);
+    info_table[4].add_value("Perf[s/Dof]", best_time / n_dofs);
+    info_table[4].add_value("Mem Usage", disp_gpu_usage());
+  }
 }
 template <int dim, int fe_degree>
 void
@@ -485,14 +565,54 @@ LaplaceProblem<dim, fe_degree>::bench_smooth()
           AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
       }
 }
+template <int dim, int fe_degree>
+size_t
+LaplaceProblem<dim, fe_degree>::disp_gpu_usage()
+{
+  size_t free_mem, total_mem;
+  AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
 
+  unsigned int scale    = 1024 * 1024;
+  size_t       used_mem = (total_mem - free_mem) / scale;
+
+  // if (Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
+  //   *pcout << "Used memory  [MB]: " << (total_mem - free_mem) / scale
+  //          << std::endl;
+  //  << "free memory  [MB]: " << free_mem / scale << std::endl
+  //  << "total memory [MB]: " << total_mem / scale << std::endl;
+
+  return used_mem;
+}
 template <int dim, int fe_degree>
 void
 LaplaceProblem<dim, fe_degree>::run()
 {
   *pcout << Util::generic_info_to_fstring() << std::endl;
 
-  GridGenerator::hyper_cube(triangulation, 0., 1.);
+  if (CT::IS_REPLICATE_)
+    {
+      auto n_replicate = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
+      Tensor<1, dim> shift_vector;
+      shift_vector[0] = 1;
+
+      parallel::distributed::Triangulation<dim> tria(
+        MPI_COMM_WORLD,
+        Triangulation<dim>::limit_level_difference_at_vertices,
+        parallel::distributed::Triangulation<
+          dim>::construct_multigrid_hierarchy);
+
+      GridGenerator::hyper_cube(tria, 0, 1);
+      if (dim == 2)
+        GridGenerator::replicate_triangulation(tria,
+                                               {n_replicate, 1},
+                                               triangulation);
+      else if (dim == 3)
+        GridGenerator::replicate_triangulation(tria,
+                                               {n_replicate, 1, 1},
+                                               triangulation);
+    }
+  else
+    GridGenerator::hyper_cube(triangulation, 0., 1.);
 
   double n_dofs_1d = 0;
   if (dim == 2)
@@ -519,6 +639,8 @@ LaplaceProblem<dim, fe_degree>::run()
       info_table[k].set_precision("Time[s]", 3);
       info_table[k].set_scientific("Perf[Dof/s]", true);
       info_table[k].set_precision("Perf[Dof/s]", 3);
+      info_table[k].set_scientific("Perf[s/Dof]", true);
+      info_table[k].set_precision("Perf[s/Dof]", 3);
 
       info_table[k].write_text(oss);
       *pcout << oss.str() << std::endl;
@@ -531,9 +653,17 @@ main(int argc, char *argv[])
 {
   try
     {
+      Utilities::MPI::MPI_InitFinalize mpi_init(argc, argv, 1);
+
       {
-        int device_id = findCudaDevice(argc, (const char **)argv);
-        AssertCuda(cudaSetDevice(device_id));
+        int         n_devices       = 0;
+        cudaError_t cuda_error_code = cudaGetDeviceCount(&n_devices);
+        AssertCuda(cuda_error_code);
+        const unsigned int my_mpi_id =
+          Utilities::MPI::this_mpi_process(MPI_COMM_WORLD);
+        const int device_id = my_mpi_id % n_devices;
+        cuda_error_code     = cudaSetDevice(device_id);
+        AssertCuda(cuda_error_code);
       }
 
       {

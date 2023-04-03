@@ -8,5 +8,5 @@ find $PWD -iwholename '*cmake*' -not -name CMakeLists.txt -delete
 
 # cmake setup                                                                                                                         
 cmake -DCMAKE_BUILD_TYPE="Release" \
-      -DDEAL_II_DIR=/export/home/cucui/SimServ06/lib/dealii_cudampi_11_8/ \
+      -DDEAL_II_DIR=/export/home/cucui/SimServ06/lib/dealii_cudampi_mg/ \
       ..

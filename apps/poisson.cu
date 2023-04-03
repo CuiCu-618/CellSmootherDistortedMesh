@@ -16,13 +16,15 @@
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
 
+#include <deal.II/distributed/tria.h>
+
 #include <deal.II/dofs/dof_tools.h>
 
 #include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/fe_q.h>
 
 #include <deal.II/grid/grid_generator.h>
-#include <deal.II/grid/tria.h>
+#include <deal.II/grid/grid_tools.h>
 
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/la_parallel_vector.h>
@@ -123,11 +125,12 @@ namespace Step64
              unsigned int i,
              unsigned int call_count);
 
-    Triangulation<dim>                  triangulation;
-    std::shared_ptr<FiniteElement<dim>> fe;
-    DoFHandler<dim>                     dof_handler;
-    MappingQ1<dim>                      mapping;
-    double                              setup_time;
+    MPI_Comm                                  mpi_communicator;
+    parallel::distributed::Triangulation<dim> triangulation;
+    std::shared_ptr<FiniteElement<dim>>       fe;
+    DoFHandler<dim>                           dof_handler;
+    MappingQ1<dim>                            mapping;
+    double                                    setup_time;
 
     std::vector<ConvergenceTable> info_table;
 
@@ -143,7 +146,11 @@ namespace Step64
 
   template <int dim, int fe_degree>
   LaplaceProblem<dim, fe_degree>::LaplaceProblem()
-    : triangulation(Triangulation<dim>::limit_level_difference_at_vertices)
+    : mpi_communicator(MPI_COMM_WORLD)
+    , triangulation(MPI_COMM_WORLD,
+                    Triangulation<dim>::limit_level_difference_at_vertices,
+                    parallel::distributed::Triangulation<
+                      dim>::construct_multigrid_hierarchy)
     , fe([&]() -> std::shared_ptr<FiniteElement<dim>> {
       if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::Q)
         return std::make_shared<FE_Q<dim>>(fe_degree);
@@ -156,8 +163,12 @@ namespace Step64
     , pcout(std::make_shared<ConditionalOStream>(std::cout, false))
   {
     const auto filename = Util::get_filename();
-    fout.open(filename + ".log", std::ios_base::out);
-    pcout = std::make_shared<ConditionalOStream>(fout, true);
+    if (Utilities::MPI::this_mpi_process(mpi_communicator) == 0)
+      {
+        fout.open(filename + ".log", std::ios_base::out);
+        pcout = std::make_shared<ConditionalOStream>(
+          fout, Utilities::MPI::this_mpi_process(mpi_communicator) == 0);
+      }
 
     info_table.resize(CT::LAPLACE_TYPE_.size() * CT::SMOOTH_VMULT_.size() *
                       CT::SMOOTH_INV_.size());
@@ -166,7 +177,8 @@ namespace Step64
   template <int dim, int fe_degree>
   LaplaceProblem<dim, fe_degree>::~LaplaceProblem()
   {
-    fout.close();
+    if (Utilities::MPI::this_mpi_process(mpi_communicator) == 0)
+      fout.close();
   }
 
   template <int dim, int fe_degree>
@@ -180,9 +192,12 @@ namespace Step64
     dof_handler.distribute_mg_dofs();
     const unsigned int nlevels = triangulation.n_global_levels();
 
-    *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = ("
-           << (1 << (nlevels - 1)) << " x (" << fe->degree << " + 1))^" << dim
-           << std::endl;
+    auto n_replicate =
+      CT::IS_REPLICATE_ ? Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD) : 1;
+
+    *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = "
+           << n_replicate << " x (" << (1 << (nlevels - 1)) << " x ("
+           << fe->degree << " + 1))^" << dim << std::endl;
 
     setup_time += time.wall_time();
 
@@ -340,11 +355,13 @@ namespace Step64
         auto it    = data.solver_name + "it";
         auto step  = data.solver_name + "step";
         auto times = data.solver_name + "[s]";
+        auto perf  = data.solver_name + "[s/Dof]";
         auto mem   = data.solver_name + "Mem Usage[MB]";
 
         info_table[index].add_value(it, data.n_iteration);
         info_table[index].add_value(step, data.n_step);
         info_table[index].add_value(times, data.timing);
+        info_table[index].add_value(perf, data.timing / dof_handler.n_dofs());
         info_table[index].add_value(mem, data.mem_usage);
 
         if (call_count == 0)
@@ -352,10 +369,14 @@ namespace Step64
             info_table[index].set_scientific(times, true);
             info_table[index].set_precision(times, 3);
 
+            info_table[index].set_scientific(perf, true);
+            info_table[index].set_precision(perf, 3);
+
             info_table[index].add_column_to_supercolumn(it, data.solver_name);
             info_table[index].add_column_to_supercolumn(step, data.solver_name);
             info_table[index].add_column_to_supercolumn(times,
                                                         data.solver_name);
+            info_table[index].add_column_to_supercolumn(perf, data.solver_name);
             info_table[index].add_column_to_supercolumn(mem, data.solver_name);
           }
       }
@@ -427,7 +448,32 @@ namespace Step64
 
         if (cycle == 0)
           {
-            GridGenerator::hyper_cube(triangulation, 0., 1.);
+            if (CT::IS_REPLICATE_)
+              {
+                auto n_replicate =
+                  Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
+                Tensor<1, dim> shift_vector;
+                shift_vector[0] = 1;
+
+                parallel::distributed::Triangulation<dim> tria(
+                  MPI_COMM_WORLD,
+                  Triangulation<dim>::limit_level_difference_at_vertices,
+                  parallel::distributed::Triangulation<
+                    dim>::construct_multigrid_hierarchy);
+
+                GridGenerator::hyper_cube(tria, 0, 1);
+                if (dim == 2)
+                  GridGenerator::replicate_triangulation(tria,
+                                                         {n_replicate, 1},
+                                                         triangulation);
+                else if (dim == 3)
+                  GridGenerator::replicate_triangulation(tria,
+                                                         {n_replicate, 1, 1},
+                                                         triangulation);
+              }
+            else
+              GridGenerator::hyper_cube(triangulation, 0., 1.);
+
             triangulation.refine_global(2);
           }
         else
@@ -448,9 +494,17 @@ main(int argc, char *argv[])
     {
       using namespace Step64;
 
+      Utilities::MPI::MPI_InitFinalize mpi_init(argc, argv, 1);
+
       {
-        int device_id = findCudaDevice(argc, (const char **)argv);
-        AssertCuda(cudaSetDevice(device_id));
+        int         n_devices       = 0;
+        cudaError_t cuda_error_code = cudaGetDeviceCount(&n_devices);
+        AssertCuda(cuda_error_code);
+        const unsigned int my_mpi_id =
+          Utilities::MPI::this_mpi_process(MPI_COMM_WORLD);
+        const int device_id = my_mpi_id % n_devices;
+        cuda_error_code     = cudaSetDevice(device_id);
+        AssertCuda(cuda_error_code);
       }
 
       {

@@ -6,3 +6,6 @@ CMakeDoxy*
 Doxyfile
 *.a
 /*build*
+*__pycache__*
+*.pdf
+*.png

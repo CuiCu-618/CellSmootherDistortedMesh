@@ -38,6 +38,20 @@ namespace Util
                 (((iexp % 2 == 1) ? base : 1) * pow(base * base, iexp / 2)));
   }
 
+  template <typename VectorType>
+  void
+  adjust_ghost_range_if_necessary(
+    const VectorType                                        &vec,
+    const std::shared_ptr<const Utilities::MPI::Partitioner> partitioner)
+  {
+    if (vec.get_partitioner().get() == partitioner.get())
+      return;
+
+    VectorType copy_vec(vec);
+    const_cast<VectorType &>(vec).reinit(partitioner);
+    const_cast<VectorType &>(vec).copy_locally_owned_data_from(copy_vec);
+  }
+
   /**
    * Compute dofs in a patch based on first_dof.
    * Data layout for local vectors:

@@ -104,11 +104,16 @@ namespace Util
     const auto str_dof_layout  = DoFLayoutToString(CT::DOF_LAYOUT_);
     const auto str_granularity = GranularityToString(CT::GRANULARITY_);
 
+    const auto n_mpi_procs = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
+    const auto n_coarse = CT::IS_REPLICATE_ ? n_mpi_procs : 1;
+
     oss << "poisson";
     oss << std::scientific << std::setprecision(2);
     oss << "_" << CT::DIMENSION_ << "D";
     oss << "_" << str_dof_layout;
-    oss << CT::FE_DEGREE_;
+    oss << CT::FE_DEGREE_ << "_";
+    oss << n_mpi_procs << "prcs_";
+    oss << n_coarse << "cell";
     oss << "_" << str_laplace_variant;
     oss << str_smooth_vmult_variant;
     oss << str_smooth_inv_variant;
@@ -138,6 +143,8 @@ namespace Util
     auto mps   = deviceProp.multiProcessorCount;
     auto cores = _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor);
 
+    const auto n_mpi_procs = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
+    const auto n_coarse = CT::IS_REPLICATE_ ? n_mpi_procs : 1;
 
     std::ostringstream oss;
 
@@ -157,6 +164,8 @@ namespace Util
     oss << "Settings of parameters: " << std::endl
         << "Dimension:                      " << CT::DIMENSION_ << std::endl
         << "Polynomial degree:              " << CT::FE_DEGREE_ << std::endl
+        << "MPI rank(s):                    " << n_mpi_procs << std::endl
+        << "Number of coarse cell(s):       " << n_coarse << std::endl
         << "DoF Layout:                     "
         << DoFLayoutToString(CT::DOF_LAYOUT_) << std::endl
         << "Number type for V-cycle:        " << value_type << std::endl;

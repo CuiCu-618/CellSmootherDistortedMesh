@@ -601,12 +601,12 @@ namespace PSMF
 
           for (int i = 0; i < 2; ++i)
             {
-              wmma::load_matrix_sync(a_frag,
+              wmma::load_matrix_sync(b_frag,
                                      &shape_data[i * 4],
                                      8 + skew_double);
 
               wmma::load_matrix_sync(
-                b_frag,
+                a_frag,
                 &in[warpId * 8 * (8 + skew_double) + i * 4],
                 8 + skew_double);
 
@@ -616,7 +616,7 @@ namespace PSMF
           wmma::store_matrix_sync(&out[warpId * 8 * (8 + skew_double)],
                                   c_frag,
                                   8 + skew_double,
-                                  wmma::mem_col_major);
+                                  wmma::mem_row_major);
         }
       else if (direction == 1)
         {
@@ -712,14 +712,14 @@ namespace PSMF
 
           for (int i = 0; i < 2; ++i)
             {
-              wmma::load_matrix_sync(a_frag,
+              wmma::load_matrix_sync(b_frag,
                                      &shape_data[i * 4],
                                      8 + skew_double);
 
               for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
                 {
                   wmma::load_matrix_sync(
-                    b_frag,
+                    a_frag,
                     &in[(z * 2 + warpId) * 8 * (8 + skew_double) + i * 4],
                     8 + skew_double);
 
@@ -732,7 +732,7 @@ namespace PSMF
               &out[(z * 2 + warpId) * 8 * (8 + skew_double)],
               c_frag[z],
               8 + skew_double,
-              wmma::mem_col_major);
+              wmma::mem_row_major);
         }
       else if (direction == 1)
         {
@@ -801,9 +801,9 @@ namespace PSMF
               // #pragma unroll
               for (int k = 0; k < n_dofs_1d; ++k)
                 {
-                  const unsigned int shape_idx = row * n_dofs_1d_padding + k;
+                  const unsigned int shape_idx = z * n_dofs_1d_padding + k;
                   const unsigned int source_idx =
-                    z * n_dofs_1d_padding + col + k * stride;
+                    row * n_dofs_1d_padding + col + k * stride;
 
                   pval[z] += shape_data[shape_idx] * in[source_idx];
                 }
@@ -812,7 +812,7 @@ namespace PSMF
           for (unsigned int z = 0; z < n_dofs_1d; ++z)
             {
               const unsigned int destination_idx =
-                z * n_dofs_1d_padding + col + row * stride;
+                row * n_dofs_1d_padding + col + z * stride;
 
               if (add)
                 out[destination_idx] += pval[z];
@@ -876,12 +876,12 @@ namespace PSMF
           for (int i = 0; i < 4; ++i)
             {
               wmma::load_matrix_sync(
-                a_frag,
+                b_frag,
                 &shape_data[subId / 2 * (16 + skew_double) * 8 + i * 4],
                 16 + skew_double);
 
               wmma::load_matrix_sync(
-                b_frag,
+                a_frag,
                 &in[subId % 2 * (16 + skew_double) * 8 + i * 4],
                 16 + skew_double);
 
@@ -892,7 +892,7 @@ namespace PSMF
             &out[subId % 2 * (16 + skew_double) * 8 + subId / 2 * 8],
             c_frag,
             16 + skew_double,
-            wmma::mem_col_major);
+            wmma::mem_row_major);
         }
       else if (direction == 1)
         {
@@ -996,14 +996,14 @@ namespace PSMF
           for (int i = 0; i < 4; ++i)
             {
               wmma::load_matrix_sync(
-                a_frag,
+                b_frag,
                 &shape_data[subId / 2 * (16 + skew_double) * 8 + i * 4],
                 16 + skew_double);
 
               for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
                 {
                   wmma::load_matrix_sync(
-                    b_frag,
+                    a_frag,
                     &in[(z * 2 + warpId / 4) * (16 + skew_double) * 16 +
                         subId % 2 * (16 + skew_double) * 8 + i * 4],
                     16 + skew_double);
@@ -1018,7 +1018,7 @@ namespace PSMF
                    subId % 2 * (16 + skew_double) * 8 + subId / 2 * 8],
               c_frag[z],
               16 + skew_double,
-              wmma::mem_col_major);
+              wmma::mem_row_major);
         }
       else if (direction == 1)
         {
@@ -1092,9 +1092,9 @@ namespace PSMF
               // #pragma unroll
               for (int k = 0; k < n_dofs_1d; ++k)
                 {
-                  const unsigned int shape_idx = row * n_dofs_1d_padding + k;
+                  const unsigned int shape_idx = z * n_dofs_1d_padding + k;
                   const unsigned int source_idx =
-                    z * n_dofs_1d_padding + col + k * stride;
+                    row * n_dofs_1d_padding + col + k * stride;
 
                   pval[z] += shape_data[shape_idx] * in[source_idx];
                 }
@@ -1103,7 +1103,7 @@ namespace PSMF
           for (unsigned int z = 0; z < n_dofs_1d; ++z)
             {
               const unsigned int destination_idx =
-                z * n_dofs_1d_padding + col + row * stride;
+                row * n_dofs_1d_padding + col + z * stride;
 
               if (add)
                 out[destination_idx] += pval[z];
@@ -1176,24 +1176,24 @@ namespace PSMF
 
           for (int i = 0; i < 2; ++i)
             {
-              wmma::load_matrix_sync(a_frag,
+              wmma::load_matrix_sync(b_frag,
                                      &shape_data[i * 8],
                                      16 + skew_double);
-#pragma unroll
-              for (int t = 0; t < a_frag.num_elements; t++)
-                {
-                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
-                }
+// #pragma unroll
+//               for (int t = 0; t < a_frag.num_elements; t++)
+//                 {
+//                   a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+//                 }
 
               wmma::load_matrix_sync(
-                b_frag,
+                a_frag,
                 &in[warpId * 16 * (16 + skew_double) + i * 8],
                 16 + skew_double);
-#pragma unroll
-              for (int t = 0; t < b_frag.num_elements; t++)
-                {
-                  b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
-                }
+// #pragma unroll
+//               for (int t = 0; t < b_frag.num_elements; t++)
+//                 {
+//                   b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+//                 }
 
               wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
@@ -1201,7 +1201,7 @@ namespace PSMF
           wmma::store_matrix_sync(&out[warpId * 16 * (16 + skew_double)],
                                   c_frag,
                                   16 + skew_double,
-                                  wmma::mem_col_major);
+                                  wmma::mem_row_major);
         }
       else if (direction == 1)
         {
@@ -1327,25 +1327,25 @@ namespace PSMF
 
           for (int i = 0; i < 2; ++i)
             {
-              wmma::load_matrix_sync(a_frag,
+              wmma::load_matrix_sync(b_frag,
                                      &shape_data[i * 8],
                                      16 + skew_double);
-#pragma unroll
-              for (int t = 0; t < a_frag.num_elements; t++)
-                {
-                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
-                }
+// #pragma unroll
+//               for (int t = 0; t < a_frag.num_elements; t++)
+//                 {
+//                   a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+//                 }
               for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
                 {
                   wmma::load_matrix_sync(
-                    b_frag,
+                    a_frag,
                     &in[(z * 8 + warpId) * 16 * (16 + skew_double) + i * 8],
                     16 + skew_double);
-#pragma unroll
-                  for (int t = 0; t < b_frag.num_elements; t++)
-                    {
-                      b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
-                    }
+// #pragma unroll
+//                   for (int t = 0; t < b_frag.num_elements; t++)
+//                     {
+//                       b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+//                     }
 
                   wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
                 }
@@ -1356,7 +1356,7 @@ namespace PSMF
               &out[(z * 8 + warpId) * 16 * (16 + skew_double)],
               c_frag[z],
               16 + skew_double,
-              wmma::mem_col_major);
+              wmma::mem_row_major);
         }
       else if (direction == 1)
         {
@@ -1398,11 +1398,11 @@ namespace PSMF
               wmma::load_matrix_sync(a_frag,
                                      &shape_data[i * 8],
                                      16 + skew_double);
-#pragma unroll
-              for (int t = 0; t < a_frag.num_elements; t++)
-                {
-                  a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
-                }
+// #pragma unroll
+//               for (int t = 0; t < a_frag.num_elements; t++)
+//                 {
+//                   a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
+//                 }
               for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
                 {
                   wmma::load_matrix_sync(
@@ -1410,11 +1410,11 @@ namespace PSMF
                     &in[(z * 8 + warpId) * 16 * (16 + skew_double) +
                         i * 8 * (16 + skew_double)],
                     16 + skew_double);
-#pragma unroll
-                  for (int t = 0; t < b_frag.num_elements; t++)
-                    {
-                      b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
-                    }
+// #pragma unroll
+//                   for (int t = 0; t < b_frag.num_elements; t++)
+//                     {
+//                       b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
+//                     }
                   wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
                 }
             }
@@ -1443,9 +1443,9 @@ namespace PSMF
               // #pragma unroll
               for (int k = 0; k < n_dofs_1d; ++k)
                 {
-                  const unsigned int shape_idx = row * n_dofs_1d_padding + k;
+                  const unsigned int shape_idx = z * n_dofs_1d_padding + k;
                   const unsigned int source_idx =
-                    z * n_dofs_1d_padding + col + k * stride;
+                    row * n_dofs_1d_padding + col + k * stride;
 
                   pval[z] += shape_data[shape_idx] * in[source_idx];
                 }
@@ -1454,7 +1454,7 @@ namespace PSMF
           for (unsigned int z = 0; z < n_dofs_1d; ++z)
             {
               const unsigned int destination_idx =
-                z * n_dofs_1d_padding + col + row * stride;
+                row * n_dofs_1d_padding + col + z * stride;
 
               if (add)
                 out[destination_idx] += pval[z];
@@ -1766,7 +1766,7 @@ namespace PSMF
       __syncthreads();
       apply<0, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, false, true>(eigenvectors, tmp, dst);
+      apply<1, false, false>(eigenvectors, tmp, dst);
     }
 
     template <int direction, bool contract_over_rows, bool add = false>
@@ -1831,7 +1831,7 @@ namespace PSMF
       __syncthreads();
       apply<1, false>(eigenvectors, &tmp[local_dim], tmp);
       __syncthreads();
-      apply<2, false, true>(eigenvectors, tmp, dst);
+      apply<2, false, false>(eigenvectors, tmp, dst);
     }
 
     template <int direction, bool contract_over_rows, bool add = false>
@@ -1905,7 +1905,7 @@ namespace PSMF
       __syncthreads();
       apply<0, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, false, true>(eigenvectors, tmp, dst);
+      apply<1, false, false>(eigenvectors, tmp, dst);
     }
 
     template <int direction, bool contract_over_rows, bool add = false>
@@ -1985,7 +1985,7 @@ namespace PSMF
       __syncthreads();
       apply<1, false>(eigenvectors, &tmp[local_dim], tmp);
       __syncthreads();
-      apply<2, false, true>(eigenvectors, tmp, dst);
+      apply<2, false, false>(eigenvectors, tmp, dst);
     }
 
     template <int direction, bool contract_over_rows, bool add = false>
@@ -2068,7 +2068,7 @@ namespace PSMF
       __syncthreads();
       apply<0, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<1, false, true>(eigenvectors, tmp, dst);
+      apply<1, false, false>(eigenvectors, tmp, dst);
     }
 
     template <int direction, bool contract_over_rows, bool add = false>
@@ -2154,7 +2154,7 @@ namespace PSMF
       __syncthreads();
       apply<1, false>(eigenvectors, src, tmp);
       __syncthreads();
-      apply<2, false, true>(eigenvectors, tmp, dst);
+      apply<2, false, false>(eigenvectors, tmp, dst);
     }
 
     template <int direction, bool contract_over_rows, bool add = false>

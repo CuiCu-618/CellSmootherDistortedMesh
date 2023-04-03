@@ -302,12 +302,35 @@ namespace PSMF
     std::vector<IndexMapping> copy_indices;
 
     /**
+     * Additional degrees of freedom for the copy_to_mg() function. These are
+     * the ones where the global degree of freedom is locally owned and the
+     * level degree of freedom is not.
+     */
+    std::vector<IndexMapping>           copy_indices_global_mine;
+    std::vector<Table<2, unsigned int>> copy_indices_global_mine_host;
+
+    /**
+     * Additional degrees of freedom for the copy_from_mg() function. These
+     * are the ones where the level degree of freedom is locally owned and the
+     * global degree of freedom is not.
+     */
+    std::vector<IndexMapping> copy_indices_level_mine;
+
+    /**
      * This variable stores whether the copy operation from the global to the
      * level vector is actually a plain copy to the finest level. This means
      * that the grid has no adaptive refinement and the numbering on the
      * finest multigrid level is the same as in the global case.
      */
     bool perform_plain_copy;
+
+    /**
+     * This variable stores whether the copy operation from the global to the
+     * level vector is actually a plain copy to the finest level except for a
+     * renumbering within the finest level of the degrees of freedom. This
+     * means that the grid has no adaptive refinement.
+     */
+    bool perform_renumbered_plain_copy;
 
     /**
      * A variable storing the local indices of Dirichlet boundary conditions
@@ -331,6 +354,35 @@ namespace PSMF
     SmartPointer<const MGConstrainedDoFs,
                  MGTransferCUDA<dim, Number, DoFLayout::DGQ>>
       mg_constrained_dofs;
+
+    /**
+     * In the function copy_to_mg, we need to access ghosted entries of the
+     * global vector for inserting into the level vectors. This vector is
+     * populated with those entries.
+     */
+    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+      ghosted_global_vector;
+
+    /**
+     * Same as above but used when working with solution vectors.
+     */
+    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+      solution_ghosted_global_vector;
+
+    /**
+     * In the function copy_from_mg, we access all level vectors with certain
+     * ghost entries for inserting the result into a global vector.
+     */
+    mutable MGLevelObject<
+      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
+      ghosted_level_vector;
+
+    /**
+     * Same as above but used when working with solution vectors.
+     */
+    mutable MGLevelObject<
+      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
+      solution_ghosted_level_vector;
 
     /**
      * Internal function to fill copy_indice.
@@ -363,7 +415,7 @@ namespace PSMF
       Number                                                         val) const;
   };
 
-  template <typename Number, typename Number2>
+  template <typename Number, typename Number2, bool add>
   __global__ void
   copy_with_indices_kernel(Number             *dst,
                            Number2            *src,
@@ -374,11 +426,14 @@ namespace PSMF
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < n)
       {
-        dst[dst_indices[i]] = src[src_indices[i]];
+        if (add)
+          dst[dst_indices[i]] += src[src_indices[i]];
+        else
+          dst[dst_indices[i]] = src[src_indices[i]];
       }
   }
 
-  template <typename Number, typename Number2>
+  template <typename Number, typename Number2, bool add = false>
   void
   copy_with_indices(
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>        &dst,
@@ -390,11 +445,12 @@ namespace PSMF
     const int  blocksize = 256;
     const dim3 block_dim = dim3(blocksize);
     const dim3 grid_dim  = dim3(1 + (n - 1) / blocksize);
-    copy_with_indices_kernel<<<grid_dim, block_dim>>>(dst.get_values(),
-                                                      src.get_values(),
-                                                      dst_indices.get_values(),
-                                                      src_indices.get_values(),
-                                                      n);
+    copy_with_indices_kernel<Number, Number2, add>
+      <<<grid_dim, block_dim>>>(dst.get_values(),
+                                src.get_values(),
+                                dst_indices.get_values(),
+                                src_indices.get_values(),
+                                n);
     AssertCudaKernel();
   }
 

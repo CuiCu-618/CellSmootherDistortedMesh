@@ -3,6 +3,8 @@
  * Created by Cu Cui on 2022/12/25.
  */
 
+#include <deal.II/lac/la_parallel_vector.h>
+#include <deal.II/lac/la_parallel_vector.templates.h>
 #include <deal.II/lac/read_write_vector.templates.h>
 
 #include "cuda_vector.cuh"
@@ -20,5 +22,19 @@ namespace PSMF
 DEAL_II_NAMESPACE_OPEN
 
 template class LinearAlgebra::ReadWriteVector<unsigned int>;
+
+namespace LinearAlgebra
+{
+  namespace distributed
+  {
+    template void
+    Vector<double, ::dealii::MemorySpace::CUDA>::copy_locally_owned_data_from<
+      double>(const Vector<double, ::dealii::MemorySpace::CUDA> &);
+
+    template void
+    Vector<float, ::dealii::MemorySpace::CUDA>::copy_locally_owned_data_from<
+      float>(const Vector<float, ::dealii::MemorySpace::CUDA> &);
+  } // namespace distributed
+} // namespace LinearAlgebra
 
 DEAL_II_NAMESPACE_CLOSE

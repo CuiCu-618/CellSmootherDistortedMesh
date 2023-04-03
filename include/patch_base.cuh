@@ -200,6 +200,37 @@ namespace PSMF
       unsigned int patch_per_block;
 
       /**
+       * Number of ghost indices
+       */
+      unsigned int n_ghost_indices;
+
+      /**
+       * The range of the vector that is stored locally.
+       */
+      unsigned int local_range_start;
+      unsigned int local_range_end;
+
+      /**
+       * The set of indices to which we need to have read access but that are
+       * not locally owned.
+       */
+      unsigned int *ghost_indices;
+
+      /**
+       * Return the local index corresponding to the given global index.
+       */
+      __device__ unsigned int
+      global_to_local(const unsigned int global_index) const;
+
+      __device__ unsigned int
+      binary_search(const unsigned int local_index,
+                    const unsigned int l,
+                    const unsigned int r) const;
+
+      __device__ bool
+      is_ghost(const unsigned int global_index) const;
+
+      /**
        * Relaxation parameter.
        */
       Number relaxation;
@@ -261,6 +292,19 @@ namespace PSMF
        * Pointer to 1D eigenvectors for smoothing operator.
        */
       Number *eigenvectors;
+    };
+
+    struct GhostPatch
+    {
+      GhostPatch(const unsigned int proc, const CellId &cell_id);
+
+      void
+      submit_id(const unsigned int proc, const CellId &cell_id);
+
+      std::string
+      str() const;
+
+      std::map<unsigned, std::vector<CellId>> proc_to_cell_ids;
     };
 
     /**
@@ -409,6 +453,11 @@ namespace PSMF
      */
     bool use_coloring;
 
+    /**
+     * Number of coarse cells
+     */
+    unsigned int n_replicate;
+
 
     GranularityScheme granularity_scheme;
 
@@ -554,6 +603,36 @@ namespace PSMF
      * Pointer to 1D eigenvectors for smoothing operator.
      */
     Number *eigenvectors;
+
+    /**
+     * Number of ghost indices
+     */
+    unsigned int n_ghost_indices;
+
+    /**
+     * The range of the vector that is stored locally.
+     */
+    unsigned int local_range_start;
+    unsigned int local_range_end;
+
+    /**
+     * The set of indices to which we need to have read access but that are
+     * not locally owned.
+     */
+    unsigned int *ghost_indices_dev;
+
+    /**
+     * Shared pointer to store the parallel partitioning information. This
+     * information can be shared between several vectors that have the same
+     * partitioning.
+     */
+    std::shared_ptr<const Utilities::MPI::Partitioner> partitioner;
+
+    mutable std::shared_ptr<
+      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
+      solution_ghosted;
+
+    cudaStream_t stream;
   };
 
   /**

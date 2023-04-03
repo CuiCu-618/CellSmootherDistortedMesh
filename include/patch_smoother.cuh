@@ -73,17 +73,20 @@ namespace PSMF
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
+                VectorType       &solution,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3 &) const
+                const dim3 &,
+                cudaStream_t stream) const
     {
       A->vmult(tmp, dst);
       tmp.sadd(-1., src);
 
       loop_kernel_seperate_inv<dim, fe_degree, Number>
-        <<<grid_dim, block_dim, shared_mem>>>(tmp.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
+                                                      dst.get_values(),
+                                                      solution.get_values(),
+                                                      gpu_data);
     }
     mutable std::size_t                  shared_mem;
     mutable dim3                         block_dim;
@@ -138,14 +141,17 @@ namespace PSMF
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
+                VectorType       &solution,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim) const
+                const dim3       &block_dim,
+                cudaStream_t      stream) const
     {
       loop_kernel_fused_l<dim, fe_degree, Number, lapalace>
-        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                      dst.get_values(),
+                                                      solution.get_values(),
+                                                      gpu_data);
     }
   };
 
@@ -196,14 +202,17 @@ namespace PSMF
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
+                VectorType       &solution,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim) const
+                const dim3       &block_dim,
+                cudaStream_t      stream) const
     {
       loop_kernel_fused_cf<dim, fe_degree, Number, lapalace>
-        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                      dst.get_values(),
+                                                      solution.get_values(),
+                                                      gpu_data);
     }
   };
 

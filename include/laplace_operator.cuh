@@ -58,12 +58,13 @@ namespace PSMF
                 VectorType       &dst,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim) const
+                const dim3       &block_dim,
+                cudaStream_t      stream) const
     {
       laplace_kernel_basic<dim, fe_degree, Number, kernel>
-        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                      dst.get_values(),
+                                                      gpu_data);
     }
   };
 
@@ -108,12 +109,13 @@ namespace PSMF
                 VectorType       &dst,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim) const
+                const dim3       &block_dim,
+                cudaStream_t      stream) const
     {
       laplace_kernel_basic_cell<dim, fe_degree, Number, LaplaceVariant::Basic>
-        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                      dst.get_values(),
+                                                      gpu_data);
     }
   };
 
@@ -156,15 +158,16 @@ namespace PSMF
                 VectorType       &dst,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim) const
+                const dim3       &block_dim,
+                cudaStream_t      stream) const
     {
       laplace_kernel_tensorcore<dim,
                                 fe_degree,
                                 Number,
                                 LaplaceVariant::TensorCore>
-        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                      dst.get_values(),
+                                                      gpu_data);
     }
   };
 
@@ -208,15 +211,16 @@ namespace PSMF
                 VectorType       &dst,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim) const
+                const dim3       &block_dim,
+                cudaStream_t      stream) const
     {
       laplace_kernel_tensorcore<dim,
                                 fe_degree,
                                 Number,
                                 LaplaceVariant::TensorCoreMMA>
-        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
-                                              dst.get_values(),
-                                              gpu_data);
+        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                      dst.get_values(),
+                                                      gpu_data);
     }
   };
 
@@ -268,8 +272,11 @@ namespace PSMF
     initialize_dof_vector(
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &vec) const
     {
-      const unsigned int n_dofs = dof_handler->n_dofs(mg_level);
-      vec.reinit(n_dofs);
+      auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(mg_level);
+      auto locally_relevant_dofs =
+        DoFTools::extract_locally_relevant_level_dofs(*dof_handler, mg_level);
+
+      vec.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
     }
 
     void

@@ -465,18 +465,28 @@ namespace PSMF
              "for multigrid transfers. You will need to call this function, "
              "probably close to where you already call distribute_dofs()."));
 
-    fill_copy_indices(mg_dof);
+    /**
+     * Only global refinement so far, just plain copy. Uncomment for adaptice
+     * refinement.
+     */
+    // fill_copy_indices(mg_dof);
 
     const unsigned int n_levels = mg_dof.get_triangulation().n_global_levels();
+
+    vector_partitioners.resize(0, n_levels - 1);
+    for (unsigned int level = 0; level <= ghosted_level_vector.max_level();
+         ++level)
+      vector_partitioners[level] =
+        ghosted_level_vector[level].get_partitioner();
 
     std::vector<std::vector<Number>>       weights_host;
     std::vector<std::vector<unsigned int>> level_dof_indices_host;
     std::vector<std::vector<std::pair<unsigned int, unsigned int>>>
       parent_child_connect;
 
-    std::vector<Table<2, unsigned int>> copy_indices_global_mine;
-    MGLevelObject<LinearAlgebra::distributed::Vector<Number>>
-      ghosted_level_vector;
+    // std::vector<Table<2, unsigned int>> copy_indices_global_mine;
+    // MGLevelObject<LinearAlgebra::distributed::Vector<Number>>
+    //   ghosted_level_vector;
     std::vector<std::vector<std::vector<unsigned short>>>
       dirichlet_indices_host;
 
@@ -499,7 +509,7 @@ namespace PSMF
       n_owned_level_cells,
       dirichlet_indices_host,
       weights_host,
-      copy_indices_global_mine,
+      copy_indices_global_mine_host,
       vector_partitioners);
 
     // unpack element info data
@@ -521,10 +531,10 @@ namespace PSMF
       }
 
     weights_on_refined.resize(n_levels - 1);
-    for (unsigned int l = 0; l < n_levels - 1; l++)
-      {
-        copy_to_device(weights_on_refined[l], weights_host[l]);
-      }
+    // for (unsigned int l = 0; l < n_levels - 1; l++)
+    //   {
+    //     copy_to_device(weights_on_refined[l], weights_host[l]);
+    //   }
 
     child_offset_in_parent.resize(n_levels - 1);
     std::vector<unsigned int> offsets;
@@ -584,33 +594,69 @@ namespace PSMF
     Assert((to_level >= 1) && (to_level <= level_dof_indices.size()),
            ExcIndexRange(to_level, 1, level_dof_indices.size() + 1));
 
-    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> src_with_bc(
-      src);
-    set_mg_constrained_dofs(src_with_bc, to_level - 1, 0);
+    const bool src_inplace = src.get_partitioner().get() ==
+                             this->vector_partitioners[to_level - 1].get();
+    if (src_inplace == false)
+      {
+        if (this->ghosted_level_vector[to_level - 1].get_partitioner().get() !=
+            this->vector_partitioners[to_level - 1].get())
+          this->ghosted_level_vector[to_level - 1].reinit(
+            this->vector_partitioners[to_level - 1]);
+        this->ghosted_level_vector[to_level - 1].copy_locally_owned_data_from(
+          src);
+      }
+
+    const bool dst_inplace =
+      dst.get_partitioner().get() == this->vector_partitioners[to_level].get();
+    if (dst_inplace == false)
+      {
+        if (this->ghosted_level_vector[to_level].get_partitioner().get() !=
+            this->vector_partitioners[to_level].get())
+          this->ghosted_level_vector[to_level].reinit(
+            this->vector_partitioners[to_level]);
+        AssertDimension(
+          this->ghosted_level_vector[to_level].locally_owned_size(),
+          dst.locally_owned_size());
+        this->ghosted_level_vector[to_level] = 0.;
+      }
+
+    const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+      &src_vec = src_inplace ? src : this->ghosted_level_vector[to_level - 1];
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst_vec =
+      dst_inplace ? dst : this->ghosted_level_vector[to_level];
+
+    src_vec.update_ghost_values();
 
     if (fe_degree == 1)
-      coarse_cell_loop<MGProlongateHelper, 1>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 1>(to_level, dst_vec, src_vec);
     else if (fe_degree == 2)
-      coarse_cell_loop<MGProlongateHelper, 2>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 2>(to_level, dst_vec, src_vec);
     else if (fe_degree == 3)
-      coarse_cell_loop<MGProlongateHelper, 3>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 3>(to_level, dst_vec, src_vec);
     else if (fe_degree == 4)
-      coarse_cell_loop<MGProlongateHelper, 4>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 4>(to_level, dst_vec, src_vec);
     else if (fe_degree == 5)
-      coarse_cell_loop<MGProlongateHelper, 5>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 5>(to_level, dst_vec, src_vec);
     else if (fe_degree == 6)
-      coarse_cell_loop<MGProlongateHelper, 6>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 6>(to_level, dst_vec, src_vec);
     else if (fe_degree == 7)
-      coarse_cell_loop<MGProlongateHelper, 7>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 7>(to_level, dst_vec, src_vec);
     else if (fe_degree == 8)
-      coarse_cell_loop<MGProlongateHelper, 8>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 8>(to_level, dst_vec, src_vec);
     else if (fe_degree == 9)
-      coarse_cell_loop<MGProlongateHelper, 9>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 9>(to_level, dst_vec, src_vec);
     else if (fe_degree == 10)
-      coarse_cell_loop<MGProlongateHelper, 10>(to_level, dst, src_with_bc);
+      coarse_cell_loop<MGProlongateHelper, 10>(to_level, dst_vec, src_vec);
     else
       AssertThrow(false,
                   ExcNotImplemented("Only degrees 1 through 10 implemented."));
+
+    dst_vec.compress(VectorOperation::add);
+    if (dst_inplace == false)
+      dst += dst_vec;
+
+    if (src_inplace == true)
+      src.zero_out_ghost_values();
   }
 
   template <int dim, typename Number>
@@ -624,37 +670,70 @@ namespace PSMF
     Assert((from_level >= 1) && (from_level <= level_dof_indices.size()),
            ExcIndexRange(from_level, 1, level_dof_indices.size() + 1));
 
-    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> increment;
-    increment.reinit(dst,
-                     false); // resize to correct size and initialize to 0
+    const bool src_inplace = src.get_partitioner().get() ==
+                             this->vector_partitioners[from_level].get();
+    if (src_inplace == false)
+      {
+        if (this->ghosted_level_vector[from_level].get_partitioner().get() !=
+            this->vector_partitioners[from_level].get())
+          this->ghosted_level_vector[from_level].reinit(
+            this->vector_partitioners[from_level]);
+        this->ghosted_level_vector[from_level].copy_locally_owned_data_from(
+          src);
+      }
+
+    const bool dst_inplace = dst.get_partitioner().get() ==
+                             this->vector_partitioners[from_level - 1].get();
+    if (dst_inplace == false)
+      {
+        if (this->ghosted_level_vector[from_level - 1]
+              .get_partitioner()
+              .get() != this->vector_partitioners[from_level - 1].get())
+          this->ghosted_level_vector[from_level - 1].reinit(
+            this->vector_partitioners[from_level - 1]);
+        AssertDimension(
+          this->ghosted_level_vector[from_level - 1].locally_owned_size(),
+          dst.locally_owned_size());
+        this->ghosted_level_vector[from_level - 1] = 0.;
+      }
+
+    const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+      &src_vec = src_inplace ? src : this->ghosted_level_vector[from_level];
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst_vec =
+      dst_inplace ? dst : this->ghosted_level_vector[from_level - 1];
+
+    src_vec.update_ghost_values();
 
     if (fe_degree == 1)
-      coarse_cell_loop<MGRestrictHelper, 1>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 1>(from_level, dst_vec, src_vec);
     else if (fe_degree == 2)
-      coarse_cell_loop<MGRestrictHelper, 2>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 2>(from_level, dst_vec, src_vec);
     else if (fe_degree == 3)
-      coarse_cell_loop<MGRestrictHelper, 3>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 3>(from_level, dst_vec, src_vec);
     else if (fe_degree == 4)
-      coarse_cell_loop<MGRestrictHelper, 4>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 4>(from_level, dst_vec, src_vec);
     else if (fe_degree == 5)
-      coarse_cell_loop<MGRestrictHelper, 5>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 5>(from_level, dst_vec, src_vec);
     else if (fe_degree == 6)
-      coarse_cell_loop<MGRestrictHelper, 6>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 6>(from_level, dst_vec, src_vec);
     else if (fe_degree == 7)
-      coarse_cell_loop<MGRestrictHelper, 7>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 7>(from_level, dst_vec, src_vec);
     else if (fe_degree == 8)
-      coarse_cell_loop<MGRestrictHelper, 8>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 8>(from_level, dst_vec, src_vec);
     else if (fe_degree == 9)
-      coarse_cell_loop<MGRestrictHelper, 9>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 9>(from_level, dst_vec, src_vec);
     else if (fe_degree == 10)
-      coarse_cell_loop<MGRestrictHelper, 10>(from_level, increment, src);
+      coarse_cell_loop<MGRestrictHelper, 10>(from_level, dst_vec, src_vec);
     else
       AssertThrow(false,
                   ExcNotImplemented("Only degrees 1 through 10 implemented."));
 
-    set_mg_constrained_dofs(increment, from_level - 1, 0);
+    dst_vec.compress(VectorOperation::add);
+    if (dst_inplace == false)
+      dst += dst_vec;
 
-    dst.add(1., increment);
+    if (src_inplace == true)
+      src.zero_out_ghost_values();
   }
 
   template <typename Number>
@@ -706,24 +785,55 @@ namespace PSMF
                      mg_dof.get_triangulation().n_global_levels());
     AssertIndexRange(dst.min_level(), dst.max_level() + 1);
 
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+         &this_ghosted_global_vector   = ghosted_global_vector;
+    auto &this_copy_indices            = copy_indices;
+    auto &this_copy_indices_level_mine = copy_indices_level_mine;
+
+
     for (unsigned int level = dst.min_level(); level <= dst.max_level();
          ++level)
-      {
-        dst[level].reinit(mg_dof.n_dofs(level));
-      }
+      if (dst[level].size() != mg_dof.n_dofs(level) ||
+          dst[level].locally_owned_size() !=
+            mg_dof.locally_owned_mg_dofs(level).n_elements())
+        {
+          // In case a ghosted level vector has been initialized, we can
+          // simply use that as a template for the vector partitioning. If
+          // not, we resort to the locally owned range of the dof handler.
+          if (level <= ghosted_level_vector.max_level() &&
+              ghosted_level_vector[level].size() == mg_dof.n_dofs(level))
+            dst[level].reinit(ghosted_level_vector[level], false);
+          else
+            dst[level].reinit(mg_dof.locally_owned_mg_dofs(level),
+                              mg_dof.get_communicator());
+        }
+      else if ((perform_plain_copy == false &&
+                perform_renumbered_plain_copy == false) ||
+               level != dst.max_level())
+        dst[level] = 0;
 
     if (perform_plain_copy)
       {
-        // if the finest multigrid level covers the whole domain (i.e., no
-        // adaptive refinement) and the numbering of the finest level DoFs and
-        // the global DoFs are the same, we can do a plain copy
-
-        AssertDimension(dst[dst.max_level()].size(), src.size());
+        // In this case, we can simply copy the local range.
+        AssertDimension(dst[dst.max_level()].locally_owned_size(),
+                        src.locally_owned_size());
 
         plain_copy<false>(dst[dst.max_level()], src);
 
         return;
       }
+    else if (perform_renumbered_plain_copy)
+      {
+      }
+
+
+    std::cout << "Warning! Non-plain copy encourted! \n";
+
+    // copy the source vector to the temporary vector that we hold for the
+    // purpose of data exchange
+    // this_ghosted_global_vector = src;
+    plain_copy<false>(this_ghosted_global_vector, src);
+    this_ghosted_global_vector.update_ghost_values();
 
     for (unsigned int level = dst.max_level() + 1; level != dst.min_level();)
       {
@@ -731,9 +841,16 @@ namespace PSMF
         auto &dst_level = dst[level];
 
         copy_with_indices(dst_level,
-                          src,
-                          copy_indices[level].level_indices,
-                          copy_indices[level].global_indices);
+                          this_ghosted_global_vector,
+                          this_copy_indices[level].level_indices,
+                          this_copy_indices[level].global_indices);
+
+        copy_with_indices(dst_level,
+                          this_ghosted_global_vector,
+                          this_copy_indices_level_mine[level].level_indices,
+                          this_copy_indices_level_mine[level].global_indices);
+
+        dst_level.compress(VectorOperation::insert);
       }
   }
 
@@ -753,22 +870,53 @@ namespace PSMF
 
     if (perform_plain_copy)
       {
-        AssertDimension(dst.size(), src[src.max_level()].size());
+        AssertDimension(dst.locally_owned_size(),
+                        src[src.max_level()].locally_owned_size());
         plain_copy<false>(dst, src[src.max_level()]);
         return;
       }
+    else if (perform_renumbered_plain_copy)
+      {
+      }
+
+
+    std::cout << "Warning! Non-plain copy encourted! \n";
 
     dst = 0;
     for (unsigned int level = src.min_level(); level <= src.max_level();
          ++level)
       {
-        const auto &src_level = src[level];
+        // the ghosted vector should already have the correct local size (but
+        // different parallel layout)
+        if (ghosted_level_vector[level].size() > 0)
+          AssertDimension(ghosted_level_vector[level].locally_owned_size(),
+                          src[level].locally_owned_size());
+
+        // the first time around, we copy the source vector to the temporary
+        // vector that we hold for the purpose of data exchange
+        LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+          &ghosted_vector = ghosted_level_vector[level];
+
+        if (ghosted_level_vector[level].size() > 0)
+          ghosted_vector = src[level];
+
+        const auto ghosted_vector_ptr =
+          (ghosted_level_vector[level].size() > 0) ? &ghosted_vector :
+                                                     &src[level];
+
+        ghosted_vector_ptr->update_ghost_values();
 
         copy_with_indices(dst,
-                          src_level,
+                          *ghosted_vector_ptr,
                           copy_indices[level].global_indices,
                           copy_indices[level].level_indices);
+
+        copy_with_indices(dst,
+                          *ghosted_vector_ptr,
+                          copy_indices_global_mine[level].global_indices,
+                          copy_indices_global_mine[level].level_indices);
       }
+    dst.compress(VectorOperation::insert);
   }
 
   template <int dim, typename Number>
@@ -780,31 +928,42 @@ namespace PSMF
     const MGLevelObject<
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>> &src) const
   {
+    (void)mg_dof;
     AssertIndexRange(src.max_level(),
                      mg_dof.get_triangulation().n_global_levels());
     AssertIndexRange(src.min_level(), src.max_level() + 1);
 
-    (void)mg_dof;
-
-    if (perform_plain_copy)
-      {
-        AssertDimension(dst.size(), src[src.max_level()].size());
-        plain_copy<true>(dst, src[src.max_level()]);
-        return;
-      }
-
-    auto temp = dst;
+    dst.zero_out_ghost_values();
     for (unsigned int level = src.min_level(); level <= src.max_level();
          ++level)
       {
-        const auto &src_level = src[level];
+        // the ghosted vector should already have the correct local size (but
+        // different parallel layout)
+        AssertDimension(ghosted_level_vector[level].locally_owned_size(),
+                        src[level].locally_owned_size());
 
-        copy_with_indices(temp,
-                          src_level,
-                          copy_indices[level].global_indices,
-                          copy_indices[level].level_indices);
+        // the first time around, we copy the source vector to the temporary
+        // vector that we hold for the purpose of data exchange
+        LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+          &ghosted_vector = ghosted_level_vector[level];
+        ghosted_vector    = src[level];
+        ghosted_vector.update_ghost_values();
+
+        copy_with_indices<Number2, Number, true>(
+          dst,
+          ghosted_vector,
+          copy_indices[level].global_indices,
+          copy_indices[level].level_indices);
+
+        copy_with_indices<Number2, Number, true>(
+          dst,
+          ghosted_vector,
+          copy_indices_global_mine[level].global_indices,
+          copy_indices_global_mine[level].level_indices);
       }
-    dst += temp;
+    dst.compress(VectorOperation::add);
+
+    std::cout << "Warning! Non-plain copy encourted! \n";
   }
 
   template <int dim, typename Number>
@@ -842,6 +1001,9 @@ namespace PSMF
   MGTransferCUDA<dim, Number, DoFLayout::DGQ>::fill_copy_indices(
     const DoFHandler<dim> &mg_dof)
   {
+    const MPI_Comm mpi_communicator = mg_dof.get_communicator();
+
+    // fill_internal
     std::vector<
       std::vector<std::pair<types::global_dof_index, types::global_dof_index>>>
       my_copy_indices;
@@ -860,43 +1022,110 @@ namespace PSMF
 
     const unsigned int nlevels = mg_dof.get_triangulation().n_global_levels();
 
+    IndexSet index_set(mg_dof.locally_owned_dofs().size());
+    std::vector<types::global_dof_index> accessed_indices;
+    ghosted_level_vector.resize(0, nlevels - 1);
+    std::vector<IndexSet> level_index_set(nlevels);
+    for (unsigned int l = 0; l < nlevels; ++l)
+      {
+        for (const auto &indices : my_copy_indices_level_mine[l])
+          accessed_indices.push_back(indices.first);
+        std::vector<types::global_dof_index> accessed_level_indices;
+        for (const auto &indices : my_copy_indices_global_mine[l])
+          accessed_level_indices.push_back(indices.second);
+        std::sort(accessed_level_indices.begin(), accessed_level_indices.end());
+        level_index_set[l].set_size(mg_dof.locally_owned_mg_dofs(l).size());
+        level_index_set[l].add_indices(accessed_level_indices.begin(),
+                                       accessed_level_indices.end());
+        level_index_set[l].compress();
+        ghosted_level_vector[l].reinit(mg_dof.locally_owned_mg_dofs(l),
+                                       level_index_set[l],
+                                       mpi_communicator);
+      }
+    std::sort(accessed_indices.begin(), accessed_indices.end());
+    index_set.add_indices(accessed_indices.begin(), accessed_indices.end());
+    index_set.compress();
+    ghosted_global_vector.reinit(mg_dof.locally_owned_dofs(),
+                                 index_set,
+                                 mpi_communicator);
+
+    // localize the copy indices for faster access. Since all access will be
+    // through the ghosted vector in 'data', we can use this (much faster)
+    // option
+    copy_indices.resize(nlevels);
+    copy_indices_level_mine.resize(nlevels);
+    copy_indices_global_mine.resize(nlevels);
+    copy_indices_global_mine_host.resize(nlevels);
     for (unsigned int level = 0; level < nlevels; ++level)
       {
-        Assert((my_copy_indices_global_mine[level].size() == 0) &&
-                 (my_copy_indices_level_mine[level].size() == 0),
-               ExcMessage("Only implemented for non-distributed case"));
-      }
+        const Utilities::MPI::Partitioner &global_partitioner =
+          *ghosted_global_vector.get_partitioner();
+        const Utilities::MPI::Partitioner &level_partitioner =
+          *ghosted_level_vector[level].get_partitioner();
 
-    copy_indices.resize(nlevels);
-    for (unsigned int i = 0; i < nlevels; ++i)
-      {
-        const unsigned int nmappings = my_copy_indices[i].size();
-        std::vector<int>   global_indices(nmappings);
-        std::vector<int>   level_indices(nmappings);
+        auto translate_indices =
+          [&](const std::vector<
+                std::pair<types::global_dof_index, types::global_dof_index>>
+                           &global_copy_indices,
+              IndexMapping &local_copy_indices) {
+            const unsigned int nmappings = global_copy_indices.size();
+            std::vector<int>   global_indices(nmappings);
+            std::vector<int>   level_indices(nmappings);
 
-        for (unsigned int j = 0; j < nmappings; ++j)
+            for (unsigned int j = 0; j < nmappings; ++j)
+              {
+                global_indices[j] = global_partitioner.global_to_local(
+                  global_copy_indices[j].first);
+                level_indices[j] = level_partitioner.global_to_local(
+                  global_copy_indices[j].second);
+              }
+
+            copy_to_device(local_copy_indices.global_indices, global_indices);
+            copy_to_device(local_copy_indices.level_indices, level_indices);
+          };
+
+        // owned-owned case
+        translate_indices(my_copy_indices[level], copy_indices[level]);
+
+        // remote-owned case
+        translate_indices(my_copy_indices_level_mine[level],
+                          copy_indices_level_mine[level]);
+
+        // owned-remote case
+        translate_indices(my_copy_indices_global_mine[level],
+                          copy_indices_global_mine[level]);
+
+        // copy_indices_global_mine_host
+        copy_indices_global_mine_host[level].reinit(
+          2, my_copy_indices_global_mine[level].size());
+        for (unsigned int i = 0; i < my_copy_indices_global_mine[level].size();
+             ++i)
           {
-            global_indices[j] = my_copy_indices[i][j].first;
-            level_indices[j]  = my_copy_indices[i][j].second;
+            copy_indices_global_mine_host[level](0, i) =
+              global_partitioner.global_to_local(
+                my_copy_indices_global_mine[level][i].first);
+            copy_indices_global_mine_host[level](1, i) =
+              level_partitioner.global_to_local(
+                my_copy_indices_global_mine[level][i].second);
           }
-
-        copy_to_device(copy_indices[i].global_indices, global_indices);
-        copy_to_device(copy_indices[i].level_indices, level_indices);
       }
 
-    // check if we can run a plain copy operation between the global DoFs and
-    // the finest level.
-    perform_plain_copy =
+    // Check if we can perform a cheaper "plain copy" (with or without
+    // renumbering) instead of having to translate individual entries
+    // using copy_indices*. This only works if a) we don't have to send
+    // or receive any DoFs and we have all locally owned DoFs in our
+    // copy_indices (so no adaptive refinement) and b) all processors
+    // agree on the choice (see below).
+    const bool my_perform_renumbered_plain_copy =
       (my_copy_indices.back().size() ==
        mg_dof.locally_owned_dofs().n_elements()) &&
-      (mg_dof.locally_owned_dofs().n_elements() ==
-       mg_dof.locally_owned_mg_dofs(nlevels - 1).n_elements());
+      (my_copy_indices_global_mine.back().size() == 0) &&
+      (my_copy_indices_level_mine.back().size() == 0);
 
-    if (perform_plain_copy)
+    bool my_perform_plain_copy = false;
+    if (my_perform_renumbered_plain_copy)
       {
-        AssertDimension(my_copy_indices_global_mine.back().size(), 0);
-        AssertDimension(my_copy_indices_level_mine.back().size(), 0);
-
+        my_perform_plain_copy = true;
         // check whether there is a renumbering of degrees of freedom on
         // either the finest level or the global dofs, which means that we
         // cannot apply a plain copy
@@ -904,9 +1133,23 @@ namespace PSMF
           if (my_copy_indices.back()[i].first !=
               my_copy_indices.back()[i].second)
             {
-              perform_plain_copy = false;
+              my_perform_plain_copy = false;
               break;
             }
+      }
+
+    // now do a global reduction over all processors to see what operation
+    // they can agree upon
+    perform_plain_copy =
+      Utilities::MPI::min(static_cast<int>(my_perform_plain_copy),
+                          mpi_communicator);
+    perform_renumbered_plain_copy =
+      Utilities::MPI::min(static_cast<int>(my_perform_renumbered_plain_copy),
+                          mpi_communicator);
+
+    // if we do a plain copy, no need to hold additional ghosted vectors
+    if (perform_renumbered_plain_copy)
+      {
       }
   }
 } // namespace PSMF
