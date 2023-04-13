@@ -239,7 +239,8 @@ namespace PSMF
     SharedMemData<dim, Number, true> shared_data(get_shared_data_ptr<Number>(),
                                                  patch_per_block,
                                                  n_dofs_1d,
-                                                 local_dim_padding);
+                                                 local_dim_padding,
+                                                 n_dofs_1d_padding);
 
     if (patch < gpu_data.n_patches)
       {
@@ -294,6 +295,105 @@ namespace PSMF
               local_patch * local_dim_padding +
               z * n_dofs_1d * n_dofs_1d_padding +
               threadIdx.y * n_dofs_1d_padding + local_tid_x;
+
+            const unsigned int global_index =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * (1 << dim)],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
+
+            atomicAdd(&dst[global_dof_indices],
+                      shared_data.local_dst[index_padding]);
+          }
+      }
+  }
+
+  template <int dim, int fe_degree, typename Number, LaplaceVariant laplace>
+  __global__ void
+  laplace_kernel_tensorcore_mma(
+    const Number                                                 *src,
+    Number                                                       *dst,
+    const typename LevelVertexPatch<dim, fe_degree, Number>::Data gpu_data)
+  {
+    constexpr unsigned int n_dofs_1d         = 2 * fe_degree + 2;
+    constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
+    constexpr unsigned int local_dim         = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int local_dim_padding =
+      Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
+    constexpr unsigned int n_dofs_z = dim == 2 ? 1 : n_dofs_1d;
+
+    const unsigned int patch_per_block = gpu_data.patch_per_block;
+    const unsigned int local_patch     = threadIdx.x / n_dofs_1d;
+    const unsigned int patch       = local_patch + patch_per_block * blockIdx.x;
+    const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
+
+    SharedMemData<dim, Number, true> shared_data(get_shared_data_ptr<Number>(),
+                                                 patch_per_block,
+                                                 n_dofs_1d,
+                                                 local_dim_padding,
+                                                 n_dofs_1d_padding);
+
+    if (patch < gpu_data.n_patches)
+      {
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            shared_data
+              .local_mass[(local_patch * dim + d) * n_dofs_1d *
+                              n_dofs_1d_padding +
+                            threadIdx.y * n_dofs_1d_padding + local_tid_x ^
+                          (Util::get_permute_base<fe_degree>(threadIdx.y, 0))] =
+              gpu_data.laplace_mass_1d[gpu_data.patch_type[patch * dim + d] *
+                                         n_dofs_1d * n_dofs_1d +
+                                       threadIdx.y * n_dofs_1d + local_tid_x];
+
+            shared_data.local_derivative
+              [(local_patch * dim + d) * n_dofs_1d * n_dofs_1d_padding +
+                 threadIdx.y * n_dofs_1d_padding + local_tid_x ^
+               (Util::get_permute_base<fe_degree>(threadIdx.y, 0))] =
+              gpu_data.laplace_stiff_1d[gpu_data.patch_type[patch * dim + d] *
+                                          n_dofs_1d * n_dofs_1d +
+                                        threadIdx.y * n_dofs_1d + local_tid_x];
+          }
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int index_padding =
+              local_patch * local_dim_padding +
+                z * n_dofs_1d * n_dofs_1d_padding +
+                threadIdx.y * n_dofs_1d_padding + local_tid_x ^
+              (Util::get_permute_base<fe_degree>(threadIdx.y, z));
+
+            const unsigned int global_index =
+              Util::compute_indices<dim, fe_degree>(
+                &gpu_data.first_dof[patch * (1 << dim)],
+                local_patch,
+                local_tid_x,
+                threadIdx.y,
+                z);
+
+            const unsigned int global_dof_indices =
+              gpu_data.global_to_local(global_index);
+
+            shared_data.local_src[index_padding] = src[global_dof_indices];
+
+            shared_data.local_dst[index_padding] = 0.;
+          }
+
+        evaluate_laplace<dim, fe_degree, Number, laplace>(local_patch,
+                                                          &shared_data);
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int index_padding =
+              local_patch * local_dim_padding +
+                z * n_dofs_1d * n_dofs_1d_padding +
+                threadIdx.y * n_dofs_1d_padding + local_tid_x ^
+              (Util::get_permute_base<fe_degree>(threadIdx.y, z));
 
             const unsigned int global_index =
               Util::compute_indices<dim, fe_degree>(

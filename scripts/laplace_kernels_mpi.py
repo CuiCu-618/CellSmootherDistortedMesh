@@ -46,7 +46,7 @@ for i in range(0,7):
 
 csfont = {'fontname':'Times New Roman', 'size': 18}
 plt.title('Double Precision',**csfont)
-# plt.yscale('log')
+plt.yscale('log')
 plt.grid(linestyle='dashed',axis='y')
 plt.xlabel('GPUs',**csfont)
 plt.ylabel('s / DoF',**csfont)
@@ -68,7 +68,7 @@ for i in range(0,7):
 
 csfont = {'fontname':'Times New Roman', 'size': 18}
 plt.title('Single Precision',**csfont)
-# plt.yscale('log')
+plt.yscale('log')
 plt.grid(linestyle='dashed',axis='y')
 plt.xlabel('GPUs',**csfont)
 plt.ylabel('s / DoF',**csfont)

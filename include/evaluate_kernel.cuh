@@ -238,10 +238,12 @@ namespace PSMF
       for (unsigned int k = 0; k < n_dofs_1d; ++k)
         {
           const unsigned int shape_idx =
-            (direction == 0) ? (col * n_dofs_1d + k) : (row * n_dofs_1d + k);
+            (direction == 0) ? (col * n_dofs_1d + (k + col) % n_dofs_1d) :
+                               (row * n_dofs_1d + k);
 
           const unsigned int source_idx =
-            (direction == 0) ? (row * n_dofs_1d + k) : (k * n_dofs_1d + col);
+            (direction == 0) ? (row * n_dofs_1d + (k + col) % n_dofs_1d) :
+                               (k * n_dofs_1d + col);
 
           pval += shape_data[shape_idx] * in[source_idx];
         }
@@ -299,12 +301,13 @@ namespace PSMF
           for (unsigned int k = 0; k < n_dofs_1d; ++k)
             {
               const unsigned int shape_idx =
-                (direction == 0) ? col * n_dofs_1d + k :
+                (direction == 0) ? col * n_dofs_1d + (k + col) % n_dofs_1d :
                 (direction == 1) ? row * n_dofs_1d + k :
                                    z * n_dofs_1d + k;
 
               const unsigned int source_idx =
-                (direction == 0) ? (row * n_dofs_1d + k + z * stride) :
+                (direction == 0) ?
+                  (row * n_dofs_1d + (k + col) % n_dofs_1d + z * stride) :
                 (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
                                    (row * n_dofs_1d + col + k * stride);
 
@@ -505,46 +508,116 @@ namespace PSMF
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
+      constexpr unsigned int skew_double       = Util::padding;
+      constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + skew_double;
+
       const unsigned int tid    = (threadIdx.y * 8 + threadIdx.x) % 32;
       const unsigned int warpId = (threadIdx.y * 8 + threadIdx.x) / 32;
 
       const unsigned int row = tid / 4;
       const unsigned int col = tid % 4;
 
-      constexpr unsigned int stride = (direction == 0) ? n_dofs_1d : 1;
-      constexpr unsigned int offset = n_dofs_1d * n_dofs_1d;
+      constexpr unsigned int stride = 1;
+      constexpr unsigned int offset = n_dofs_1d * n_dofs_1d_padding;
 
-      for (unsigned int cycle = 0; cycle < 2; ++cycle)
+      if (direction == 0)
         {
-          const unsigned int a_idx = row * n_dofs_1d + col + cycle * 4;
-          auto               a0 = sub ? -shape_data[a_idx] : shape_data[a_idx];
-
-          for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+          for (unsigned int cycle = 0; cycle < 2; ++cycle)
             {
               const unsigned int b_idx =
-                (direction == 0) ? row * n_dofs_1d + col + cycle * 4 +
-                                     (z * 2 + warpId) * offset :
-                (direction == 1) ? (col + cycle * 4) * n_dofs_1d + row +
-                                     (z * 2 + warpId) * offset :
-                                   (z * 2 + warpId) * n_dofs_1d + row +
-                                     (col + cycle * 4) * offset;
-              const unsigned int cd_idx =
-                (direction == 0) ?
-                  (2 * col) * n_dofs_1d + row + (z * 2 + warpId) * offset :
-                (direction == 1) ?
-                  row * n_dofs_1d + 2 * col + (z * 2 + warpId) * offset :
-                  (z * 2 + warpId) * n_dofs_1d + 2 * col + row * offset;
+                (col + cycle * 4) * n_dofs_1d_padding + row ^
+                (Util::get_permute_base<3>(col, 0));
+              auto b0 = shape_data[b_idx];
 
-              auto  b0 = in[b_idx];
-              auto &d0 = out[cd_idx];
-              auto &d1 = out[cd_idx + stride];
-              auto  c0 = (add || sub || cycle == 1) ? out[cd_idx] : 0;
-              auto  c1 = (add || sub || cycle == 1) ? out[cd_idx + stride] : 0;
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  const unsigned int a_idx =
+                    row * n_dofs_1d_padding + (col + cycle * 4) ^
+                    (Util::get_permute_base<3>(row, z * 2 + warpId)) +
+                      (z * 2 + warpId) * offset;
+                  const unsigned int cd_idx =
+                    row * n_dofs_1d_padding + (2 * col) ^
+                    (Util::get_permute_base<3>(row, z * 2 + warpId)) +
+                      (z * 2 + warpId) * offset;
 
-              asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
-                  "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
-                  : "=d"(d0), "=d"(d1)
-                  : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
+                  auto  a0 = in[a_idx];
+                  auto &d0 = out[cd_idx];
+                  auto &d1 = out[cd_idx + stride];
+                  auto  c0 = (cycle == 1) ? out[cd_idx] : 0;
+                  auto  c1 = (cycle == 1) ? out[cd_idx + stride] : 0;
+
+                  asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                      "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                      : "=d"(d0), "=d"(d1)
+                      : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
+                }
+            }
+        }
+      else if (direction == 1)
+        {
+          for (unsigned int cycle = 0; cycle < 2; ++cycle)
+            {
+              const unsigned int a_idx =
+                row * n_dofs_1d_padding + (col + cycle * 4) ^
+                (Util::get_permute_base<3>(row, 0));
+              auto a0 = shape_data[a_idx];
+
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  const unsigned int b_idx =
+                    (col + cycle * 4) * n_dofs_1d_padding + row ^
+                    (Util::get_permute_base<3>(col, z * 2 + warpId)) +
+                      (z * 2 + warpId) * offset;
+                  const unsigned int cd_idx =
+                    row * n_dofs_1d_padding + (2 * col) ^
+                    (Util::get_permute_base<3>(row, z * 2 + warpId)) +
+                      (z * 2 + warpId) * offset;
+
+                  auto  b0 = in[b_idx];
+                  auto &d0 = out[cd_idx];
+                  auto &d1 = out[cd_idx + stride];
+                  auto  c0 = (add || cycle == 1) ? out[cd_idx] : 0;
+                  auto  c1 = (add || cycle == 1) ? out[cd_idx + stride] : 0;
+
+                  asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                      "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                      : "=d"(d0), "=d"(d1)
+                      : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
+                }
+            }
+        }
+      else if (direction == 2)
+        {
+          for (unsigned int cycle = 0; cycle < 2; ++cycle)
+            {
+              const unsigned int a_idx =
+                row * n_dofs_1d_padding + (col + cycle * 4) ^
+                (Util::get_permute_base<3>(row, 0));
+              auto a0 = sub ? -shape_data[a_idx] : shape_data[a_idx];
+
+              for (unsigned int z = 0; z < n_dofs_1d / 2; ++z)
+                {
+                  const unsigned int b_idx =
+                    (z * 2 + warpId) * n_dofs_1d_padding + row ^
+                    (Util::get_permute_base<3>(z * 2 + warpId, col)) +
+                      (col + cycle * 4) * offset;
+                  const unsigned int cd_idx =
+                    (z * 2 + warpId) * n_dofs_1d_padding + (2 * col) ^
+                    (Util::get_permute_base<3>(z * 2 + warpId, row)) +
+                      row * offset;
+
+                  auto  b0 = in[b_idx];
+                  auto &d0 = out[cd_idx];
+                  auto &d1 = out[cd_idx + stride];
+                  auto  c0 = (add || sub || cycle == 1) ? out[cd_idx] : 0;
+                  auto  c1 =
+                    (add || sub || cycle == 1) ? out[cd_idx + stride] : 0;
+
+                  asm("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                      "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                      : "=d"(d0), "=d"(d1)
+                      : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
+                }
             }
         }
     }
@@ -784,7 +857,7 @@ namespace PSMF
               8 + skew_double,
               wmma::mem_row_major);
         }
-      else
+      else if (direction == 2)
         {
           constexpr int n_dofs_1d_padding = n_dofs_1d + skew_double;
           constexpr int stride            = n_dofs_1d * n_dofs_1d_padding;
@@ -1179,21 +1252,23 @@ namespace PSMF
               wmma::load_matrix_sync(b_frag,
                                      &shape_data[i * 8],
                                      16 + skew_double);
-// #pragma unroll
-//               for (int t = 0; t < a_frag.num_elements; t++)
-//                 {
-//                   a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
-//                 }
+              // #pragma unroll
+              //               for (int t = 0; t < a_frag.num_elements; t++)
+              //                 {
+              //                   a_frag.x[t] =
+              //                   wmma::__float_to_tf32(a_frag.x[t]);
+              //                 }
 
               wmma::load_matrix_sync(
                 a_frag,
                 &in[warpId * 16 * (16 + skew_double) + i * 8],
                 16 + skew_double);
-// #pragma unroll
-//               for (int t = 0; t < b_frag.num_elements; t++)
-//                 {
-//                   b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
-//                 }
+              // #pragma unroll
+              //               for (int t = 0; t < b_frag.num_elements; t++)
+              //                 {
+              //                   b_frag.x[t] =
+              //                   wmma::__float_to_tf32(b_frag.x[t]);
+              //                 }
 
               wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
@@ -1330,22 +1405,25 @@ namespace PSMF
               wmma::load_matrix_sync(b_frag,
                                      &shape_data[i * 8],
                                      16 + skew_double);
-// #pragma unroll
-//               for (int t = 0; t < a_frag.num_elements; t++)
-//                 {
-//                   a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
-//                 }
+              // #pragma unroll
+              //               for (int t = 0; t < a_frag.num_elements; t++)
+              //                 {
+              //                   a_frag.x[t] =
+              //                   wmma::__float_to_tf32(a_frag.x[t]);
+              //                 }
               for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
                 {
                   wmma::load_matrix_sync(
                     a_frag,
                     &in[(z * 8 + warpId) * 16 * (16 + skew_double) + i * 8],
                     16 + skew_double);
-// #pragma unroll
-//                   for (int t = 0; t < b_frag.num_elements; t++)
-//                     {
-//                       b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
-//                     }
+                  // #pragma unroll
+                  //                   for (int t = 0; t < b_frag.num_elements;
+                  //                   t++)
+                  //                     {
+                  //                       b_frag.x[t] =
+                  //                       wmma::__float_to_tf32(b_frag.x[t]);
+                  //                     }
 
                   wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
                 }
@@ -1398,11 +1476,12 @@ namespace PSMF
               wmma::load_matrix_sync(a_frag,
                                      &shape_data[i * 8],
                                      16 + skew_double);
-// #pragma unroll
-//               for (int t = 0; t < a_frag.num_elements; t++)
-//                 {
-//                   a_frag.x[t] = wmma::__float_to_tf32(a_frag.x[t]);
-//                 }
+              // #pragma unroll
+              //               for (int t = 0; t < a_frag.num_elements; t++)
+              //                 {
+              //                   a_frag.x[t] =
+              //                   wmma::__float_to_tf32(a_frag.x[t]);
+              //                 }
               for (unsigned int z = 0; z < n_dofs_1d / 8; ++z)
                 {
                   wmma::load_matrix_sync(
@@ -1410,11 +1489,13 @@ namespace PSMF
                     &in[(z * 8 + warpId) * 16 * (16 + skew_double) +
                         i * 8 * (16 + skew_double)],
                     16 + skew_double);
-// #pragma unroll
-//                   for (int t = 0; t < b_frag.num_elements; t++)
-//                     {
-//                       b_frag.x[t] = wmma::__float_to_tf32(b_frag.x[t]);
-//                     }
+                  // #pragma unroll
+                  //                   for (int t = 0; t < b_frag.num_elements;
+                  //                   t++)
+                  //                     {
+                  //                       b_frag.x[t] =
+                  //                       wmma::__float_to_tf32(b_frag.x[t]);
+                  //                     }
                   wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
                 }
             }
@@ -2093,14 +2174,17 @@ namespace PSMF
             {
               const unsigned int shape_idx =
                 contract_over_rows ?
-                  ((direction == 0) ? k * n_dofs_1d_i + col :
-                                      k * n_dofs_1d_i + row) :
-                  ((direction == 0) ? col * n_dofs_1d_i + k :
-                                      row * n_dofs_1d_i + k);
+                  ((direction == 0) ?
+                     ((k + col) % n_dofs_1d_i) * n_dofs_1d_i + col :
+                     k * n_dofs_1d_i + row) :
+                  ((direction == 0) ?
+                     col * n_dofs_1d_i + (k + col) % n_dofs_1d_i :
+                     row * n_dofs_1d_i + k);
 
-              const unsigned int source_idx = (direction == 0) ?
-                                                (row * n_dofs_1d_i + k) :
-                                                (k * n_dofs_1d_i + col);
+              const unsigned int source_idx =
+                (direction == 0) ?
+                  (row * n_dofs_1d_i + (k + col) % n_dofs_1d_i) :
+                  (k * n_dofs_1d_i + col);
 
               pval += shape_data[shape_idx] * in[source_idx];
             }
@@ -2181,15 +2265,18 @@ namespace PSMF
               {
                 const unsigned int shape_idx =
                   contract_over_rows ?
-                    ((direction == 0) ? k * n_dofs_1d_i + col :
+                    ((direction == 0) ?
+                       ((k + col) % n_dofs_1d_i) * n_dofs_1d_i + col :
                      (direction == 1) ? k * n_dofs_1d_i + row :
                                         k * n_dofs_1d_i + z) :
-                    ((direction == 0) ? col * n_dofs_1d_i + k :
+                    ((direction == 0) ?
+                       col * n_dofs_1d_i + (k + col) % n_dofs_1d_i :
                      (direction == 1) ? row * n_dofs_1d_i + k :
                                         z * n_dofs_1d_i + k);
 
                 const unsigned int source_idx =
-                  (direction == 0) ? (row * n_dofs_1d_i + k + z * stride) :
+                  (direction == 0) ?
+                    (row * n_dofs_1d_i + (k + col) % n_dofs_1d_i + z * stride) :
                   (direction == 1) ? (k * n_dofs_1d_i + col + z * stride) :
                                      (row * n_dofs_1d_i + col + k * stride);
 
@@ -2222,18 +2309,22 @@ namespace PSMF
   evaluate_laplace(const unsigned int                local_patch,
                    SharedMemData<dim, Number, true> *shared_data)
   {
-    constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int n_dofs_1d         = 2 * fe_degree + 2;
+    constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
+    constexpr unsigned int local_dim         = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int local_dim_padding =
+      Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
 
     TPEvaluatorLaplace<laplace, Number, n_dofs_1d, dim> eval;
     __syncthreads();
 
-    eval.vmult(
-      &shared_data->local_dst[local_patch * local_dim],
-      &shared_data->local_src[local_patch * local_dim],
-      &shared_data->local_mass[local_patch * n_dofs_1d * n_dofs_1d * dim],
-      &shared_data->local_derivative[local_patch * n_dofs_1d * n_dofs_1d * dim],
-      &shared_data->tmp[local_patch * local_dim * (dim - 1)]);
+    eval.vmult(&shared_data->local_dst[local_patch * local_dim_padding],
+               &shared_data->local_src[local_patch * local_dim_padding],
+               &shared_data->local_mass[local_patch * n_dofs_1d *
+                                        n_dofs_1d_padding * dim],
+               &shared_data->local_derivative[local_patch * n_dofs_1d *
+                                              n_dofs_1d_padding * dim],
+               &shared_data->tmp[local_patch * local_dim_padding * (dim - 1)]);
     __syncthreads();
   }
 

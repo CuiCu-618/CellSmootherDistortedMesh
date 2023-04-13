@@ -102,6 +102,23 @@ namespace Util
     return first_dofs[cell] + local_cell_tid;
   }
 
+  template <int degree>
+  inline __device__ unsigned int
+  get_permute_base(const unsigned int, const unsigned int)
+  {
+    return 0;
+  }
+
+  template <>
+  inline __device__ unsigned int
+  get_permute_base<3>(const unsigned int row, const unsigned int z)
+  {
+    //  If n is a power of 2, (i % n) is equivalent to (i & (n-1));
+    unsigned int base1 = (row & 3) < 2 ? 0 : 4;
+    unsigned int base2 = (z & 3) * 2;
+    return base1 ^ base2;
+  }
+
 } // namespace Util
 
 #endif // UTILITIES_CUH

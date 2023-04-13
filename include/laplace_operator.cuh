@@ -134,14 +134,18 @@ namespace PSMF
     {
       shared_mem = 0;
 
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
+      constexpr unsigned int local_dim_padding =
+        Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
+
       // local_src, local_dst
-      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      shared_mem += 2 * patch_per_block * local_dim_padding * sizeof(Number);
       // local_mass, local_derivative
-      shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
+      shared_mem += 2 * patch_per_block * n_dofs_1d * n_dofs_1d_padding * 3 *
+                    sizeof(Number);
       // temp
-      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+      shared_mem +=
+        (dim - 1) * patch_per_block * local_dim_padding * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
         laplace_kernel_tensorcore<dim,
@@ -187,20 +191,24 @@ namespace PSMF
     {
       shared_mem = 0;
 
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+      constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
+      constexpr unsigned int local_dim_padding =
+        Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
+
       // local_src, local_dst
-      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+      shared_mem += 2 * patch_per_block * local_dim_padding * sizeof(Number);
       // local_mass, local_derivative
-      shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
+      shared_mem += 2 * patch_per_block * n_dofs_1d * n_dofs_1d_padding * 3 *
+                    sizeof(Number);
       // temp
-      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
+      shared_mem +=
+        (dim - 1) * patch_per_block * local_dim_padding * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_tensorcore<dim,
-                                  fe_degree,
-                                  Number,
-                                  LaplaceVariant::TensorCoreMMA>,
+        laplace_kernel_tensorcore_mma<dim,
+                                      fe_degree,
+                                      Number,
+                                      LaplaceVariant::TensorCoreMMA>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
@@ -214,10 +222,10 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      laplace_kernel_tensorcore<dim,
-                                fe_degree,
-                                Number,
-                                LaplaceVariant::TensorCoreMMA>
+      laplace_kernel_tensorcore_mma<dim,
+                                    fe_degree,
+                                    Number,
+                                    LaplaceVariant::TensorCoreMMA>
         <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
                                                       dst.get_values(),
                                                       gpu_data);

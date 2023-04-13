@@ -649,16 +649,20 @@ namespace PSMF
     SharedMemData(Number      *data,
                   unsigned int n_buff,
                   unsigned int n_dofs_1d,
-                  unsigned int local_dim)
+                  unsigned int local_dim,
+                  unsigned int n_dofs_1d_padding = 0)
     {
       constexpr unsigned int n = is_laplace ? 3 : 1;
+      n_dofs_1d_padding =
+        n_dofs_1d_padding == 0 ? n_dofs_1d : n_dofs_1d_padding;
 
       local_src = data;
       local_dst = local_src + n_buff * local_dim;
 
-      local_mass       = local_dst + n_buff * local_dim;
-      local_derivative = local_mass + n_buff * n_dofs_1d * n_dofs_1d * n;
-      tmp              = local_derivative + n_buff * n_dofs_1d * n_dofs_1d * n;
+      local_mass = local_dst + n_buff * local_dim;
+      local_derivative =
+        local_mass + n_buff * n_dofs_1d * n_dofs_1d_padding * n;
+      tmp = local_derivative + n_buff * n_dofs_1d * n_dofs_1d_padding * n;
     }
 
 
