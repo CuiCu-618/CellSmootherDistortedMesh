@@ -685,6 +685,20 @@ namespace PSMF
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
+    std::array<unsigned int, 8 * 8 * 8> numbering2_host;
+    for (unsigned int i = 0; i < 8; ++i)
+      for (unsigned int j = 0; j < 8; ++j)
+        for (unsigned int k = 0; k < 8; ++k)
+          numbering2_host[i * 8 * 8 + j * 8 + k] = j * 8 * 8 + i * 8 + k;
+
+    error_code =
+      cudaMemcpyToSymbol(numbering2,
+                         numbering2_host.data(),
+                         numbering2_host.size() * sizeof(unsigned int),
+                         0,
+                         cudaMemcpyHostToDevice);
+    AssertCuda(error_code);
+
     constexpr unsigned n_dofs_2d = n_dofs_1d * n_dofs_1d;
 
     alloc_arrays(&eigenvalues, n_dofs_1d);
