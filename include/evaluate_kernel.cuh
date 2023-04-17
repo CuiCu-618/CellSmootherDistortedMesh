@@ -229,6 +229,8 @@ namespace PSMF
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
+      constexpr int multiple = Util::calculate_multiple<n_dofs_1d, 16>();
+
       const unsigned int row = threadIdx.y;
       const unsigned int col = threadIdx.x % n_dofs_1d;
 
@@ -238,12 +240,14 @@ namespace PSMF
       for (unsigned int k = 0; k < n_dofs_1d; ++k)
         {
           const unsigned int shape_idx =
-            (direction == 0) ? (col * n_dofs_1d + (k + col) % n_dofs_1d) :
-                               (row * n_dofs_1d + k);
+            (direction == 0) ?
+              (col * n_dofs_1d + (k + col / multiple) % n_dofs_1d) :
+              (row * n_dofs_1d + k);
 
           const unsigned int source_idx =
-            (direction == 0) ? (row * n_dofs_1d + (k + col) % n_dofs_1d) :
-                               (k * n_dofs_1d + col);
+            (direction == 0) ?
+              (row * n_dofs_1d + (k + col / multiple) % n_dofs_1d) :
+              (k * n_dofs_1d + col);
 
           pval += shape_data[shape_idx] * in[source_idx];
         }
@@ -287,7 +291,8 @@ namespace PSMF
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr int stride = n_dofs_1d * n_dofs_1d;
+      constexpr int multiple = Util::calculate_multiple<n_dofs_1d, 16>();
+      constexpr int stride   = n_dofs_1d * n_dofs_1d;
 
       const unsigned int row = threadIdx.y;
       const unsigned int col = threadIdx.x % n_dofs_1d;
@@ -301,16 +306,17 @@ namespace PSMF
           for (unsigned int k = 0; k < n_dofs_1d; ++k)
             {
               const unsigned int shape_idx =
-                (direction == 0) ? col * n_dofs_1d + (k + col) % n_dofs_1d :
+                (direction == 0) ?
+                  col * n_dofs_1d + (k + col / multiple) % n_dofs_1d :
                 (direction == 1) ? row * n_dofs_1d + k :
                                    z * n_dofs_1d + k;
 
               const unsigned int source_idx =
                 (direction == 0) ?
-                  (row * n_dofs_1d + (k + col) % n_dofs_1d + z * stride) :
+                  (row * n_dofs_1d + (k + col / multiple) % n_dofs_1d +
+                   z * stride) :
                 (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
                                    (row * n_dofs_1d + col + k * stride);
-
 
               pval[z] += shape_data[shape_idx] * in[source_idx];
             }
@@ -2157,7 +2163,12 @@ namespace PSMF
     apply(const Number *shape_data, const Number *in, Number *out)
     {
       constexpr unsigned int n_dofs_1d_i = n_dofs_1d - 2;
-      const unsigned int     linear_tid =
+      
+      constexpr int multiple = contract_over_rows ?
+                                 n_dofs_1d_i :
+                                 Util::calculate_multiple<n_dofs_1d_i, 16>();
+
+      const unsigned int linear_tid =
         threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
       const unsigned int row = linear_tid / n_dofs_1d_i;
@@ -2175,15 +2186,15 @@ namespace PSMF
               const unsigned int shape_idx =
                 contract_over_rows ?
                   ((direction == 0) ?
-                     ((k + col) % n_dofs_1d_i) * n_dofs_1d_i + col :
+                     ((k + col / multiple) % n_dofs_1d_i) * n_dofs_1d_i + col :
                      k * n_dofs_1d_i + row) :
                   ((direction == 0) ?
-                     col * n_dofs_1d_i + (k + col) % n_dofs_1d_i :
+                     col * n_dofs_1d_i + (k + col / multiple) % n_dofs_1d_i :
                      row * n_dofs_1d_i + k);
 
               const unsigned int source_idx =
                 (direction == 0) ?
-                  (row * n_dofs_1d_i + (k + col) % n_dofs_1d_i) :
+                  (row * n_dofs_1d_i + (k + col / multiple) % n_dofs_1d_i) :
                   (k * n_dofs_1d_i + col);
 
               pval += shape_data[shape_idx] * in[source_idx];
@@ -2247,7 +2258,12 @@ namespace PSMF
     {
       constexpr unsigned int stride      = n_dofs_1d * n_dofs_1d;
       constexpr unsigned int n_dofs_1d_i = n_dofs_1d - 2;
-      const unsigned int     linear_tid =
+
+      constexpr int multiple = contract_over_rows ?
+                                 n_dofs_1d_i :
+                                 Util::calculate_multiple<n_dofs_1d_i, 16>();
+
+      const unsigned int linear_tid =
         threadIdx.x % n_dofs_1d + threadIdx.y * n_dofs_1d;
 
       const unsigned int row = linear_tid / n_dofs_1d_i;
@@ -2266,17 +2282,19 @@ namespace PSMF
                 const unsigned int shape_idx =
                   contract_over_rows ?
                     ((direction == 0) ?
-                       ((k + col) % n_dofs_1d_i) * n_dofs_1d_i + col :
+                       ((k + col / multiple) % n_dofs_1d_i) * n_dofs_1d_i +
+                         col :
                      (direction == 1) ? k * n_dofs_1d_i + row :
                                         k * n_dofs_1d_i + z) :
                     ((direction == 0) ?
-                       col * n_dofs_1d_i + (k + col) % n_dofs_1d_i :
+                       col * n_dofs_1d_i + (k + col / multiple) % n_dofs_1d_i :
                      (direction == 1) ? row * n_dofs_1d_i + k :
                                         z * n_dofs_1d_i + k);
 
                 const unsigned int source_idx =
                   (direction == 0) ?
-                    (row * n_dofs_1d_i + (k + col) % n_dofs_1d_i + z * stride) :
+                    (row * n_dofs_1d_i + (k + col / multiple) % n_dofs_1d_i +
+                     z * stride) :
                   (direction == 1) ? (k * n_dofs_1d_i + col + z * stride) :
                                      (row * n_dofs_1d_i + col + k * stride);
 

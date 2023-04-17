@@ -146,6 +146,8 @@ namespace PSMF
     first_dof_host.shrink_to_fit();
     h_to_l_host.shrink_to_fit();
     l_to_h_host.shrink_to_fit();
+
+    AssertCuda(cudaStreamDestroy(stream));
   }
 
   template <int dim, int fe_degree, typename Number>

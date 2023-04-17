@@ -119,6 +119,33 @@ namespace Util
     return base1 ^ base2;
   }
 
+  // Function to calculate GCD of two numbers
+  __device__ constexpr unsigned int
+  gcd(unsigned int a, unsigned int b)
+  {
+    if (b == 0)
+      return a;
+    return gcd(b, a % b);
+  }
+
+  // Recursive template function to calculate LCM of two numbers
+  template <int a, int b>
+  struct LCM
+  {
+    static constexpr unsigned int value = (a * b) / gcd(a, b);
+  };
+
+  // Function to calculate the multiple of a number
+  template <int n, int constant>
+  __device__ constexpr unsigned int
+  calculate_multiple()
+  {
+    // Calculate the multiple of n
+    constexpr unsigned int multiple = LCM<n, constant>::value / n;
+
+    return multiple;
+  }
+
 } // namespace Util
 
 #endif // UTILITIES_CUH

@@ -726,8 +726,9 @@ namespace PSMF
   }
 
   /**
-  * Renumbering indices for vectors of tensor-dimension 2 so that wmma can be applied.
-  */
+   * Renumbering indices for vectors of tensor-dimension 2 so that wmma can be
+   * applied.
+   */
   __constant__ unsigned int numbering2[8 * 8 * 8];
 
 } // namespace PSMF

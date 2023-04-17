@@ -391,9 +391,41 @@ namespace Step64
     using LA = PSMF::LaplaceVariant;
     using SM = PSMF::SmootherVariant;
 
-    do_solve<CT::LAPLACE_TYPE_[0], CT::SMOOTH_VMULT_[0], CT::SMOOTH_INV_[0]>(
-      0, 0, 0, call_count);
+    // do_solve<CT::LAPLACE_TYPE_[0], CT::SMOOTH_VMULT_[0], CT::SMOOTH_INV_[0]>(
+    //   0, 0, 0, call_count);
 
+    for (unsigned int k = 0; k < CT::SMOOTH_INV_.size(); ++k)
+      {
+        switch (CT::SMOOTH_INV_[k])
+          {
+            case PSMF::SmootherVariant::GLOBAL:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::GLOBAL>(0, 0, k, call_count);
+                break;
+              }
+            case PSMF::SmootherVariant::FUSED_L:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::FUSED_L>(0, 0, k, call_count);
+                break;
+              }
+            case PSMF::SmootherVariant::ConflictFree:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::ConflictFree>(0,
+                                                              0,
+                                                              k,
+                                                              call_count);
+                break;
+              }
+            default:
+              AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
+          }
+      }
     // for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
     //   for (unsigned int j = 0; j < CT::SMOOTH_VMULT_.size(); ++j)
     //     for (unsigned int i = 0; i < CT::SMOOTH_INV_.size(); ++i)
