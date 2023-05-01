@@ -98,7 +98,7 @@ def parse_args():
     parser.add_argument('-SMI','--smooth_inv',
                         default='F',
                         nargs='+',
-                        choices=['GLOBAL','FUSED_L','ConflictFree','TensorCore'],
+                        choices=['GLOBAL','FUSED_L','ConflictFree','TensorCore', 'ExactRes'],
                         help="variant of the Schwarz smoother inverse operator"
     )
     parser.add_argument('-G','--granularity',
@@ -207,6 +207,9 @@ class Parameter:
             elif kernel.endswith('Core'):
                 kernel_str += r'PSMF::SmootherVariant::TensorCore, '
                 count += 1    
+            elif kernel.endswith('Res'):
+                kernel_str += r'PSMF::SmootherVariant::ExactRes, '
+                count += 1     
         self.smooth_inv = ('constexpr std::array<PSMF::SmootherVariant, ' + str(count) + '>', kernel_str + '}')
 
     def granularity_prm(self,variant):

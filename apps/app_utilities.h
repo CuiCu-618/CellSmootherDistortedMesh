@@ -62,7 +62,7 @@
     return name##Strings[static_cast<int>(value)]; \
   }
 
-SMO_MACRO(Smoother, GLOBAL, FUSED_L, ConflictFree, TensorCore);
+LA_MACRO(Smoother, GLOBAL, FUSED_L, ConflictFree, TensorCore, ExactRes);
 LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);

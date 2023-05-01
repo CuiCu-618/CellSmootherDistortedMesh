@@ -422,6 +422,13 @@ namespace Step64
                                                               call_count);
                 break;
               }
+            case PSMF::SmootherVariant::ExactRes:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::ExactRes>(0, 0, k, call_count);
+                break;
+              }
             default:
               AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
           }

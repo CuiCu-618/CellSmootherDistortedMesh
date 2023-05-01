@@ -85,7 +85,12 @@ namespace PSMF
      * Using the Warp Matrix Multiply and Accumulate (WMMA) API introduced in
      * CUDA 11.0.
      */
-    TensorCore
+    TensorCore,
+
+    /**
+     * Compute the residual b - Ax exactly with FE_DGQHermite element.
+     */
+    ExactRes
   };
 
 

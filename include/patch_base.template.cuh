@@ -703,8 +703,8 @@ namespace PSMF
 
     constexpr unsigned n_dofs_2d = n_dofs_1d * n_dofs_1d;
 
-    alloc_arrays(&eigenvalues, n_dofs_1d);
-    alloc_arrays(&eigenvectors, n_dofs_2d);
+    alloc_arrays(&eigenvalues, n_dofs_1d * 2);
+    alloc_arrays(&eigenvectors, n_dofs_2d * 2);
     alloc_arrays(&smooth_mass_1d, n_dofs_2d);
     alloc_arrays(&smooth_stiff_1d, n_dofs_2d);
     alloc_arrays(&laplace_mass_1d, n_dofs_2d * 3);
@@ -1038,24 +1038,48 @@ namespace PSMF
             patch_laplace_inv[d](i, j) = patch_laplace[d](i + 1, j + 1);
           }
 
+    std::array<Table<2, Number>, dim> patch_mass_inv_2;
+    std::array<Table<2, Number>, dim> patch_laplace_inv_2;
+
+    for (unsigned int d = 0; d < dim; ++d)
+      {
+        patch_mass_inv_2[d].reinit(2 * N - 4, 2 * N - 4);
+        patch_laplace_inv_2[d].reinit(2 * N - 4, 2 * N - 4);
+      }
+
+    for (unsigned int d = 0; d < dim; ++d)
+      for (unsigned int i = 0; i < 2 * N - 4; ++i)
+        for (unsigned int j = 0; j < 2 * N - 4; ++j)
+          {
+            patch_mass_inv_2[d](i, j)    = patch_mass[d](i + 2, j + 2);
+            patch_laplace_inv_2[d](i, j) = patch_laplace[d](i + 2, j + 2);
+          }
 
     // eigenvalue, eigenvector
     TensorProductData<dim, fe_degree, Number> tensor_product;
     tensor_product.reinit(patch_mass_inv, patch_laplace_inv);
+
+    TensorProductData<dim, fe_degree, Number> tensor_product_2;
+    tensor_product_2.reinit(patch_mass_inv_2, patch_laplace_inv_2);
 
     std::array<AlignedVector<Number>, dim> eigenval;
     std::array<Table<2, Number>, dim>      eigenvec;
     tensor_product.get_eigenvalues(eigenval);
     tensor_product.get_eigenvectors(eigenvec);
 
+    std::array<AlignedVector<Number>, dim> eigenval_2;
+    std::array<Table<2, Number>, dim>      eigenvec_2;
+    tensor_product_2.get_eigenvalues(eigenval_2);
+    tensor_product_2.get_eigenvectors(eigenvec_2);
+
     constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
 
     auto *mass    = new Number[n_dofs_1d * n_dofs_1d * dim];
     auto *laplace = new Number[n_dofs_1d * n_dofs_1d * dim];
-    auto *values  = new Number[n_dofs_1d * n_dofs_1d * dim];
-    auto *vectors = new Number[n_dofs_1d * n_dofs_1d * dim];
+    auto *values  = new Number[n_dofs_1d * n_dofs_1d * dim * 2];
+    auto *vectors = new Number[n_dofs_1d * n_dofs_1d * dim * 2];
 
-    for (int d = 0; d < dim; ++d)
+    for (int d = 0; d < 1; ++d)
       {
         std::transform(patch_mass[d].begin(),
                        patch_mass[d].end(),
@@ -1078,15 +1102,25 @@ namespace PSMF
                        [](const Number m) -> Number { return m; });
       }
 
+    std::transform(eigenval_2[0].begin(),
+                   eigenval_2[0].end(),
+                   &values[n_dofs_1d],
+                   [](const Number m) -> Number { return m; });
+
+    std::transform(eigenvec_2[0].begin(),
+                   eigenvec_2[0].end(),
+                   &vectors[n_dofs_1d * n_dofs_1d],
+                   [](const Number m) -> Number { return m; });
+
     cudaError_t error_code = cudaMemcpy(eigenvalues,
                                         values,
-                                        n_dofs_1d * sizeof(Number),
+                                        2 * n_dofs_1d * sizeof(Number),
                                         cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
     error_code = cudaMemcpy(eigenvectors,
                             vectors,
-                            n_dofs_1d * n_dofs_1d * sizeof(Number),
+                            2 * n_dofs_1d * n_dofs_1d * sizeof(Number),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
