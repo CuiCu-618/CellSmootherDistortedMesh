@@ -259,6 +259,11 @@ LaplaceProblem<dim, fe_degree>::do_Ax()
         best_time = std::min(time.wall_time() / n_mv, best_time);
       }
 
+    Utilities::MPI::MinMaxAvg stat =
+      Utilities::MPI::min_max_avg(best_time, MPI_COMM_WORLD);
+    *pcout << "Vmult time " << stat.min << " [p" << stat.min_index << "] "
+           << stat.avg << " " << stat.max << " [p" << stat.max_index << "]"
+           << std::endl;
     // solution_dp.print(std::cout);
     // *pcout << solution_dp.l2_norm() << std::endl;
 
@@ -445,6 +450,11 @@ LaplaceProblem<dim, fe_degree>::do_smooth()
         best_time = std::min(time.wall_time() / n_mv, best_time);
       }
 
+    Utilities::MPI::MinMaxAvg stat =
+      Utilities::MPI::min_max_avg(best_time, MPI_COMM_WORLD);
+    *pcout << "Smoother time " << stat.min << " [p" << stat.min_index << "] "
+           << stat.avg << " " << stat.max << " [p" << stat.max_index << "]"
+           << std::endl;
     // *pcout << solution_dp.l2_norm() << std::endl;
 
     info_table[3].add_value("Name",
