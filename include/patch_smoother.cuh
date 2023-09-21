@@ -47,6 +47,7 @@ namespace PSMF
       A->initialize_dof_vector(tmp);
     }
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -69,7 +70,7 @@ namespace PSMF
       block_dim = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
@@ -117,6 +118,7 @@ namespace PSMF
     LocalSmoother(const SmartPointer<const MatrixType>)
     {}
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -132,12 +134,12 @@ namespace PSMF
       shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        loop_kernel_fused_l<dim, fe_degree, Number, lapalace>,
+        loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
@@ -147,7 +149,7 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      loop_kernel_fused_l<dim, fe_degree, Number, lapalace>
+      loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>
         <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
                                                       dst.get_values(),
                                                       solution.get_values(),
@@ -178,6 +180,7 @@ namespace PSMF
     LocalSmoother(const SmartPointer<const MatrixType>)
     {}
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -193,12 +196,12 @@ namespace PSMF
       shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        loop_kernel_fused_cf<dim, fe_degree, Number, lapalace>,
+        loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
@@ -208,7 +211,7 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      loop_kernel_fused_cf<dim, fe_degree, Number, lapalace>
+      loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>
         <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
                                                       dst.get_values(),
                                                       solution.get_values(),
@@ -238,6 +241,7 @@ namespace PSMF
     LocalSmoother(const SmartPointer<const MatrixType>)
     {}
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -258,7 +262,7 @@ namespace PSMF
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,

@@ -146,6 +146,8 @@ namespace PSMF
       typename std::vector<std::vector<CellIterator>>::const_iterator;
 
     static constexpr unsigned int regular_vpatch_size = 1 << dim;
+    static constexpr unsigned int n_patch_dofs =
+      Util::pow(2 * fe_degree + 2, dim);
 
     /**
      * Standardized data struct to pipe additional data to LevelVertexPatch.
@@ -247,6 +249,7 @@ namespace PSMF
        *       four cells in a patch is stored consecutively.
        */
       unsigned int *first_dof;
+      unsigned int *patch_dofs;
 
       /**
        * Pointer to the patch cell ordering type.
@@ -328,11 +331,17 @@ namespace PSMF
     Data
     get_laplace_data(unsigned int color) const;
 
+    Data
+    get_laplace_data_ghost(unsigned int color) const;
+
     /**
      * Return the Data structure associated with @p color for smoothing operator.
      */
     Data
     get_smooth_data(unsigned int color) const;
+
+    Data
+    get_smooth_data_ghost(unsigned int color) const;
 
     /**
      * Extracts the information needed to perform loops over cells.
@@ -411,7 +420,9 @@ namespace PSMF
      * Helper function. Get tensor product data for each patch.
      */
     void
-    get_patch_data(const PatchIterator &patch, const unsigned int patch_id);
+    get_patch_data(const PatchIterator &patch,
+                   const unsigned int   patch_id,
+                   const bool           is_ghost = false);
 
     /**
      * Gathering the locally owned and ghost cells attached to a common
@@ -473,6 +484,9 @@ namespace PSMF
     std::vector<dim3> grid_dim_lapalce;
     std::vector<dim3> grid_dim_smooth;
 
+    std::vector<dim3> grid_dim_lapalce_ghost;
+    std::vector<dim3> grid_dim_smooth_ghost;
+
     /**
      * Block dimensions associated to the different colors. The block
      * dimensions are used to launch the CUDA kernels.
@@ -494,17 +508,22 @@ namespace PSMF
      * Raw graphed of locally owned active patches.
      */
     std::vector<std::vector<PatchIterator>> graph_ptr_raw;
+    std::vector<std::vector<PatchIterator>> graph_ptr_raw_ghost;
 
     /**
      * Colored graphed of locally owned active patches.
      */
     std::vector<std::vector<PatchIterator>> graph_ptr_colored;
+    std::vector<std::vector<PatchIterator>> graph_ptr_colored_ghost;
 
     /**
      * Number of patches in each color.
      */
     std::vector<unsigned int> n_patches_laplace;
     std::vector<unsigned int> n_patches_smooth;
+
+    std::vector<unsigned int> n_patches_laplace_ghost;
+    std::vector<unsigned int> n_patches_smooth_ghost;
 
     /**
      * Pointer to the DoFHandler associated with the object.
@@ -521,17 +540,22 @@ namespace PSMF
     std::vector<unsigned int *> first_dof_laplace;
     std::vector<unsigned int *> first_dof_smooth;
 
+    std::vector<unsigned int *> patch_dofs_laplace;
+    std::vector<unsigned int *> patch_dofs_smooth;
+
     /**
      * Vector of the the first degree of freedom
      * in each patch of a single color.
      * Initialize on host and copy to device later.
      */
     std::vector<unsigned int> first_dof_host;
+    std::vector<unsigned int> patch_dofs_host;
 
     /**
      * Vector of pointer to patch type: left, middle, right.
      */
     std::vector<unsigned int *> patch_type;
+    std::vector<unsigned int *> patch_type_ghost;
 
     /**
      * Vector of patch type: left, middle, right.
@@ -638,6 +662,7 @@ namespace PSMF
       solution_ghosted;
 
     cudaStream_t stream;
+    cudaStream_t stream_g;
   };
 
   /**

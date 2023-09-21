@@ -29,6 +29,7 @@ namespace PSMF
     LocalLaplace()
       : shared_mem(0){};
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -47,12 +48,12 @@ namespace PSMF
       shared_mem += n * patch_per_block * local_dim * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_basic<dim, fe_degree, Number, kernel>,
+        laplace_kernel_basic<dim, fe_degree, Number, kernel, is_ghost>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
@@ -61,7 +62,7 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      laplace_kernel_basic<dim, fe_degree, Number, kernel>
+      laplace_kernel_basic<dim, fe_degree, Number, kernel, is_ghost>
         <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
                                                       dst.get_values(),
                                                       gpu_data);
@@ -78,6 +79,7 @@ namespace PSMF
     LocalLaplace()
       : shared_mem(0){};
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -103,7 +105,7 @@ namespace PSMF
                              shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
@@ -129,6 +131,7 @@ namespace PSMF
     LocalLaplace()
       : shared_mem(0){};
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -156,7 +159,7 @@ namespace PSMF
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
@@ -186,6 +189,7 @@ namespace PSMF
     LocalLaplace()
       : shared_mem(0){};
 
+    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -213,7 +217,7 @@ namespace PSMF
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType>
+    template <typename VectorType, typename DataType, bool is_ghost>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,

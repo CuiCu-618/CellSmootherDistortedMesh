@@ -10,6 +10,7 @@
  */
 
 #include "loop_kernel.cuh"
+#include "renumbering.h"
 
 namespace PSMF
 {
@@ -31,6 +32,10 @@ namespace PSMF
       return global_index - local_range_start;
     else
       {
+        printf("*************** ERROR index: %d ***************\n",
+               global_index);
+        printf("******** All indices should be local **********\n");
+
         const unsigned int index_within_ghosts =
           binary_search(global_index, 0, n_ghost_indices - 1);
 
@@ -148,6 +153,7 @@ namespace PSMF
     l_to_h_host.shrink_to_fit();
 
     AssertCuda(cudaStreamDestroy(stream));
+    AssertCuda(cudaStreamDestroy(stream_g));
   }
 
   template <int dim, int fe_degree, typename Number>
@@ -422,7 +428,8 @@ namespace PSMF
   void
   LevelVertexPatch<dim, fe_degree, Number>::get_patch_data(
     const PatchIterator &patch,
-    const unsigned int   patch_id)
+    const unsigned int   patch_id,
+    const bool           is_ghost)
   {
     std::vector<unsigned int> local_dof_indices(Util::pow(fe_degree + 1, dim));
     std::vector<unsigned int> numbering(regular_vpatch_size);
@@ -433,8 +440,15 @@ namespace PSMF
       {
         auto cell_ptr = (*patch)[cell];
         cell_ptr->get_mg_dof_indices(local_dof_indices);
-        first_dof_host[patch_id * regular_vpatch_size + cell] =
-          local_dof_indices[0];
+
+        if (is_ghost)
+          for (unsigned int ind = 0; ind < local_dof_indices.size(); ++ind)
+            patch_dofs_host[patch_id * n_patch_dofs +
+                            cell * local_dof_indices.size() + ind] =
+              partitioner->global_to_local(local_dof_indices[ind]);
+        else
+          first_dof_host[patch_id * regular_vpatch_size + cell] =
+            local_dof_indices[0];
       }
 
     // patch_type. TODO: Fix: only works on [0,1]^d
@@ -498,6 +512,15 @@ namespace PSMF
 
     n_replicate = dof_handler->get_triangulation().n_cells(0);
 
+    auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(level);
+    auto locally_relevant_dofs =
+      DoFTools::extract_locally_relevant_level_dofs(*dof_handler, level);
+
+    partitioner =
+      std::make_shared<Utilities::MPI::Partitioner>(locally_owned_dofs,
+                                                    locally_relevant_dofs,
+                                                    MPI_COMM_WORLD);
+
     if (use_coloring)
       n_colors = regular_vpatch_size;
     else
@@ -524,22 +547,52 @@ namespace PSMF
     cell_collections = std::move(gather_vertex_patches(*dof_handler, level));
 
     graph_ptr_raw.clear();
+    graph_ptr_raw_ghost.clear();
     graph_ptr_raw.resize(1);
-    for (auto patch = cell_collections.begin(); patch != cell_collections.end();
-         ++patch)
-      graph_ptr_raw[0].push_back(patch);
-
-    // coloring
-    graph_ptr_colored.clear();
-    graph_ptr_colored.resize(regular_vpatch_size);
+    graph_ptr_raw_ghost.resize(1);
     for (auto patch = cell_collections.begin(); patch != cell_collections.end();
          ++patch)
       {
+        bool is_local = true;
+        for (auto &cell : *patch)
+          if (cell->is_locally_owned_on_level() == false)
+            {
+              is_local = false;
+              break;
+            }
+
+        if (is_local)
+          graph_ptr_raw[0].push_back(patch);
+        else
+          graph_ptr_raw_ghost[0].push_back(patch);
+      }
+
+    // coloring
+    graph_ptr_colored.clear();
+    graph_ptr_colored_ghost.clear();
+    graph_ptr_colored.resize(regular_vpatch_size);
+    graph_ptr_colored_ghost.resize(regular_vpatch_size);
+    for (auto patch = cell_collections.begin(); patch != cell_collections.end();
+         ++patch)
+      {
+        bool is_local = true;
+        for (auto &cell : *patch)
+          if (cell->is_locally_owned_on_level() == false)
+            {
+              is_local = false;
+              break;
+            }
+
         auto first_cell = (*patch)[0];
 
-        graph_ptr_colored[first_cell->parent()->child_iterator_to_index(
-                            first_cell)]
-          .push_back(patch);
+        if (is_local)
+          graph_ptr_colored[first_cell->parent()->child_iterator_to_index(
+                              first_cell)]
+            .push_back(patch);
+        else
+          graph_ptr_colored_ghost[first_cell->parent()->child_iterator_to_index(
+                                    first_cell)]
+            .push_back(patch);
       }
 
 
@@ -560,7 +613,7 @@ namespace PSMF
         auto patch     = graph_ptr_colored[i].begin(),
              end_patch = graph_ptr_colored[i].end();
         for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
-          get_patch_data(*patch, p_id);
+          get_patch_data(*patch, p_id, false);
 
         alloc_arrays(&first_dof_smooth[i], n_patches * regular_vpatch_size);
 
@@ -568,6 +621,33 @@ namespace PSMF
           cudaMemcpy(first_dof_smooth[i],
                      first_dof_host.data(),
                      regular_vpatch_size * n_patches * sizeof(unsigned int),
+                     cudaMemcpyHostToDevice);
+        AssertCuda(error_code);
+      }
+
+    for (unsigned int i = 0; i < regular_vpatch_size; ++i)
+      {
+        auto n_patches            = graph_ptr_colored_ghost[i].size();
+        n_patches_smooth_ghost[i] = n_patches;
+
+        patch_type_host.clear();
+        patch_id_host.clear();
+        patch_dofs_host.clear();
+        patch_id_host.resize(n_patches);
+        patch_type_host.resize(n_patches * dim);
+        patch_dofs_host.resize(n_patches * n_patch_dofs);
+
+        auto patch     = graph_ptr_colored_ghost[i].begin(),
+             end_patch = graph_ptr_colored_ghost[i].end();
+        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+          get_patch_data(*patch, p_id, true);
+
+        alloc_arrays(&patch_dofs_smooth[i], n_patches * n_patch_dofs);
+
+        cudaError_t error_code =
+          cudaMemcpy(patch_dofs_smooth[i],
+                     patch_dofs_host.data(),
+                     n_patch_dofs * n_patches * sizeof(unsigned int),
                      cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
@@ -591,18 +671,12 @@ namespace PSMF
 
         auto patch = tmp_ptr[i].begin(), end_patch = tmp_ptr[i].end();
         for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
-          get_patch_data(*patch, p_id);
+          get_patch_data(*patch, p_id, false);
 
         // alloc_and_copy_arrays(i);
         alloc_arrays(&first_dof_laplace[i], n_patches * regular_vpatch_size);
         alloc_arrays(&patch_id[i], n_patches);
         alloc_arrays(&patch_type[i], n_patches * dim);
-
-        // cudaError_t error_code = cudaMemcpy(patch_id[i],
-        //                                     patch_id_host.data(),
-        //                                     n_patches * sizeof(unsigned int),
-        //                                     cudaMemcpyHostToDevice);
-        // AssertCuda(error_code);
 
         cudaError_t error_code =
           cudaMemcpy(first_dof_laplace[i],
@@ -614,6 +688,41 @@ namespace PSMF
         error_code = cudaMemcpy(patch_type[i],
                                 patch_type_host.data(),
                                 dim * n_patches * sizeof(unsigned int),
+                                cudaMemcpyHostToDevice);
+        AssertCuda(error_code);
+      }
+
+    for (unsigned int i = 0; i < n_colors; ++i)
+      {
+        auto n_patches             = graph_ptr_raw_ghost[i].size();
+        n_patches_laplace_ghost[i] = n_patches;
+
+        patch_type_host.clear();
+        patch_id_host.clear();
+        patch_dofs_host.clear();
+        patch_id_host.resize(n_patches);
+        patch_type_host.resize(n_patches * dim);
+        patch_dofs_host.resize(n_patches * n_patch_dofs);
+
+        auto patch     = graph_ptr_raw_ghost[i].begin(),
+             end_patch = graph_ptr_raw_ghost[i].end();
+        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+          get_patch_data(*patch, p_id, true);
+
+        // alloc_and_copy_arrays(i);
+        alloc_arrays(&patch_type_ghost[i], n_patches * dim);
+        alloc_arrays(&patch_dofs_laplace[i], n_patches * n_patch_dofs);
+
+        cudaError_t error_code =
+          cudaMemcpy(patch_type_ghost[i],
+                     patch_type_host.data(),
+                     dim * n_patches * sizeof(unsigned int),
+                     cudaMemcpyHostToDevice);
+        AssertCuda(error_code);
+
+        error_code = cudaMemcpy(patch_dofs_laplace[i],
+                                patch_dofs_host.data(),
+                                n_patch_dofs * n_patches * sizeof(unsigned int),
                                 cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
@@ -670,20 +779,24 @@ namespace PSMF
     for (auto &el : ordering_to_type)
       generate_indices(el.first, el.second);
 
-    alloc_arrays(&l_to_h, Util::pow(n_dofs_1d, dim) * dim * (dim - 1));
-    alloc_arrays(&h_to_l, Util::pow(n_dofs_1d, dim) * dim * (dim - 1));
+    DoFMapping<dim, fe_degree> dm;
 
-    cudaError_t error_code = cudaMemcpy(l_to_h,
-                                        l_to_h_host.data(),
-                                        Util::pow(n_dofs_1d, dim) * dim *
-                                          (dim - 1) * sizeof(unsigned int),
-                                        cudaMemcpyHostToDevice);
+    auto hl_dg          = dm.get_h_to_l_dg_normal();
+    auto hl_dg_interior = dm.get_h_to_l_dg_normal_interior();
+
+    alloc_arrays(&l_to_h, hl_dg_interior.size());
+    alloc_arrays(&h_to_l, hl_dg.size());
+
+    cudaError_t error_code =
+      cudaMemcpy(l_to_h,
+                 hl_dg_interior.data(),
+                 hl_dg_interior.size() * sizeof(unsigned int),
+                 cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
     error_code = cudaMemcpy(h_to_l,
-                            h_to_l_host.data(),
-                            Util::pow(n_dofs_1d, dim) * dim * (dim - 1) *
-                              sizeof(unsigned int),
+                            hl_dg.data(),
+                            hl_dg.size() * sizeof(unsigned int),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
@@ -714,17 +827,9 @@ namespace PSMF
     reinit_tensor_product_smoother();
 
     AssertCuda(cudaStreamCreate(&stream));
+    AssertCuda(cudaStreamCreate(&stream_g));
 
     // ghost
-    auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(level);
-    auto locally_relevant_dofs =
-      DoFTools::extract_locally_relevant_level_dofs(*dof_handler, level);
-
-    partitioner =
-      std::make_shared<Utilities::MPI::Partitioner>(locally_owned_dofs,
-                                                    locally_relevant_dofs,
-                                                    MPI_COMM_WORLD);
-
     auto ghost_indices = partitioner->ghost_indices();
     auto local_range   = partitioner->local_range();
     n_ghost_indices    = ghost_indices.n_elements();
@@ -790,6 +895,31 @@ namespace PSMF
 
   template <int dim, int fe_degree, typename Number>
   LevelVertexPatch<dim, fe_degree, Number>::Data
+  LevelVertexPatch<dim, fe_degree, Number>::get_laplace_data_ghost(
+    unsigned int color) const
+  {
+    Data data_copy;
+
+    data_copy.n_patches        = n_patches_laplace_ghost[color];
+    data_copy.patch_per_block  = patch_per_block;
+    data_copy.patch_type       = patch_type_ghost[color];
+    data_copy.l_to_h           = l_to_h;
+    data_copy.h_to_l           = h_to_l;
+    data_copy.laplace_mass_1d  = laplace_mass_1d;
+    data_copy.laplace_stiff_1d = laplace_stiff_1d;
+
+    data_copy.n_ghost_indices   = n_ghost_indices;
+    data_copy.local_range_start = local_range_start;
+    data_copy.local_range_end   = local_range_end;
+    data_copy.ghost_indices     = ghost_indices_dev;
+
+    data_copy.patch_dofs = patch_dofs_laplace[color];
+
+    return data_copy;
+  }
+
+  template <int dim, int fe_degree, typename Number>
+  LevelVertexPatch<dim, fe_degree, Number>::Data
   LevelVertexPatch<dim, fe_degree, Number>::get_smooth_data(
     unsigned int color) const
   {
@@ -815,6 +945,33 @@ namespace PSMF
   }
 
   template <int dim, int fe_degree, typename Number>
+  LevelVertexPatch<dim, fe_degree, Number>::Data
+  LevelVertexPatch<dim, fe_degree, Number>::get_smooth_data_ghost(
+    unsigned int color) const
+  {
+    Data data_copy;
+
+    data_copy.n_patches       = n_patches_smooth_ghost[color];
+    data_copy.patch_per_block = patch_per_block;
+    data_copy.relaxation      = relaxation;
+    data_copy.l_to_h          = l_to_h;
+    data_copy.h_to_l          = h_to_l;
+    data_copy.eigenvalues     = eigenvalues;
+    data_copy.eigenvectors    = eigenvectors;
+    data_copy.smooth_mass_1d  = smooth_mass_1d;
+    data_copy.smooth_stiff_1d = smooth_stiff_1d;
+
+    data_copy.n_ghost_indices   = n_ghost_indices;
+    data_copy.local_range_start = local_range_start;
+    data_copy.local_range_end   = local_range_end;
+    data_copy.ghost_indices     = ghost_indices_dev;
+
+    data_copy.patch_dofs = patch_dofs_smooth[color];
+
+    return data_copy;
+  }
+
+  template <int dim, int fe_degree, typename Number>
   template <typename Operator, typename VectorType>
   void
   LevelVertexPatch<dim, fe_degree, Number>::patch_loop(const Operator   &op,
@@ -826,23 +983,43 @@ namespace PSMF
 
     src.update_ghost_values();
 
-    op.setup_kernel(patch_per_block);
-
     // TODO
     for (unsigned int i = 0; i < regular_vpatch_size; ++i)
       {
         (*solution_ghosted) = 0;
-        dst.update_ghost_values();
+        // dst.update_ghost_values();
+        dst.update_ghost_values_start(0);
+
+        op.template setup_kernel<false>(patch_per_block);
 
         if (n_patches_smooth[i] > 0)
           {
-            op.loop_kernel(src,
-                           dst,
-                           *solution_ghosted,
-                           get_smooth_data(i),
-                           grid_dim_smooth[i],
-                           block_dim_smooth[i],
-                           stream);
+            op.template loop_kernel<VectorType, Data, false>(
+              src,
+              dst,
+              *solution_ghosted,
+              get_smooth_data(i),
+              grid_dim_smooth[i],
+              block_dim_smooth[i],
+              stream);
+
+            AssertCudaKernel();
+          }
+
+        op.template setup_kernel<true>(patch_per_block);
+
+        dst.update_ghost_values_finish();
+
+        if (n_patches_smooth_ghost[i] > 0)
+          {
+            op.template loop_kernel<VectorType, Data, true>(
+              src,
+              dst,
+              *solution_ghosted,
+              get_smooth_data_ghost(i),
+              grid_dim_smooth_ghost[i],
+              block_dim_smooth[i],
+              stream_g);
 
             AssertCudaKernel();
           }
@@ -864,17 +1041,33 @@ namespace PSMF
 
     src.update_ghost_values();
 
-    op.setup_kernel(patch_per_block);
+    op.template setup_kernel<false>(patch_per_block);
 
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_patches_laplace[i] > 0)
         {
-          op.loop_kernel(src,
-                         dst,
-                         get_laplace_data(i),
-                         grid_dim_lapalce[i],
-                         block_dim_laplace[i],
-                         stream);
+          op.template loop_kernel<VectorType, Data, false>(src,
+                                                           dst,
+                                                           get_laplace_data(i),
+                                                           grid_dim_lapalce[i],
+                                                           block_dim_laplace[i],
+                                                           stream);
+
+          AssertCudaKernel();
+        }
+
+    op.template setup_kernel<true>(patch_per_block);
+
+    for (unsigned int i = 0; i < n_colors; ++i)
+      if (n_patches_laplace_ghost[i] > 0)
+        {
+          op.template loop_kernel<VectorType, Data, true>(
+            src,
+            dst,
+            get_laplace_data_ghost(i),
+            grid_dim_lapalce_ghost[i],
+            block_dim_laplace[i],
+            stream_g);
 
           AssertCudaKernel();
         }
@@ -1349,6 +1542,16 @@ namespace PSMF
     this->grid_dim_smooth.resize(regular_vpatch_size);
     this->block_dim_smooth.resize(regular_vpatch_size);
     this->first_dof_smooth.resize(regular_vpatch_size);
+
+    this->n_patches_laplace_ghost.resize(n_colors);
+    this->grid_dim_lapalce_ghost.resize(n_colors);
+    this->patch_type_ghost.resize(n_colors);
+
+    this->n_patches_smooth_ghost.resize(regular_vpatch_size);
+    this->grid_dim_smooth_ghost.resize(regular_vpatch_size);
+
+    this->patch_dofs_laplace.resize(n_colors);
+    this->patch_dofs_smooth.resize(regular_vpatch_size);
   }
 
   template <int dim, int fe_degree, typename Number>
@@ -1360,24 +1563,34 @@ namespace PSMF
 
     for (unsigned int i = 0; i < n_colors; ++i)
       {
-        auto         n_patches = n_patches_laplace[i];
-        const double apply_n_blocks =
-          std::ceil(static_cast<double>(n_patches) /
-                    static_cast<double>(patch_per_block));
+        auto   n_patches      = n_patches_laplace[i];
+        double apply_n_blocks = std::ceil(static_cast<double>(n_patches) /
+                                          static_cast<double>(patch_per_block));
 
         grid_dim_lapalce[i]  = dim3(apply_n_blocks);
         block_dim_laplace[i] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+
+        n_patches      = n_patches_laplace_ghost[i];
+        apply_n_blocks = std::ceil(static_cast<double>(n_patches) /
+                                   static_cast<double>(patch_per_block));
+
+        grid_dim_lapalce_ghost[i] = dim3(apply_n_blocks);
       }
 
     for (unsigned int i = 0; i < regular_vpatch_size; ++i)
       {
-        auto         n_patches = n_patches_smooth[i];
-        const double apply_n_blocks =
-          std::ceil(static_cast<double>(n_patches) /
-                    static_cast<double>(patch_per_block));
+        auto   n_patches      = n_patches_smooth[i];
+        double apply_n_blocks = std::ceil(static_cast<double>(n_patches) /
+                                          static_cast<double>(patch_per_block));
 
         grid_dim_smooth[i]  = dim3(apply_n_blocks);
         block_dim_smooth[i] = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
+
+        n_patches      = n_patches_smooth_ghost[i];
+        apply_n_blocks = std::ceil(static_cast<double>(n_patches) /
+                                   static_cast<double>(patch_per_block));
+
+        grid_dim_smooth_ghost[i] = dim3(apply_n_blocks);
       }
   }
 

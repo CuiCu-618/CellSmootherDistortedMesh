@@ -2659,9 +2659,11 @@ namespace PSMF
         const unsigned int row = linear_tid / (n_dofs_1d - 4);
         const unsigned int col = linear_tid % (n_dofs_1d - 4);
 
-        shared_data->local_mass[col + 2] = gpu_data->eigenvalues[col + n_dofs_1d];
+        shared_data->local_mass[col + 2] =
+          gpu_data->eigenvalues[col + n_dofs_1d];
         shared_data->local_derivative[(row + 2) * n_dofs_1d + col + 2] =
-          gpu_data->eigenvectors[row * (n_dofs_1d - 4) + col + n_dofs_1d * n_dofs_1d];
+          gpu_data
+            ->eigenvectors[row * (n_dofs_1d - 4) + col + n_dofs_1d * n_dofs_1d];
       }
     __syncthreads();
 
