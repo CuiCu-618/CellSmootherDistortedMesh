@@ -1039,7 +1039,7 @@ namespace PSMF
     Util::adjust_ghost_range_if_necessary(src, partitioner);
     Util::adjust_ghost_range_if_necessary(dst, partitioner);
 
-    src.update_ghost_values();
+    src.update_ghost_values_start(1);
 
     op.template setup_kernel<false>(patch_per_block);
 
@@ -1055,6 +1055,8 @@ namespace PSMF
 
           AssertCudaKernel();
         }
+
+    src.update_ghost_values_finish();
 
     op.template setup_kernel<true>(patch_per_block);
 
