@@ -52,11 +52,10 @@ def parse_args():
                         choices=range(1,65),
                         help="number of shift elements"
     )
-    parser.add_argument('-REP','--is_replicate',
-                        default=0,
+    parser.add_argument('-REP','--n_replicate',
+                        default=1,
                         type=int,
-                        choices=[0, 1],
-                        help="whether replicate a given triangulation in x coordinate axes"
+                        help="number of triangulation in x coordinate axes"
     )
     parser.add_argument('-REDUCE','--reduce',
                         default=1e-9,
@@ -138,7 +137,7 @@ class Parameter:
         patch = options.patch_per_block
         self.dimension = ('constexpr unsigned int', dim)
         self.fe_degree = ('constexpr unsigned int', deg)
-        self.is_replicate = ('constexpr bool', options.is_replicate)
+        self.n_replicate = ('constexpr unsigned int', options.n_replicate)
         self.patch_per_block = ('constexpr unsigned int', patch)
         self.reduce = ('constexpr double', options.reduce)
         self.max_steps = ('constexpr unsigned int', options.max_steps)

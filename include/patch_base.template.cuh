@@ -467,30 +467,6 @@ namespace PSMF
           patch_type_host[patch_id * dim + d] =
             (pos > 0) + (pos == (scale * Util::pow(2, level) - 2));
         }
-
-
-    // patch_id
-    std::sort(numbering.begin(),
-              numbering.end(),
-              [&](unsigned lhs, unsigned rhs) {
-                return first_dof_host[patch_id * regular_vpatch_size + lhs] <
-                       first_dof_host[patch_id * regular_vpatch_size + rhs];
-              });
-
-    auto encode = [&](unsigned int sum, int val) { return sum * 10 + val; };
-    unsigned int label =
-      std::accumulate(numbering.begin(), numbering.end(), 0, encode);
-
-    const auto element = ordering_to_type.find(label);
-    if (element != ordering_to_type.end()) // Fouond
-      {
-        patch_id_host[patch_id] = element->second;
-      }
-    else // Not found
-      {
-        ordering_to_type.insert({label, ordering_types++});
-        patch_id_host[patch_id] = ordering_to_type[label];
-      }
   }
 
   template <int dim, int fe_degree, typename Number>

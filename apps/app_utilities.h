@@ -105,7 +105,7 @@ namespace Util
     const auto str_granularity = GranularityToString(CT::GRANULARITY_);
 
     const auto n_mpi_procs = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
-    const auto n_coarse    = CT::IS_REPLICATE_ ? n_mpi_procs : 1;
+    const auto n_coarse    = CT::N_REPLICATE_;
 
     oss << "poisson";
     oss << std::scientific << std::setprecision(2);
@@ -144,7 +144,7 @@ namespace Util
     auto cores = _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor);
 
     const auto n_mpi_procs = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
-    const auto n_coarse    = CT::IS_REPLICATE_ ? n_mpi_procs : 1;
+    const auto n_coarse    = CT::N_REPLICATE_;
 
     std::ostringstream oss;
 

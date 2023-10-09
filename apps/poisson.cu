@@ -192,8 +192,7 @@ namespace Step64
     dof_handler.distribute_mg_dofs();
     const unsigned int nlevels = triangulation.n_global_levels();
 
-    auto n_replicate =
-      CT::IS_REPLICATE_ ? Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD) : 1;
+    auto n_replicate = CT::N_REPLICATE_;
 
     *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = "
            << n_replicate << " x (" << (1 << (nlevels - 1)) << " x ("
@@ -487,31 +486,24 @@ namespace Step64
 
         if (cycle == 0)
           {
-            if (CT::IS_REPLICATE_)
-              {
-                auto n_replicate =
-                  Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
-                Tensor<1, dim> shift_vector;
-                shift_vector[0] = 1;
+            // auto n_replicate =
+            //   Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
 
-                parallel::distributed::Triangulation<dim> tria(
-                  MPI_COMM_WORLD,
-                  Triangulation<dim>::limit_level_difference_at_vertices,
-                  parallel::distributed::Triangulation<
-                    dim>::construct_multigrid_hierarchy);
+            parallel::distributed::Triangulation<dim> tria(
+              MPI_COMM_WORLD,
+              Triangulation<dim>::limit_level_difference_at_vertices,
+              parallel::distributed::Triangulation<
+                dim>::construct_multigrid_hierarchy);
 
-                GridGenerator::hyper_cube(tria, 0, 1);
-                if (dim == 2)
-                  GridGenerator::replicate_triangulation(tria,
-                                                         {n_replicate, 1},
-                                                         triangulation);
-                else if (dim == 3)
-                  GridGenerator::replicate_triangulation(tria,
-                                                         {n_replicate, 1, 1},
-                                                         triangulation);
-              }
-            else
-              GridGenerator::hyper_cube(triangulation, 0., 1.);
+            GridGenerator::hyper_cube(tria, 0, 1);
+            if (dim == 2)
+              GridGenerator::replicate_triangulation(tria,
+                                                     {CT::N_REPLICATE_, 1},
+                                                     triangulation);
+            else if (dim == 3)
+              GridGenerator::replicate_triangulation(tria,
+                                                     {CT::N_REPLICATE_, 1, 1},
+                                                     triangulation);
 
             triangulation.refine_global(2);
           }
