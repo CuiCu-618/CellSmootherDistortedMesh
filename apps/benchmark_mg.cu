@@ -174,8 +174,8 @@ LaplaceProblem<dim, fe_degree>::setup_system()
 
   const unsigned int nlevels = triangulation.n_global_levels();
 
-  auto n_replicate =
-    CT::IS_REPLICATE_ ? Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD) : 1;
+  auto n_replicate = CT::N_REPLICATE_;
+    // CT::IS_REPLICATE_ ? Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD) : 1;
 
   *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = "
          << n_replicate << " x (" << (1 << (nlevels - 1)) << " x ("
@@ -599,11 +599,9 @@ LaplaceProblem<dim, fe_degree>::run()
 {
   *pcout << Util::generic_info_to_fstring() << std::endl;
 
-  if (CT::IS_REPLICATE_)
+  // if (CT::IS_REPLICATE_)
     {
-      auto n_replicate = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
-      Tensor<1, dim> shift_vector;
-      shift_vector[0] = 1;
+      // auto n_replicate = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
 
       parallel::distributed::Triangulation<dim> tria(
         MPI_COMM_WORLD,
@@ -614,15 +612,15 @@ LaplaceProblem<dim, fe_degree>::run()
       GridGenerator::hyper_cube(tria, 0, 1);
       if (dim == 2)
         GridGenerator::replicate_triangulation(tria,
-                                               {n_replicate, 1},
+                                               {CT::N_REPLICATE_, 1},
                                                triangulation);
       else if (dim == 3)
         GridGenerator::replicate_triangulation(tria,
-                                               {n_replicate, 1, 1},
+                                               {CT::N_REPLICATE_, 1, 1},
                                                triangulation);
     }
-  else
-    GridGenerator::hyper_cube(triangulation, 0., 1.);
+  // else
+  //  GridGenerator::hyper_cube(triangulation, 0., 1.);
 
   double n_dofs_1d = 0;
   if (dim == 2)
