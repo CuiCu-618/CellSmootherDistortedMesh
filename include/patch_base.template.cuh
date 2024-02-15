@@ -182,13 +182,16 @@ namespace PSMF
     const DoFHandler<dim> &dof_handler,
     const unsigned int     level) const
   {
-    // LAMBDA checks if a vertex is at the physical boundary
+    // LAMBDA checks if a vertex is at the (physical) boundary
     auto &&is_boundary_vertex = [](const CellIterator &cell,
                                    const unsigned int  vertex_id) {
-      return std::any_of(
-        std::begin(GeometryInfo<dim>::vertex_to_face[vertex_id]),
-        std::end(GeometryInfo<dim>::vertex_to_face[vertex_id]),
-        [&cell](const auto &face_no) { return cell->at_boundary(face_no); });
+      return std::any_of(std::begin(
+                           GeometryInfo<dim>::vertex_to_face[vertex_id]),
+                         std::end(GeometryInfo<dim>::vertex_to_face[vertex_id]),
+                         [&cell](const auto &face_no) {
+                           return cell->at_boundary(face_no) ||
+                                  cell->neighbor_is_coarser(face_no);
+                         });
     };
 
     const auto &tria = dof_handler.get_triangulation();
@@ -226,6 +229,19 @@ namespace PSMF
                 }
             }
       }
+
+    for (const auto &cell : locally_owned_range_mg)
+      for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
+        if (is_boundary_vertex(cell, v))
+          {
+            const unsigned int global_index = cell->vertex_index(v);
+            const auto         element = global_to_local_map.find(global_index);
+
+            if (element != global_to_local_map.cend())
+              {
+                global_to_local_map.erase(element);
+              }
+          }
 
     /**
      * Ghost patches are stored as the mapping @p global_to_ghost_id

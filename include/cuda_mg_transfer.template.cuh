@@ -469,7 +469,7 @@ namespace PSMF
      * Only global refinement so far, just plain copy. Uncomment for adaptice
      * refinement.
      */
-    // fill_copy_indices(mg_dof);
+    fill_copy_indices(mg_dof);
 
     const unsigned int n_levels = mg_dof.get_triangulation().n_global_levels();
 
@@ -827,7 +827,7 @@ namespace PSMF
       }
 
 
-    std::cout << "Warning! Non-plain copy encourted! \n";
+    // std::cout << "Warning! Non-plain copy encourted! \n";
 
     // copy the source vector to the temporary vector that we hold for the
     // purpose of data exchange
@@ -880,7 +880,7 @@ namespace PSMF
       }
 
 
-    std::cout << "Warning! Non-plain copy encourted! \n";
+    // std::cout << "Warning! Non-plain copy encourted! \n";
 
     dst = 0;
     for (unsigned int level = src.min_level(); level <= src.max_level();
