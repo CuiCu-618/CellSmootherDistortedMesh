@@ -117,6 +117,33 @@ namespace PSMF
     AssertCudaKernel();
   }
 
+
+  template <typename Number>
+  __global__ void
+  vec_invert(Number *v, const int N)
+  {
+    const int idx_base =
+      threadIdx.x + blockIdx.x * (blockDim.x * CHUNKSIZE_ELEMWISE_OP);
+
+    for (int c = 0; c < CHUNKSIZE_ELEMWISE_OP; ++c)
+      {
+        const int idx = idx_base + c * BKSIZE_ELEMWISE_OP;
+        if (idx < N)
+          v[idx] = 1.0 / v[idx];
+      }
+  }
+
+  template <typename VectorType>
+  void
+  vector_invert(VectorType &vec)
+  {
+    const int nblocks =
+      1 + (vec.size() - 1) / (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
+    vec_invert<typename VectorType::value_type>
+      <<<nblocks, BKSIZE_ELEMWISE_OP>>>(vec.get_values(), vec.size());
+    AssertCudaKernel();
+  }
+
 } // namespace PSMF
 
 

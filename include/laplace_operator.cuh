@@ -12,6 +12,8 @@
 #ifndef LAPLACE_OPERATOR_CUH
 #define LAPLACE_OPERATOR_CUH
 
+#include <deal.II/lac/diagonal_matrix.h>
+
 #include "patch_base.cuh"
 
 using namespace dealii;
@@ -438,7 +440,7 @@ namespace PSMF
 
 
 
-  template <int dim, int fe_degree, typename Number>
+  template <int dim, int fe_degree, typename Number, bool diag = false>
   class LocalLaplaceOperator
   {
   public:
@@ -472,6 +474,50 @@ namespace PSMF
 
 
   template <int dim, int fe_degree, typename Number>
+  class LocalLaplaceOperator<dim, fe_degree, Number, true>
+  {
+  public:
+    static const unsigned int n_dofs_1d    = fe_degree + 1;
+    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
+    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalLaplaceOperator()
+    {}
+
+    __device__ void
+    operator()(const unsigned int                                  cell,
+               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                      *shared_data,
+               const Number *,
+               Number *dst) const
+    {
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+
+      Number my_diagonal = 0.0;
+
+      const unsigned int tid = compute_index<dim, n_dofs_1d>();
+      for (unsigned int i = 0; i < n_local_dofs; ++i)
+        {
+          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
+          fe_eval.evaluate(false, true);
+          fe_eval.submit_gradient(fe_eval.get_gradient());
+          fe_eval.integrate(false, true);
+          if (tid == i)
+            my_diagonal = fe_eval.get_value();
+        }
+      fe_eval.submit_dof_value(my_diagonal);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
+
+
+  template <int dim, int fe_degree, typename Number, bool diag = false>
   class LocalLaplaceBDOperator
   {
   public:
@@ -521,6 +567,66 @@ namespace PSMF
 
 
   template <int dim, int fe_degree, typename Number>
+  class LocalLaplaceBDOperator<dim, fe_degree, Number, true>
+  {
+  public:
+    static const unsigned int n_dofs_1d    = fe_degree + 1;
+    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
+    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
+
+    static const unsigned int cells_per_block = 1;
+
+
+    LocalLaplaceBDOperator()
+    {}
+
+    __device__ Number
+    get_penalty_factor() const
+    {
+      return 1.0 * fe_degree * (fe_degree + 1);
+    }
+
+    __device__ void
+    operator()(const unsigned int                                  face,
+               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                      *shared_data,
+               const Number                                       *src,
+               Number                                             *dst) const
+    {
+      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        face, gpu_data, shared_data, true);
+
+      Number my_diagonal = 0.0;
+
+      const unsigned int tid = compute_index<dim, n_dofs_1d>();
+      for (unsigned int i = 0; i < n_local_dofs; ++i)
+        {
+          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
+          fe_eval.evaluate(true, true);
+
+          auto hi    = fabs(fe_eval.inverse_length_normal_to_face());
+          auto sigma = hi * get_penalty_factor();
+
+          auto u_inner                 = fe_eval.get_value();
+          auto normal_derivative_inner = fe_eval.get_normal_derivative();
+          auto test_by_value = 2 * u_inner * sigma - normal_derivative_inner;
+
+          fe_eval.submit_value(test_by_value);
+          fe_eval.submit_normal_derivative(-u_inner);
+
+          fe_eval.integrate(true, true);
+
+          if (tid == i)
+            my_diagonal = fe_eval.get_value();
+        }
+      fe_eval.submit_dof_value(my_diagonal);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
+
+
+  template <int dim, int fe_degree, typename Number, bool diag = false>
   class LocalLaplaceFaceOperator
   {
   public:
@@ -586,6 +692,97 @@ namespace PSMF
   };
 
 
+
+  template <int dim, int fe_degree, typename Number>
+  class LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
+  {
+  public:
+    static const unsigned int n_dofs_1d = fe_degree + 1;
+    static const unsigned int n_local_dofs =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+    static const unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+
+    static const unsigned int cells_per_block = 1;
+
+
+    LocalLaplaceFaceOperator()
+    {}
+
+    __device__ Number
+    get_penalty_factor() const
+    {
+      return 1.0 * fe_degree * (fe_degree + 1);
+    }
+
+    __device__ void
+    operator()(const unsigned int                                  face,
+               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                      *shared_data,
+               const Number                                       *src,
+               Number                                             *dst) const
+    {
+      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+        phi_inner(face, gpu_data, shared_data, true);
+      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+        phi_outer(face, gpu_data, shared_data, false);
+
+      auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
+                       fabs(phi_outer.inverse_length_normal_to_face()));
+      auto sigma = hi * get_penalty_factor();
+
+      Number my_diagonal = 0.0;
+
+      const unsigned int tid = compute_index<dim, n_dofs_1d>();
+      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+        {
+          phi_inner.submit_dof_value(i == tid ? 1.0 : 0.0);
+          phi_inner.evaluate(true, true);
+
+          auto solution_jump = phi_inner.get_value();
+          auto average_normal_derivative =
+            0.5 * phi_inner.get_normal_derivative();
+          auto test_by_value =
+            solution_jump * sigma - average_normal_derivative;
+
+          phi_inner.submit_value(test_by_value);
+          phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+
+          phi_inner.integrate(true, true);
+
+          if (tid == i)
+            my_diagonal = phi_inner.get_value();
+        }
+
+      phi_inner.submit_dof_value(my_diagonal);
+      phi_inner.distribute_local_to_global(dst);
+
+      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+        {
+          phi_outer.submit_dof_value(i == tid ? 1.0 : 0.0);
+          phi_outer.evaluate(true, true);
+
+          auto solution_jump = -phi_outer.get_value();
+          auto average_normal_derivative =
+            0.5 * phi_outer.get_normal_derivative();
+          auto test_by_value =
+            solution_jump * sigma - average_normal_derivative;
+
+          phi_outer.submit_value(-test_by_value);
+          phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+
+          phi_outer.integrate(true, true);
+
+          if (tid == i)
+            my_diagonal = phi_outer.get_value();
+        }
+
+      phi_outer.submit_dof_value(my_diagonal);
+      phi_outer.distribute_local_to_global(dst);
+    }
+  };
+
+
   template <int dim, int fe_degree, typename Number>
   class LaplaceDGOperator : public Subscriptor
   {
@@ -593,7 +790,10 @@ namespace PSMF
     using value_type = Number;
 
     LaplaceDGOperator()
-    {}
+    {
+      inverse_diagonal_matrix = std::make_shared<DiagonalMatrix<
+        LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>>();
+    }
 
     void
     initialize(std::shared_ptr<const MatrixFree<dim, Number>> data_,
@@ -603,6 +803,11 @@ namespace PSMF
       data        = data_;
       dof_handler = &mg_dof;
       mg_level    = level;
+
+      if (mg_level == numbers::invalid_unsigned_int)
+        n_dofs = dof_handler->n_dofs();
+      else
+        n_dofs = dof_handler->n_dofs(mg_level);
     }
 
     void
@@ -650,6 +855,21 @@ namespace PSMF
           vec.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
         }
     }
+
+    unsigned int
+    m() const
+    {
+      return n_dofs;
+    }
+
+    // we cannot access matrix elements of a matrix free operator directly.
+    Number
+    el(const unsigned int row, const unsigned int col) const
+    {
+      ExcNotImplemented();
+      return -1000000000000000000;
+    }
+
 
     unsigned int
     get_mg_level() const
@@ -783,10 +1003,48 @@ namespace PSMF
       dst.sadd(-1., system_rhs_dev);
     }
 
+
+    void
+    compute_diagonal()
+    {
+      auto &inv_diag = inverse_diagonal_matrix->get_vector();
+
+      inv_diag.reinit(n_dofs);
+
+      LocalLaplaceOperator<dim, fe_degree, Number, true> laplace_operator;
+      data->cell_loop(laplace_operator, inv_diag, inv_diag);
+
+      LocalLaplaceBDOperator<dim, fe_degree, Number, true> laplace_bd_operator;
+      data->boundary_face_loop(laplace_bd_operator, inv_diag, inv_diag);
+
+      LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
+        laplace_face_operator;
+      data->inner_face_loop(laplace_face_operator, inv_diag, inv_diag);
+
+      vector_invert(inv_diag);
+
+      diagonal_is_available = true;
+    }
+
+    const std::shared_ptr<DiagonalMatrix<
+      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>>
+    get_diagonal_inverse() const
+    {
+      Assert(diagonal_is_available == true, ExcNotInitialized());
+      return inverse_diagonal_matrix;
+    }
+
+
   private:
     std::shared_ptr<const MatrixFree<dim, Number>> data;
     const DoFHandler<dim>                         *dof_handler;
     unsigned int                                   mg_level;
+    unsigned int                                   n_dofs;
+
+    std::shared_ptr<DiagonalMatrix<
+      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>>
+         inverse_diagonal_matrix;
+    bool diagonal_is_available;
   };
 
 

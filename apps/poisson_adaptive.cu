@@ -168,7 +168,7 @@ namespace Step64
       if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::Q)
         return std::make_shared<FE_Q<dim>>(fe_degree);
       else if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::DGQ)
-        return std::make_shared<FE_DGQHermite<dim>>(fe_degree);
+        return std::make_shared<FE_DGQ<dim>>(fe_degree);
       return std::shared_ptr<FiniteElement<dim>>();
     }())
     , dof_handler(triangulation)
@@ -363,21 +363,34 @@ namespace Step64
                                            unsigned int i,
                                            unsigned int call_count)
   {
-    PSMF::MultigridSolver<dim,
-                          fe_degree,
-                          CT::DOF_LAYOUT_,
-                          full_number,
-                          laplace,
-                          smooth_vmult,
-                          smooth_inv,
-                          vcycle_number>
+    // PSMF::MultigridSolver<dim,
+    //                       fe_degree,
+    //                       CT::DOF_LAYOUT_,
+    //                       full_number,
+    //                       laplace,
+    //                       smooth_vmult,
+    //                       smooth_inv,
+    //                       vcycle_number>
+    //   solver(dof_handler,
+    //          mfdata,
+    //          level_mfdata,
+    //          edge_up_mfdata,
+    //          edge_down_mfdata,
+    //          patch_data_dp,
+    //          patch_data_sp,
+    //          transfer,
+    //          Solution<dim, full_number>(),
+    //          RightHandSide<dim, full_number>(),
+    //          pcout,
+    //          1);
+
+
+    PSMF::MultigridSolverChebyshev<dim, fe_degree, CT::DOF_LAYOUT_, full_number>
       solver(dof_handler,
              mfdata,
              level_mfdata,
              edge_up_mfdata,
              edge_down_mfdata,
-             patch_data_dp,
-             patch_data_sp,
              transfer,
              Solution<dim, full_number>(),
              RightHandSide<dim, full_number>(),
