@@ -167,6 +167,13 @@ namespace PSMF
     gradient_at_quad_pts(const Number *const u, Number *grad_u[dim]);
 
     /**
+     * Evaluate the diagnoal of hessian of the finite element function at the
+     * quadrature points.
+     */
+    __device__ void
+    hessian_at_quad_pts(const Number *const u, Number *grad_u[dim]);
+
+    /**
      * Evaluate the values and the gradients of the finite element function at
      * the quadrature points.
      */
@@ -459,6 +466,96 @@ namespace PSMF
                                          grad_u[1],
                                          grad_u[1]);
             gradients<2, true, false, true>(get_cell_shape_gradients<Number>(
+                                              mf_object_id),
+                                            grad_u[2],
+                                            grad_u[2]);
+
+            break;
+          }
+        default:
+          {
+            // Do nothing. We should throw but we can't from a __device__
+            // function.
+            printf(
+              "Error: Invalid dimension. In file cuda_tensor_product_kernels.cuh:444\n");
+          }
+      }
+  }
+
+
+  template <int dim, int fe_degree, int n_q_points_1d, typename Number>
+  inline __device__ void
+  EvaluatorTensorProduct<evaluate_general,
+                         dim,
+                         fe_degree,
+                         n_q_points_1d,
+                         Number>::hessian_at_quad_pts(const Number *const u,
+                                                      Number *grad_u[dim])
+  {
+    switch (dim)
+      {
+        case 1:
+          {
+            gradients<0, true, false, false>(
+              get_cell_shape_hessians<Number>(mf_object_id), u, grad_u[0]);
+
+            break;
+          }
+        case 2:
+          {
+            gradients<0, true, false, false>(
+              get_cell_shape_hessians<Number>(mf_object_id), u, grad_u[0]);
+            values<0, true, false, false>(
+              get_cell_shape_values<Number>(mf_object_id), u, grad_u[1]);
+
+            __syncthreads();
+
+            values<1, true, false, true>(get_cell_shape_values<Number>(
+                                           mf_object_id),
+                                         grad_u[0],
+                                         grad_u[0]);
+            gradients<1, true, false, true>(get_cell_shape_hessians<Number>(
+                                              mf_object_id),
+                                            grad_u[1],
+                                            grad_u[1]);
+
+            break;
+          }
+        case 3:
+          {
+            gradients<0, true, false, false>(
+              get_cell_shape_hessians<Number>(mf_object_id), u, grad_u[0]);
+            values<0, true, false, false>(
+              get_cell_shape_values<Number>(mf_object_id), u, grad_u[1]);
+            values<0, true, false, false>(
+              get_cell_shape_values<Number>(mf_object_id), u, grad_u[2]);
+
+            __syncthreads();
+
+            values<1, true, false, true>(get_cell_shape_values<Number>(
+                                           mf_object_id),
+                                         grad_u[0],
+                                         grad_u[0]);
+            gradients<1, true, false, true>(get_cell_shape_hessians<Number>(
+                                              mf_object_id),
+                                            grad_u[1],
+                                            grad_u[1]);
+            values<1, true, false, true>(get_cell_shape_values<Number>(
+                                           mf_object_id),
+                                         grad_u[2],
+                                         grad_u[2]);
+
+            __syncthreads();
+
+            values<2, true, false, true>(get_cell_shape_values<Number>(
+                                           mf_object_id),
+                                         grad_u[0],
+                                         grad_u[0]);
+            values<2, true, false, true>(get_cell_shape_values<Number>(
+                                           mf_object_id),
+                                         grad_u[1],
+                                         grad_u[1]);
+            gradients<2, true, false, true>(get_cell_shape_hessians<Number>(
                                               mf_object_id),
                                             grad_u[2],
                                             grad_u[2]);

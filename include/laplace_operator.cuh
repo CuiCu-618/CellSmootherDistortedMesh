@@ -518,6 +518,47 @@ namespace PSMF
 
 
   template <int dim, int fe_degree, typename Number, bool diag = false>
+  class LocalLaplaceEstimator
+  {
+  public:
+    static const unsigned int n_dofs_1d    = fe_degree + 1;
+    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
+    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalLaplaceEstimator()
+    {}
+
+    __device__ void
+    operator()(const unsigned int                                  cell,
+               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                      *shared_data,
+               const Number                                       *src,
+               Number                                             *dst) const
+    {
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+      fe_eval.read_dof_values(src);
+      fe_eval.evaluate_hessian();
+
+      auto trace = fe_eval.get_trace_hessian();
+      auto h_k   = fe_eval.inv_jac[0];
+      auto t     = h_k * trace;
+
+      fe_eval.submit_value(t * t * 2);
+
+      auto val = fe_eval.get_value();
+
+      atomicAdd(&dst[cell], val);
+    }
+  };
+
+
+
+  template <int dim, int fe_degree, typename Number, bool diag = false>
   class LocalLaplaceBDOperator
   {
   public:
@@ -827,6 +868,16 @@ namespace PSMF
     }
 
     void
+    estimate(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
+             const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
+               &src) const
+    {
+      dst = 0.;
+      LocalLaplaceEstimator<dim, fe_degree, Number> laplace_operator;
+      data->cell_loop(laplace_operator, src, dst);
+    }
+
+    void
     Tvmult(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
            const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
              &src) const
@@ -864,7 +915,7 @@ namespace PSMF
 
     // we cannot access matrix elements of a matrix free operator directly.
     Number
-    el(const unsigned int row, const unsigned int col) const
+    el(const unsigned int, const unsigned int) const
     {
       ExcNotImplemented();
       return -1000000000000000000;

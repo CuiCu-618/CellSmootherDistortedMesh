@@ -111,6 +111,11 @@ namespace PSMF
     using gradient_type = dealii::Tensor<1, dim, Number>;
 
     /**
+     * An alias for vectorial quantities.
+     */
+    using hessian_type = dealii::Tensor<2, dim, Number>;
+
+    /**
      * An alias to kernel specific information.
      */
     using data_type = typename MatrixFree<dim, Number>::Data;
@@ -176,6 +181,18 @@ namespace PSMF
     evaluate(const bool evaluate_val, const bool evaluate_grad);
 
     /**
+     * Evaluate the function hessians of the FE function given at the DoF values
+     * in the input vector at the quadrature points on the unit cell. The
+     * function arguments specify which parts shall actually be computed. This
+     * function needs to be called before the functions @p get_hessian() give
+     * useful information.
+     * @warning only the diagonal elements
+     * @todo full hessian matrix
+     */
+    __device__ void
+    evaluate_hessian();
+
+    /**
      * This function takes the values and/or gradients that are stored on
      * quadrature points, tests them by all the basis functions/gradients on
      * the cell and performs the cell integration. The two function arguments
@@ -224,6 +241,13 @@ namespace PSMF
      * Same as above, except that the quadrature point is computed from the
      * thread id.
      */
+    __device__ value_type
+    get_trace_hessian() const;
+
+    /**
+     * Same as above, except that the quadrature point is computed from the
+     * thread id.
+     */
     __device__ void
     submit_gradient(const gradient_type &grad_in);
 
@@ -243,6 +267,8 @@ namespace PSMF
     __device__ void
     apply_for_each_quad_point(const Functor &func);
 
+    Number *inv_jac;
+
   private:
     dealii::types::global_dof_index *local_to_global;
     unsigned int                     n_cells;
@@ -254,7 +280,6 @@ namespace PSMF
 
     const bool use_coloring;
 
-    Number *inv_jac;
     Number *JxW;
 
     // Internal buffer
@@ -616,6 +641,26 @@ namespace PSMF
   }
 
 
+  template <int dim,
+            int fe_degree,
+            int n_q_points_1d,
+            int n_components_,
+            typename Number>
+  __device__ void
+  FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
+    evaluate_hessian()
+  {
+    EvaluatorTensorProduct<EvaluatorVariant::evaluate_general,
+                           dim,
+                           fe_degree,
+                           n_q_points_1d,
+                           Number>
+      evaluator_tensor_product(mf_object_id);
+    evaluator_tensor_product.hessian_at_quad_pts(values, gradients);
+    __syncthreads();
+  }
+
+
 
   template <int dim,
             int fe_degree,
@@ -753,6 +798,35 @@ namespace PSMF
       }
 
     return grad;
+  }
+
+
+  template <int dim,
+            int fe_degree,
+            int n_q_points_1d,
+            int n_components_,
+            typename Number>
+  __device__ typename FEEvaluation<dim,
+                                   fe_degree,
+                                   n_q_points_1d,
+                                   n_components_,
+                                   Number>::value_type
+  FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
+    get_trace_hessian() const
+  {
+    static_assert(n_components_ == 1, "This function only supports FE with one \
+                  components");
+
+    // TODO optimize if the mesh is uniform
+    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
+
+    Number trace = 0.;
+    for (unsigned int d = 0; d < dim; ++d)
+      {
+        trace += gradients[d][q_point];
+      }
+
+    return trace;
   }
 
 

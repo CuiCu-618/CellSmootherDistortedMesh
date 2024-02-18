@@ -1412,7 +1412,7 @@ namespace PSMF
       const unsigned int                                n_cycles = 1)
       : dof_handler(&dof_handler)
       , transfer(&transfer_dp)
-      , minlevel(1)
+      , minlevel(0)
       , maxlevel(dof_handler.get_triangulation().n_global_levels() - 1)
       , n_cycles(n_cycles)
       , analytic_solution(boundary_values)
@@ -1440,6 +1440,9 @@ namespace PSMF
 
       active_matrix.initialize_dof_vector(solution);
       rhs = solution;
+
+      estimated_error_square_per_cell.reinit(
+        dof_handler.get_triangulation().n_active_cells());
 
       // set up a mapping for the geometry representation
       MappingQ1<dim> mapping;
@@ -1538,6 +1541,13 @@ namespace PSMF
     get_solution()
     {
       return solution;
+    }
+
+    // Return the estimate vector for further processing
+    const VectorType &
+    get_estimate()
+    {
+      return estimated_error_square_per_cell;
     }
 
     // Implement the vmult() function needed by the preconditioner interface
@@ -1729,6 +1739,8 @@ namespace PSMF
         clear_timings();
       }
 
+      active_matrix.estimate(estimated_error_square_per_cell, solution);
+
       Timer              time;
       const unsigned int N         = 5;
       double             best_time = 1e10;
@@ -1829,6 +1841,10 @@ namespace PSMF
      */
     mutable VectorType rhs;
 
+    /**
+     * Vector to store error estimator square
+     */
+    mutable VectorType estimated_error_square_per_cell;
 
     // MGLevelObject<SmootherType> smooth;
 

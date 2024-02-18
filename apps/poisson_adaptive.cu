@@ -13,19 +13,24 @@
 #include <deal.II/base/convergence_table.h>
 #include <deal.II/base/cuda.h>
 #include <deal.II/base/function.h>
+#include <deal.II/base/function_lib.h>
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/timer.h>
 
+#include <deal.II/distributed/grid_refinement.h>
 #include <deal.II/distributed/tria.h>
 
 #include <deal.II/dofs/dof_tools.h>
 
 #include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/mapping_q.h>
 
 #include <deal.II/grid/filtered_iterator.h>
 #include <deal.II/grid/grid_generator.h>
+#include <deal.II/grid/grid_refinement.h>
 #include <deal.II/grid/grid_tools.h>
+#include <deal.II/grid/manifold_lib.h>
 
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/la_parallel_vector.h>
@@ -134,7 +139,7 @@ namespace Step64
     parallel::distributed::Triangulation<dim> triangulation;
     std::shared_ptr<FiniteElement<dim>>       fe;
     DoFHandler<dim>                           dof_handler;
-    MappingQ1<dim>                            mapping;
+    MappingQ<dim>                             mapping;
     double                                    setup_time;
 
     std::vector<ConvergenceTable> info_table;
@@ -155,6 +160,8 @@ namespace Step64
 
     LinearAlgebra::distributed::Vector<full_number, MemorySpace::Host>
       ghost_solution_host;
+
+    Vector<double> estimated_error_per_cell;
   };
 
   template <int dim, int fe_degree>
@@ -172,6 +179,7 @@ namespace Step64
       return std::shared_ptr<FiniteElement<dim>>();
     }())
     , dof_handler(triangulation)
+    , mapping(fe_degree)
     , setup_time(0.)
     , pcout(std::make_shared<ConditionalOStream>(std::cout, false))
   {
@@ -207,9 +215,13 @@ namespace Step64
 
     auto n_replicate = CT::N_REPLICATE_;
 
-    *pcout << "Number of degrees of freedom: " << dof_handler.n_dofs() << " = "
-           << n_replicate << " x (" << (1 << (nlevels - 1)) << " x ("
-           << fe->degree << " + 1))^" << dim << std::endl;
+    *pcout << "Triangulation " << triangulation.n_active_cells() << " cells, "
+           << triangulation.n_levels() << " levels" << std::endl;
+
+    *pcout << "DoFHandler " << dof_handler.n_dofs() << " dofs, level dofs";
+    for (unsigned int l = 0; l < triangulation.n_levels(); ++l)
+      *pcout << ' ' << dof_handler.n_dofs(l);
+    *pcout << std::endl;
 
     constraints.clear();
     constraints.close();
@@ -229,19 +241,16 @@ namespace Step64
     mg_constrained_dofs.make_zero_boundary_constraints(dof_handler,
                                                        dirichlet_boundary);
 
-    // set up a mapping for the geometry representation
-    MappingQ1<dim> mapping;
-
-    unsigned int minlevel = 1;
+    unsigned int minlevel = 0;
     unsigned int maxlevel = triangulation.n_global_levels() - 1;
 
-    patch_data_dp.resize(1, maxlevel);
-    level_mfdata.resize(1, maxlevel);
-    edge_up_mfdata.resize(1, maxlevel);
-    edge_down_mfdata.resize(1, maxlevel);
+    patch_data_dp.resize(minlevel, maxlevel);
+    level_mfdata.resize(minlevel, maxlevel);
+    edge_up_mfdata.resize(minlevel, maxlevel);
+    edge_down_mfdata.resize(minlevel, maxlevel);
 
     if (std::is_same_v<vcycle_number, float>)
-      patch_data_sp.resize(1, maxlevel);
+      patch_data_sp.resize(minlevel, maxlevel);
 
     Timer time;
 
@@ -307,39 +316,40 @@ namespace Step64
         }
     }
 
-    for (unsigned int level = minlevel; level <= maxlevel; ++level)
-      {
-        // double-precision matrix-free data
-        {
-          typename MatrixFreeDP::AdditionalData additional_data;
-          additional_data.relaxation         = 1.;
-          additional_data.use_coloring       = false;
-          additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
-          additional_data.granularity_scheme = CT::GRANULARITY_;
+    // for (unsigned int level = minlevel; level <= maxlevel; ++level)
+    //   {
+    //     // double-precision matrix-free data
+    //     {
+    //       typename MatrixFreeDP::AdditionalData additional_data;
+    //       additional_data.relaxation         = 1.;
+    //       additional_data.use_coloring       = false;
+    //       additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
+    //       additional_data.granularity_scheme = CT::GRANULARITY_;
 
-          patch_data_dp[level] = std::make_shared<MatrixFreeDP>();
-          patch_data_dp[level]->reinit(dof_handler, level, additional_data);
-        }
+    //       patch_data_dp[level] = std::make_shared<MatrixFreeDP>();
+    //       patch_data_dp[level]->reinit(dof_handler, level, additional_data);
+    //     }
 
-        // single-precision matrix-free data
-        if (std::is_same_v<vcycle_number, float>)
-          {
-            // AffineConstraints<vcycle_number> level_constraints;
-            // level_constraints.reinit(relevant_dofs);
-            // level_constraints.add_lines(
-            //   mg_constrained_dofs.get_boundary_indices(level));
-            // level_constraints.close();
+    //     // single-precision matrix-free data
+    //     if (std::is_same_v<vcycle_number, float>)
+    //       {
+    //         // AffineConstraints<vcycle_number> level_constraints;
+    //         // level_constraints.reinit(relevant_dofs);
+    //         // level_constraints.add_lines(
+    //         //   mg_constrained_dofs.get_boundary_indices(level));
+    //         // level_constraints.close();
 
-            typename MatrixFreeSP::AdditionalData additional_data;
-            additional_data.relaxation         = 1.;
-            additional_data.use_coloring       = false;
-            additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
-            additional_data.granularity_scheme = CT::GRANULARITY_;
+    //         typename MatrixFreeSP::AdditionalData additional_data;
+    //         additional_data.relaxation         = 1.;
+    //         additional_data.use_coloring       = false;
+    //         additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
+    //         additional_data.granularity_scheme = CT::GRANULARITY_;
 
-            patch_data_sp[level] = std::make_shared<MatrixFreeSP>();
-            patch_data_sp[level]->reinit(dof_handler, level, additional_data);
-          }
-      }
+    //         patch_data_sp[level] = std::make_shared<MatrixFreeSP>();
+    //         patch_data_sp[level]->reinit(dof_handler, level,
+    //         additional_data);
+    //       }
+    //   }
 
     *pcout << "Matrix-free setup time: " << time.wall_time() << "s"
            << std::endl;
@@ -392,8 +402,8 @@ namespace Step64
              edge_up_mfdata,
              edge_down_mfdata,
              transfer,
-             Solution<dim, full_number>(),
-             RightHandSide<dim, full_number>(),
+             Functions::SlitSingularityFunction<dim>(),
+             Functions::ZeroFunction<dim, full_number>(),
              pcout,
              1);
 
@@ -481,6 +491,18 @@ namespace Step64
         ghost_solution_host = solution_host;
         constraints.distribute(ghost_solution_host);
 
+        auto estimated = solver.get_estimate();
+        LinearAlgebra::distributed::Vector<double, MemorySpace::Host>
+                                               estimate_host(estimated.size());
+        LinearAlgebra::ReadWriteVector<double> rw_vector_estimate(
+          estimated.size());
+        rw_vector_estimate.import(estimated, VectorOperation::insert);
+        estimate_host.import(rw_vector_estimate, VectorOperation::insert);
+
+        estimated_error_per_cell.reinit(estimate_host.size());
+        for (unsigned int i = 0; i < estimate_host.size(); ++i)
+          estimated_error_per_cell[i] = std::sqrt(estimate_host[i]);
+
         const auto [l2_error, H1_error] = compute_error();
 
         *pcout << "L2 error: " << l2_error << std::endl
@@ -512,7 +534,7 @@ namespace Step64
     Vector<double> cellwise_norm(triangulation.n_active_cells());
     VectorTools::integrate_difference(dof_handler,
                                       ghost_solution_host,
-                                      Solution<dim, full_number>(),
+                                      Functions::SlitSingularityFunction<dim>(),
                                       cellwise_norm,
                                       QGauss<dim>(fe->degree + 1),
                                       VectorTools::L2_norm);
@@ -524,7 +546,7 @@ namespace Step64
     Vector<double> cellwise_h1norm(triangulation.n_active_cells());
     VectorTools::integrate_difference(dof_handler,
                                       ghost_solution_host,
-                                      Solution<dim, full_number>(),
+                                      Functions::SlitSingularityFunction<dim>(),
                                       cellwise_h1norm,
                                       QGauss<dim>(fe->degree + 1),
                                       VectorTools::H1_seminorm);
@@ -613,7 +635,7 @@ namespace Step64
         long long unsigned int n_dofs = std::pow(
           std::pow(2, triangulation.n_global_levels()) * (fe_degree + 1), dim);
 
-        if (n_dofs > CT::MAX_SIZES_)
+        if (n_dofs > CT::MAX_SIZES_ || cycle == n_cycles - 1)
           {
             *pcout << "Max size reached, terminating." << std::endl;
             *pcout << std::endl;
@@ -650,16 +672,30 @@ namespace Step64
               parallel::distributed::Triangulation<
                 dim>::construct_multigrid_hierarchy);
 
-            GridGenerator::hyper_cube(tria, 0, 1);
-            if (dim == 2)
-              GridGenerator::replicate_triangulation(tria,
-                                                     {CT::N_REPLICATE_, 1},
-                                                     triangulation);
-            else if (dim == 3)
-              GridGenerator::replicate_triangulation(tria,
-                                                     {CT::N_REPLICATE_, 1, 1},
-                                                     triangulation);
+            // GridGenerator::hyper_cube(tria, 0, 1);
+            // if (dim == 2)
+            //   GridGenerator::replicate_triangulation(tria,
+            //                                          {CT::N_REPLICATE_, 1},
+            //                                          triangulation);
+            // else if (dim == 3)
+            //   GridGenerator::replicate_triangulation(tria,
+            //                                          {CT::N_REPLICATE_, 1,
+            //                                          1}, triangulation);
 
+            GridGenerator::hyper_cube_slit(triangulation, -1, 1);
+
+            // SphericalManifold<dim>                boundary_manifold;
+            // TransfiniteInterpolationManifold<dim> inner_manifold;
+
+            // GridGenerator::hyper_ball(triangulation);
+
+            // triangulation.set_all_manifold_ids(1);
+            // triangulation.set_all_manifold_ids_on_boundary(0);
+
+            // triangulation.set_manifold(0, boundary_manifold);
+
+            // inner_manifold.initialize(triangulation);
+            // triangulation.set_manifold(1, inner_manifold);
             triangulation.refine_global(1);
 
             // auto begin_cell = triangulation.begin_active();
@@ -677,37 +713,47 @@ namespace Step64
             // global
             // triangulation.refine_global(1);
 
-            for (auto &cell : triangulation.active_cell_iterators())
-              {
-                // quad
-                auto center = cell->center();
-                if (dim == 2)
-                  {
-                    if (center[0] > 0.5 && center[1] > 0.5)
-                      cell->set_refine_flag();
-                  }
-                else if (dim == 3)
-                  {
-                    if (center[0] > 0.5 && center[1] > 0.5 && center[2] > 0.5)
-                      cell->set_refine_flag();
-                  }
+            // for (auto &cell : triangulation.active_cell_iterators())
+            //   {
+            //     // quad
+            //     auto center = cell->center();
+            //     if (dim == 2)
+            //       {
+            //         if (center[0] > 0.5 && center[1] > 0.5)
+            //           cell->set_refine_flag();
+            //       }
+            //     else if (dim == 3)
+            //       {
+            //         if (center[0] > 0.5 && center[1] > 0.5 && center[2] >
+            //         0.5)
+            //           cell->set_refine_flag();
+            //       }
+            //   }
 
-                // // circle
-                // const Point<dim> center;
-                // const double     radius = 1. / 2;
-                // for (const auto v : cell->vertex_indices())
-                //   {
-                //     auto distance_from_center =
-                //     center.distance(cell->vertex(v));
+            //     // // circle
+            //     // const Point<dim> center;
+            //     // const double     radius = 1. / 2;
+            //     // for (const auto v : cell->vertex_indices())
+            //     //   {
+            //     //     auto distance_from_center =
+            //     //     center.distance(cell->vertex(v));
 
-                //     if (distance_from_center < radius)
-                //       {
-                //         cell->set_refine_flag();
-                //         break;
-                //       }
-                //   }
-              }
+            //     //     if (distance_from_center < radius)
+            //     //       {
+            //     //         cell->set_refine_flag();
+            //     //         break;
+            //     //       }
+            //     //   }
+            //   }
+            parallel::distributed::GridRefinement::
+              refine_and_coarsen_fixed_fraction(triangulation,
+                                                estimated_error_per_cell,
+                                                0.5,
+                                                0.0);
             triangulation.execute_coarsening_and_refinement();
+
+            // estimated_error_per_cell.print(std::cout);
+            // ghost_solution_host.print(std::cout);
           }
 
         setup_system();
@@ -740,7 +786,7 @@ main(int argc, char *argv[])
 
       {
         LaplaceProblem<CT::DIMENSION_, CT::FE_DEGREE_> Laplace_problem;
-        Laplace_problem.run(20);
+        Laplace_problem.run(10);
       }
     }
   catch (std::exception &exc)

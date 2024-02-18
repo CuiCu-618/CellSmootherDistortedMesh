@@ -100,7 +100,11 @@ namespace PSMF
                                                [data_array_size];
   __constant__ float face_co_shape_gradients_f[mf_n_concurrent_objects]
                                               [data_array_size];
-
+  // Shape hessians
+  __constant__ double cell_shape_hessians_d[mf_n_concurrent_objects]
+                                           [data_array_size];
+  __constant__ float cell_shape_hessians_f[mf_n_concurrent_objects]
+                                          [data_array_size];
 
   template <typename Number>
   __host__ __device__ inline DataArray<Number>          &
@@ -215,6 +219,24 @@ namespace PSMF
     return face_co_shape_gradients_f[i];
   }
 
+
+  template <typename Number>
+  __host__ __device__ inline DataArray<Number>          &
+  get_cell_shape_hessians(unsigned int i);
+
+  template <>
+  __host__ __device__ inline DataArray<double>          &
+  get_cell_shape_hessians<double>(unsigned int i)
+  {
+    return cell_shape_hessians_d[i];
+  }
+
+  template <>
+  __host__ __device__ inline DataArray<float>          &
+  get_cell_shape_hessians<float>(unsigned int i)
+  {
+    return cell_shape_hessians_f[i];
+  }
 
 
   /**
@@ -714,9 +736,10 @@ namespace PSMF
 
                     neighbor->get_active_or_mg_dof_indices(
                       local_dof_indices_coarse);
-                    if (partitioner)
-                      for (auto &index : local_dof_indices_coarse)
-                        index = partitioner->global_to_local(index);
+                    // todo: we need a coarser level partitioner
+                    // if (partitioner)
+                    //   for (auto &index : local_dof_indices_coarse)
+                    //     index = partitioner->global_to_local(index);
                     memcpy(&l_to_g_coarse_host[cell_id * padding_length],
                            local_dof_indices_coarse.data(),
                            dofs_per_cell *
@@ -1615,6 +1638,14 @@ namespace PSMF
         cuda_error =
           cudaMemcpyToSymbol(get_cell_shape_gradients<Number>(0),
                              shape_info.data.front().shape_gradients.data(),
+                             size_shape_values,
+                             my_id * data_array_size * sizeof(Number),
+                             cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
+
+        cuda_error =
+          cudaMemcpyToSymbol(get_cell_shape_hessians<Number>(0),
+                             shape_info.data.front().shape_hessians.data(),
                              size_shape_values,
                              my_id * data_array_size * sizeof(Number),
                              cudaMemcpyHostToDevice);
