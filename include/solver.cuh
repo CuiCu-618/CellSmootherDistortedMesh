@@ -1806,7 +1806,7 @@ namespace PSMF
     void
     do_matvec()
     {
-      matrix[maxlevel].vmult(solution, rhs);
+      active_matrix.vmult(solution, rhs);
       cudaDeviceSynchronize();
     }
 

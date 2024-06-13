@@ -634,6 +634,8 @@ namespace Step64
 
         long long unsigned int n_dofs = std::pow(
           std::pow(2, triangulation.n_global_levels()) * (fe_degree + 1), dim);
+        if (CT::SETS_ == "quadrant")
+          n_dofs = n_dofs / 7;
 
         if (n_dofs > CT::MAX_SIZES_ || cycle == n_cycles - 1)
           {
@@ -666,11 +668,11 @@ namespace Step64
             // auto n_replicate =
             //   Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
 
-            parallel::distributed::Triangulation<dim> tria(
-              MPI_COMM_WORLD,
-              Triangulation<dim>::limit_level_difference_at_vertices,
-              parallel::distributed::Triangulation<
-                dim>::construct_multigrid_hierarchy);
+            // parallel::distributed::Triangulation<dim> tria(
+            //   MPI_COMM_WORLD,
+            //   Triangulation<dim>::limit_level_difference_at_vertices,
+            //   parallel::distributed::Triangulation<
+            //     dim>::construct_multigrid_hierarchy);
 
             // GridGenerator::hyper_cube(tria, 0, 1);
             // if (dim == 2)
@@ -682,7 +684,10 @@ namespace Step64
             //                                          {CT::N_REPLICATE_, 1,
             //                                          1}, triangulation);
 
-            GridGenerator::hyper_cube_slit(triangulation, -1, 1);
+            if (CT::SETS_ == "error_analysis")
+              GridGenerator::hyper_cube_slit(triangulation, -1, 1);
+            else
+              GridGenerator::hyper_cube(triangulation, 0, 1);
 
             // SphericalManifold<dim>                boundary_manifold;
             // TransfiniteInterpolationManifold<dim> inner_manifold;
@@ -713,23 +718,6 @@ namespace Step64
             // global
             // triangulation.refine_global(1);
 
-            // for (auto &cell : triangulation.active_cell_iterators())
-            //   {
-            //     // quad
-            //     auto center = cell->center();
-            //     if (dim == 2)
-            //       {
-            //         if (center[0] > 0.5 && center[1] > 0.5)
-            //           cell->set_refine_flag();
-            //       }
-            //     else if (dim == 3)
-            //       {
-            //         if (center[0] > 0.5 && center[1] > 0.5 && center[2] >
-            //         0.5)
-            //           cell->set_refine_flag();
-            //       }
-            //   }
-
             //     // // circle
             //     // const Point<dim> center;
             //     // const double     radius = 1. / 2;
@@ -745,12 +733,37 @@ namespace Step64
             //     //       }
             //     //   }
             //   }
-            parallel::distributed::GridRefinement::
-              refine_and_coarsen_fixed_fraction(triangulation,
-                                                estimated_error_per_cell,
-                                                0.5,
-                                                0.0);
-            triangulation.execute_coarsening_and_refinement();
+
+            if (CT::SETS_ == "error_analysis")
+              {
+                parallel::distributed::GridRefinement::
+                  refine_and_coarsen_fixed_fraction(triangulation,
+                                                    estimated_error_per_cell,
+                                                    0.5,
+                                                    0.0);
+                triangulation.execute_coarsening_and_refinement();
+              }
+            else if (CT::SETS_ == "quadrant")
+              {
+                for (auto &cell : triangulation.active_cell_iterators())
+                  {
+                    auto center = cell->center();
+                    if (dim == 2)
+                      {
+                        if (center[0] > 0.5 && center[1] > 0.5)
+                          cell->set_refine_flag();
+                      }
+                    else if (dim == 3)
+                      {
+                        if (center[0] > 0.5 && center[1] > 0.5 &&
+                            center[2] > 0.5)
+                          cell->set_refine_flag();
+                      }
+                  }
+                triangulation.execute_coarsening_and_refinement();
+              }
+            else
+              triangulation.refine_global(1);
 
             // estimated_error_per_cell.print(std::cout);
             // ghost_solution_host.print(std::cout);

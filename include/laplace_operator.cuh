@@ -14,6 +14,8 @@
 
 #include <deal.II/lac/diagonal_matrix.h>
 
+#include "cuda_fe_evaluation.cuh"
+#include "cuda_matrix_free.cuh"
 #include "patch_base.cuh"
 
 using namespace dealii;

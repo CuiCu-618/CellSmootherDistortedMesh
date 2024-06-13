@@ -119,6 +119,7 @@ namespace Util
     oss << str_smooth_inv_variant;
     oss << str_granularity;
     oss << "_" << value_type;
+    oss << "_" << CT::SETS_;
 
     return oss.str();
   }
@@ -183,6 +184,7 @@ namespace Util
     oss << std::endl;
     oss << "Granularity Scheme:             "
         << GranularityToString(CT::GRANULARITY_) << std::endl
+        << "Experiment set:                 " << CT::SETS_ << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
         << "Number of MG cycles in V-cycle: " << 1 << std::endl
         << std::endl;
