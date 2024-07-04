@@ -12,6 +12,7 @@ INCLUDE_DIRECTORIES(
 
 SET( SOURCE_FILES
         mpi_coloring.cu
+        test_mpi.cu
         )
 
 FOREACH ( sourcefile ${SOURCE_FILES} )
