@@ -433,7 +433,7 @@ namespace PSMF
                 collection.resize(patch_size);
               if (patch_size == regular_vpatch_size) // regular patch
                 collection[regular_vpatch_size - 1 - v] = cell;
-              else                                   // irregular patch
+              else // irregular patch
                 AssertThrow(false, ExcMessage("TODO irregular vertex patches"));
             }
         }
@@ -447,7 +447,8 @@ namespace PSMF
     const unsigned int   patch_id,
     const bool           is_ghost)
   {
-    std::vector<unsigned int> local_dof_indices(Util::pow(fe_degree + 1, dim));
+    std::vector<types::global_dof_index> local_dof_indices(
+      Util::pow(fe_degree + 1, dim));
     std::vector<unsigned int> numbering(regular_vpatch_size);
     std::iota(numbering.begin(), numbering.end(), 0);
 
@@ -1600,7 +1601,7 @@ namespace PSMF
 
 } // namespace PSMF
 
-  /**
-   * \page patch_base.template
-   * \include patch_base.template.cuh
-   */
+/**
+ * \page patch_base.template
+ * \include patch_base.template.cuh
+ */

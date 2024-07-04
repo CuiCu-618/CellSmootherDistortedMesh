@@ -370,7 +370,7 @@ namespace PSMF
     std::vector<Number>                          face_JxW_host;
     std::vector<Number>                          face_inv_jacobian_host;
     std::vector<Number>                          normal_vector_host;
-    std::vector<dealii::types::global_dof_index> face_number_host;
+    std::vector<unsigned int>                    face_number_host;
     std::vector<int>                             subface_number_host;
     std::vector<int>                             face_orientation_host;
     std::vector<dealii::internal::MatrixFreeFunctions::ConstraintKinds>
@@ -992,7 +992,7 @@ namespace PSMF
       data->n_inner_faces[color] * 2 + data->n_boundary_faces[color];
 
     alloc_and_copy(&data->face_number[color],
-                   dealii::ArrayView<const dealii::types::global_dof_index>(
+                   dealii::ArrayView<const unsigned int>(
                      face_number_host.data(), face_number_host.size()),
                    n_faces);
 
@@ -2182,4 +2182,4 @@ namespace PSMF
 
 } // namespace PSMF
 
-  // #endif // CUDA_MATRIX_FREE_TEMPLATE_CUH
+// #endif // CUDA_MATRIX_FREE_TEMPLATE_CUH
