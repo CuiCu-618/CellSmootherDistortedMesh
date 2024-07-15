@@ -62,12 +62,12 @@ namespace Util
    *  0  1 |  2  3
    */
   template <int dim, int fe_degree>
-  __device__ unsigned int
-  compute_indices(unsigned int *first_dofs,
-                  unsigned int  local_patch,
-                  unsigned int  local_tid_x,
-                  unsigned int  tid_y,
-                  unsigned int  tid_z)
+  __device__ types::global_dof_index
+             compute_indices(types::global_dof_index *first_dofs,
+                             unsigned int             local_patch,
+                             unsigned int             local_tid_x,
+                             unsigned int             tid_y,
+                             unsigned int             tid_z)
   {
     const unsigned int z_off = tid_z / (fe_degree + 1);
     const unsigned int y_off = tid_y / (fe_degree + 1);
@@ -91,8 +91,9 @@ namespace Util
    *  0  1 |  4  5
    */
   template <int dim, int fe_degree>
-  __device__ unsigned int
-  compute_indices_cell(unsigned int *first_dofs, unsigned int linear_tid)
+  __device__ types::global_dof_index
+             compute_indices_cell(types::global_dof_index *first_dofs,
+                                  unsigned int             linear_tid)
   {
     constexpr unsigned int cell_dofs = pow(fe_degree + 1, dim);
 

@@ -32,18 +32,18 @@ namespace PSMF
     static constexpr unsigned int n_fine   = fe_degree * 2 + 2;
     static constexpr unsigned int M        = 2;
 
-    Number             *values;
-    const Number       *weights;
-    const Number       *shape_values;
-    const unsigned int *dof_indices_coarse;
-    const unsigned int *dof_indices_fine;
+    Number                        *values;
+    const Number                  *weights;
+    const Number                  *shape_values;
+    const types::global_dof_index *dof_indices_coarse;
+    const types::global_dof_index *dof_indices_fine;
 
     __device__
-    MGTransferHelper(Number             *buf,
-                     const Number       *w,
-                     const Number       *shvals,
-                     const unsigned int *idx_coarse,
-                     const unsigned int *idx_fine)
+    MGTransferHelper(Number                        *buf,
+                     const Number                  *w,
+                     const Number                  *shvals,
+                     const types::global_dof_index *idx_coarse,
+                     const types::global_dof_index *idx_fine)
       : values(buf)
       , weights(w)
       , shape_values(shvals)
@@ -152,11 +152,11 @@ namespace PSMF
 
   public:
     __device__
-    MGProlongateHelper(Number             *buf,
-                       const Number       *w,
-                       const Number       *shvals,
-                       const unsigned int *idx_coarse,
-                       const unsigned int *idx_fine)
+    MGProlongateHelper(Number                        *buf,
+                       const Number                  *w,
+                       const Number                  *shvals,
+                       const types::global_dof_index *idx_coarse,
+                       const types::global_dof_index *idx_fine)
       : MGTransferHelper<dim, fe_degree, Number>(buf,
                                                  w,
                                                  shvals,
@@ -240,11 +240,11 @@ namespace PSMF
 
   public:
     __device__
-    MGRestrictHelper(Number             *buf,
-                     const Number       *w,
-                     const Number       *shvals,
-                     const unsigned int *idx_coarse,
-                     const unsigned int *idx_fine)
+    MGRestrictHelper(Number                        *buf,
+                     const Number                  *w,
+                     const Number                  *shvals,
+                     const types::global_dof_index *idx_coarse,
+                     const types::global_dof_index *idx_fine)
       : MGTransferHelper<dim, fe_degree, Number>(buf,
                                                  w,
                                                  shvals,
@@ -340,18 +340,19 @@ namespace PSMF
 
   template <int dim, int degree, typename loop_body, typename Number>
   __global__ void
-  mg_kernel(Number             *dst,
-            const Number       *src,
-            const Number       *weights,
-            const Number       *shape_values,
-            const unsigned int *dof_indices_coarse,
-            const unsigned int *dof_indices_fine,
-            const unsigned int *child_offset_in_parent,
-            const unsigned int  n_child_cell_dofs)
+  mg_kernel(Number                        *dst,
+            const Number                  *src,
+            const Number                  *weights,
+            const Number                  *shape_values,
+            const types::global_dof_index *dof_indices_coarse,
+            const types::global_dof_index *dof_indices_fine,
+            const types::global_dof_index *child_offset_in_parent,
+            const unsigned int             n_child_cell_dofs)
   {
-    const unsigned int n_fine        = Util::pow(degree * 2 + 2, dim);
-    const unsigned int coarse_cell   = blockIdx.x;
-    const unsigned int coarse_offset = child_offset_in_parent[coarse_cell];
+    const unsigned int            n_fine      = Util::pow(degree * 2 + 2, dim);
+    const unsigned int            coarse_cell = blockIdx.x;
+    const types::global_dof_index coarse_offset =
+      child_offset_in_parent[coarse_cell];
 
     loop_body body(internal::get_shared_mem_ptr<Number>(),
                    weights + coarse_cell * Util::pow(3, dim),
@@ -498,6 +499,7 @@ namespace PSMF
       vector_partitioners[level] =
         ghosted_level_vector[level].get_partitioner();
 
+    // WARN: setup_transfer() only works with "unsigned int"
     dealii::internal::MGTransfer::ElementInfo<Number> elem_info;
     dealii::internal::MGTransfer::setup_transfer<dim, Number>(
       mg_dof,
@@ -537,7 +539,7 @@ namespace PSMF
     //   }
 
     child_offset_in_parent.resize(n_levels - 1);
-    std::vector<unsigned int> offsets;
+    std::vector<types::global_dof_index> offsets;
 
     for (unsigned int l = 0; l < n_levels - 1; l++)
       {
@@ -545,7 +547,7 @@ namespace PSMF
 
         for (unsigned int c = 0; c < n_owned_level_cells[l]; ++c)
           {
-            const unsigned int shift =
+            const auto shift =
               dealii::internal::MGTransfer::compute_shift_within_children<dim>(
                 parent_child_connect[l][c].second,
                 fe_degree + 1 - element_is_continuous,
@@ -738,10 +740,10 @@ namespace PSMF
 
   template <typename Number>
   __global__ void
-  set_mg_constrained_dofs_kernel(Number             *vec,
-                                 const unsigned int *indices,
-                                 unsigned int        len,
-                                 Number              val)
+  set_mg_constrained_dofs_kernel(Number                        *vec,
+                                 const types::global_dof_index *indices,
+                                 types::global_dof_index        len,
+                                 Number                         val)
   {
     const unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < len)
@@ -757,7 +759,7 @@ namespace PSMF
     unsigned int                                                   level,
     Number                                                         val) const
   {
-    const unsigned int len = dirichlet_indices[level].size();
+    const types::global_dof_index len = dirichlet_indices[level].size();
     if (len > 0)
       {
         const unsigned int bksize  = 256;
@@ -991,7 +993,7 @@ namespace PSMF
     LinearAlgebra::ReadWriteVector<typename VectorType::value_type> rw_vector(
       host.size());
     device.reinit(host.size());
-    for (unsigned int i = 0; i < host.size(); ++i)
+    for (types::global_dof_index i = 0; i < host.size(); ++i)
       rw_vector[i] = host[i];
     device.import(rw_vector, VectorOperation::insert);
   }
@@ -1068,11 +1070,12 @@ namespace PSMF
                 std::pair<types::global_dof_index, types::global_dof_index>>
                            &global_copy_indices,
               IndexMapping &local_copy_indices) {
-            const unsigned int nmappings = global_copy_indices.size();
-            std::vector<int>   global_indices(nmappings);
-            std::vector<int>   level_indices(nmappings);
+            const types::global_dof_index nmappings =
+              global_copy_indices.size();
+            std::vector<int> global_indices(nmappings);
+            std::vector<int> level_indices(nmappings);
 
-            for (unsigned int j = 0; j < nmappings; ++j)
+            for (types::global_dof_index j = 0; j < nmappings; ++j)
               {
                 global_indices[j] = global_partitioner.global_to_local(
                   global_copy_indices[j].first);
@@ -1098,7 +1101,8 @@ namespace PSMF
         // copy_indices_global_mine_host
         copy_indices_global_mine_host[level].reinit(
           2, my_copy_indices_global_mine[level].size());
-        for (unsigned int i = 0; i < my_copy_indices_global_mine[level].size();
+        for (types::global_dof_index i = 0;
+             i < my_copy_indices_global_mine[level].size();
              ++i)
           {
             copy_indices_global_mine_host[level](0, i) =
@@ -1129,7 +1133,8 @@ namespace PSMF
         // check whether there is a renumbering of degrees of freedom on
         // either the finest level or the global dofs, which means that we
         // cannot apply a plain copy
-        for (unsigned int i = 0; i < my_copy_indices.back().size(); ++i)
+        for (types::global_dof_index i = 0; i < my_copy_indices.back().size();
+             ++i)
           if (my_copy_indices.back()[i].first !=
               my_copy_indices.back()[i].second)
             {

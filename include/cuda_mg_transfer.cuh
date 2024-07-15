@@ -39,8 +39,8 @@ namespace PSMF
 
   struct IndexMapping
   {
-    CudaVector<unsigned int> global_indices;
-    CudaVector<unsigned int> level_indices;
+    CudaVector<types::global_dof_index> global_indices;
+    CudaVector<types::global_dof_index> level_indices;
 
     std::size_t
     memory_consumption() const
@@ -257,13 +257,13 @@ namespace PSMF
      * cells necessary for the transfer to the next level.
      *
      */
-    std::vector<CudaVector<unsigned int>> level_dof_indices;
+    std::vector<CudaVector<types::global_dof_index>> level_dof_indices;
 
     /**
      * A variable storing the connectivity from parent to child cell numbers
      * for each level.
      */
-    std::vector<CudaVector<unsigned int>> child_offset_in_parent;
+    std::vector<CudaVector<types::global_dof_index>> child_offset_in_parent;
 
     /**
      * A variable storing the number of cells owned on a given process (sets
@@ -337,7 +337,7 @@ namespace PSMF
      * on cells for all levels (outer index), the cells within the levels
      * (second index), and the indices on the cell (inner index).
      */
-    std::vector<CudaVector<unsigned int>> dirichlet_indices;
+    std::vector<CudaVector<types::global_dof_index>> dirichlet_indices;
 
     /**
      * A vector that holds shared pointers to the partitioners of the
@@ -417,11 +417,11 @@ namespace PSMF
 
   template <typename Number, typename Number2, bool add>
   __global__ void
-  copy_with_indices_kernel(Number             *dst,
-                           Number2            *src,
-                           const unsigned int *dst_indices,
-                           const unsigned int *src_indices,
-                           int                 n)
+  copy_with_indices_kernel(Number                        *dst,
+                           Number2                       *src,
+                           const types::global_dof_index *dst_indices,
+                           const types::global_dof_index *src_indices,
+                           int                            n)
   {
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < n)
@@ -438,8 +438,8 @@ namespace PSMF
   copy_with_indices(
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>        &dst,
     const LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &src,
-    const CudaVector<unsigned int> &dst_indices,
-    const CudaVector<unsigned int> &src_indices)
+    const CudaVector<types::global_dof_index> &dst_indices,
+    const CudaVector<types::global_dof_index> &src_indices)
   {
     const int  n         = dst_indices.size();
     const int  blocksize = 256;

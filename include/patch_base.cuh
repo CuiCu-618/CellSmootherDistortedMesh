@@ -199,7 +199,7 @@ namespace PSMF
       /**
        * Number of patches for each color.
        */
-      unsigned int n_patches;
+      types::global_dof_index n_patches;
 
       /**
        * Number of patches per thread block.
@@ -209,25 +209,25 @@ namespace PSMF
       /**
        * Number of ghost indices
        */
-      unsigned int n_ghost_indices;
+      types::global_dof_index n_ghost_indices;
 
       /**
        * The range of the vector that is stored locally.
        */
-      unsigned int local_range_start;
-      unsigned int local_range_end;
+      types::global_dof_index local_range_start;
+      types::global_dof_index local_range_end;
 
       /**
        * The set of indices to which we need to have read access but that are
        * not locally owned.
        */
-      unsigned int *ghost_indices;
+      types::global_dof_index *ghost_indices;
 
       /**
        * Return the local index corresponding to the given global index.
        */
-      __device__ unsigned int
-      global_to_local(const unsigned int global_index) const;
+      __device__ types::global_dof_index
+      global_to_local(const types::global_dof_index global_index) const;
 
       __device__ unsigned int
       binary_search(const unsigned int local_index,
@@ -248,13 +248,13 @@ namespace PSMF
        * @note For DG case, the first degree of freedom index of
        *       four cells in a patch is stored consecutively.
        */
-      unsigned int *first_dof;
-      unsigned int *patch_dofs;
+      types::global_dof_index *first_dof;
+      types::global_dof_index *patch_dofs;
 
       /**
        * Pointer to the patch cell ordering type.
        */
-      unsigned int *patch_id;
+      types::global_dof_index *patch_id;
 
       /**
        * Pointer to the patch type. left, middle, right
@@ -264,12 +264,12 @@ namespace PSMF
       /**
        * Pointer to mapping from l to h
        */
-      unsigned int *l_to_h;
+      types::global_dof_index *l_to_h;
 
       /**
        * Pointer to mapping from l to h
        */
-      unsigned int *h_to_l;
+      types::global_dof_index *h_to_l;
 
       /**
        * Pointer to 1D mass matrix for lapalace operator.
@@ -420,9 +420,9 @@ namespace PSMF
      * Helper function. Get tensor product data for each patch.
      */
     void
-    get_patch_data(const PatchIterator &patch,
-                   const unsigned int   patch_id,
-                   const bool           is_ghost = false);
+    get_patch_data(const PatchIterator          &patch,
+                   const types::global_dof_index patch_id,
+                   const bool                    is_ghost = false);
 
     /**
      * Gathering the locally owned and ghost cells attached to a common
@@ -445,7 +445,7 @@ namespace PSMF
      */
     template <typename Number1>
     void
-    alloc_arrays(Number1 **array_device, const unsigned int n);
+    alloc_arrays(Number1 **array_device, const types::global_dof_index n);
 
     /**
      * Number of global refinments.
@@ -537,19 +537,19 @@ namespace PSMF
      * @note For DG case, the first degree of freedom index of
      *       four cells in a patch is stored consecutively.
      */
-    std::vector<unsigned int *> first_dof_laplace;
-    std::vector<unsigned int *> first_dof_smooth;
+    std::vector<types::global_dof_index *> first_dof_laplace;
+    std::vector<types::global_dof_index *> first_dof_smooth;
 
-    std::vector<unsigned int *> patch_dofs_laplace;
-    std::vector<unsigned int *> patch_dofs_smooth;
+    std::vector<types::global_dof_index *> patch_dofs_laplace;
+    std::vector<types::global_dof_index *> patch_dofs_smooth;
 
     /**
      * Vector of the the first degree of freedom
      * in each patch of a single color.
      * Initialize on host and copy to device later.
      */
-    std::vector<unsigned int> first_dof_host;
-    std::vector<unsigned int> patch_dofs_host;
+    std::vector<types::global_dof_index> first_dof_host;
+    std::vector<types::global_dof_index> patch_dofs_host;
 
     /**
      * Vector of pointer to patch type: left, middle, right.
@@ -566,13 +566,13 @@ namespace PSMF
     /**
      * Vector of pointer to the local cell ordering type for each patch.
      */
-    std::vector<unsigned int *> patch_id;
+    std::vector<types::global_dof_index *> patch_id;
 
     /**
      * Vector of patch cell ordering type.
      * Initialize on host and copy to device later.
      */
-    std::vector<unsigned int> patch_id_host;
+    std::vector<types::global_dof_index> patch_id_host;
 
     /**
      * Mapping from cell ordering to type id.
@@ -592,16 +592,16 @@ namespace PSMF
     /**
      * Pointer to mapping from l to h
      */
-    unsigned int *l_to_h;
+    types::global_dof_index *l_to_h;
 
     std::vector<unsigned int> l_to_h_host;
 
     /**
      * Pointer to mapping from l to h
      */
-    unsigned int *h_to_l;
+    types::global_dof_index *h_to_l;
 
-    std::vector<unsigned int> h_to_l_host;
+    std::vector<types::global_dof_index> h_to_l_host;
 
     /**
      * Pointer to 1D mass matrix for lapalace operator.
@@ -636,19 +636,19 @@ namespace PSMF
     /**
      * Number of ghost indices
      */
-    unsigned int n_ghost_indices;
+    types::global_dof_index n_ghost_indices;
 
     /**
      * The range of the vector that is stored locally.
      */
-    unsigned int local_range_start;
-    unsigned int local_range_end;
+    types::global_dof_index local_range_start;
+    types::global_dof_index local_range_end;
 
     /**
      * The set of indices to which we need to have read access but that are
      * not locally owned.
      */
-    unsigned int *ghost_indices_dev;
+    types::global_dof_index *ghost_indices_dev;
 
     /**
      * Shared pointer to store the parallel partitioning information. This

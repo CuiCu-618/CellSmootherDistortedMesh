@@ -13,7 +13,7 @@
 namespace PSMF
 {
 
-  template class CudaVector<unsigned int>;
+  template class CudaVector<types::global_dof_index>;
   template class CudaVector<float>;
   template class CudaVector<double>;
 
@@ -21,7 +21,7 @@ namespace PSMF
 
 DEAL_II_NAMESPACE_OPEN
 
-template class LinearAlgebra::ReadWriteVector<unsigned int>;
+template class LinearAlgebra::ReadWriteVector<types::global_dof_index>;
 
 namespace LinearAlgebra
 {

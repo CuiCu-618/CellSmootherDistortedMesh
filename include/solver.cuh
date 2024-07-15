@@ -1456,46 +1456,6 @@ namespace PSMF
       // interpolate the inhomogeneous boundary conditions
       inhomogeneous_bc.clear();
       inhomogeneous_bc.resize(maxlevel + 1);
-      if (CT::SETS_ == "error_analysis")
-        for (unsigned int level = minlevel; level <= maxlevel; ++level)
-          {
-            Quadrature<dim - 1> face_quad(
-              dof_handler.get_fe().get_unit_face_support_points());
-            FEFaceValues<dim>                    fe_values(mapping,
-                                        dof_handler.get_fe(),
-                                        face_quad,
-                                        update_quadrature_points);
-            std::vector<types::global_dof_index> face_dof_indices(
-              dof_handler.get_fe().dofs_per_face);
-
-            typename DoFHandler<dim>::cell_iterator cell =
-                                                      dof_handler.begin(level),
-                                                    endc =
-                                                      dof_handler.end(level);
-            for (; cell != endc; ++cell)
-              if (cell->level_subdomain_id() !=
-                  numbers::artificial_subdomain_id)
-                for (unsigned int face_no = 0;
-                     face_no < GeometryInfo<dim>::faces_per_cell;
-                     ++face_no)
-                  if (cell->at_boundary(face_no))
-                    {
-                      const typename DoFHandler<dim>::face_iterator face =
-                        cell->face(face_no);
-                      face->get_mg_dof_indices(level, face_dof_indices);
-                      fe_values.reinit(cell, face_no);
-                      for (unsigned int i = 0; i < face_dof_indices.size(); ++i)
-                        if (dof_handler.locally_owned_mg_dofs(level).is_element(
-                              face_dof_indices[i]))
-                          {
-                            const double value = analytic_solution.value(
-                              fe_values.quadrature_point(i));
-                            if (value != 0.0)
-                              inhomogeneous_bc[level][face_dof_indices[i]] =
-                                value;
-                          }
-                    }
-          }
 
       for (int level = maxlevel; level >= minlevel; --level)
         {

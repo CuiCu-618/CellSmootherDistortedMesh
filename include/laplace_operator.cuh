@@ -327,7 +327,7 @@ namespace PSMF
 
       dst = 0.;
 
-      const unsigned int n_dofs = src.size();
+      const auto n_dofs = src.locally_owned_size();
 
       LinearAlgebra::distributed::Vector<Number, MemorySpace::Host>
         system_rhs_host(n_dofs);

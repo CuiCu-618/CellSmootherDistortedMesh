@@ -24,15 +24,15 @@ namespace PSMF
   }
 
   template <int dim, int fe_degree, typename Number>
-  __device__ unsigned int
-  LevelVertexPatch<dim, fe_degree, Number>::Data::global_to_local(
-    const unsigned int global_index) const
+  __device__ types::global_dof_index
+             LevelVertexPatch<dim, fe_degree, Number>::Data::global_to_local(
+    const types::global_dof_index global_index) const
   {
     if (local_range_start <= global_index && global_index < local_range_end)
       return global_index - local_range_start;
     else
       {
-        printf("*************** ERROR index: %d ***************\n",
+        printf("*************** ERROR index: %lu ***************\n",
                global_index);
         printf("******** All indices should be local **********\n");
 
@@ -183,8 +183,8 @@ namespace PSMF
     const unsigned int     level) const
   {
     // LAMBDA checks if a vertex is at the (physical) boundary
-    auto &&is_boundary_vertex = [](const CellIterator &cell,
-                                   const unsigned int  vertex_id) {
+    auto &&is_boundary_vertex = [](const CellIterator           &cell,
+                                   const types::global_dof_index vertex_id) {
       return std::any_of(std::begin(
                            GeometryInfo<dim>::vertex_to_face[vertex_id]),
                          std::end(GeometryInfo<dim>::vertex_to_face[vertex_id]),
@@ -204,15 +204,16 @@ namespace PSMF
      * the pair containing the number of locally owned cells and the
      * number of all cells (including ghosts) is constructed
      */
-    std::map<unsigned int, std::pair<unsigned int, unsigned int>>
+    std::map<types::global_dof_index,
+             std::pair<types::global_dof_index, types::global_dof_index>>
       global_to_local_map;
     for (const auto &cell : locally_owned_range_mg)
       {
         for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
           if (!is_boundary_vertex(cell, v))
             {
-              const unsigned int global_index = cell->vertex_index(v);
-              const auto element = global_to_local_map.find(global_index);
+              const auto global_index = cell->vertex_index(v);
+              const auto element      = global_to_local_map.find(global_index);
               if (element != global_to_local_map.cend())
                 {
                   ++(element->second.first);
@@ -220,8 +221,10 @@ namespace PSMF
                 }
               else
                 {
-                  const auto n_cells_pair = std::pair<unsigned, unsigned>{1, 1};
-                  const auto status       = global_to_local_map.insert(
+                  const auto n_cells_pair =
+                    std::pair<types::global_dof_index, types::global_dof_index>{
+                      1, 1};
+                  const auto status = global_to_local_map.insert(
                     std::make_pair(global_index, n_cells_pair));
                   (void)status;
                   Assert(status.second,
@@ -234,8 +237,8 @@ namespace PSMF
       for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
         if (is_boundary_vertex(cell, v))
           {
-            const unsigned int global_index = cell->vertex_index(v);
-            const auto         element = global_to_local_map.find(global_index);
+            const auto global_index = cell->vertex_index(v);
+            const auto element      = global_to_local_map.find(global_index);
 
             if (element != global_to_local_map.cend())
               {
@@ -255,18 +258,17 @@ namespace PSMF
                        [](const auto &cell) {
                          return !(cell->is_locally_owned_on_level());
                        });
-    std::map<unsigned int, GhostPatch> global_to_ghost_id;
+    std::map<types::global_dof_index, GhostPatch> global_to_ghost_id;
     for (const auto &cell : not_locally_owned_range_mg)
       {
         for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
           {
-            const unsigned int global_index = cell->vertex_index(v);
-            const auto         element = global_to_local_map.find(global_index);
+            const types::global_dof_index global_index = cell->vertex_index(v);
+            const auto element = global_to_local_map.find(global_index);
             if (element != global_to_local_map.cend())
               {
                 ++(element->second.second);
-                const unsigned int subdomain_id_ghost =
-                  cell->level_subdomain_id();
+                const auto subdomain_id_ghost = cell->level_subdomain_id();
                 const auto ghost = global_to_ghost_id.find(global_index);
                 if (ghost != global_to_ghost_id.cend())
                   ghost->second.submit_id(subdomain_id_ghost, cell->id());
@@ -283,7 +285,7 @@ namespace PSMF
       }
 
     { // ASSIGN GHOSTS
-      const unsigned int my_subdomain_id = tria.locally_owned_subdomain();
+      const auto my_subdomain_id = tria.locally_owned_subdomain();
       /**
        * logic: if the mpi-proc owns more than half of the cells within
        *        a ghost patch he takes ownership
@@ -294,19 +296,19 @@ namespace PSMF
           for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell;
                ++v)
             {
-              const unsigned global_index = cell->vertex_index(v);
-              const auto     ghost = global_to_ghost_id.find(global_index);
+              const auto global_index = cell->vertex_index(v);
+              const auto ghost        = global_to_ghost_id.find(global_index);
               //: checks if the global vertex has ghost cells attached
               if (ghost != global_to_ghost_id.end())
                 ghost->second.submit_id(my_subdomain_id, cell->id());
             }
 
-        std::set<unsigned> to_be_owned;
-        std::set<unsigned> to_be_erased;
+        std::set<types::global_dof_index> to_be_owned;
+        std::set<types::global_dof_index> to_be_erased;
         for (const auto &key_value : global_to_ghost_id)
           {
-            const unsigned int global_index = key_value.first;
-            const auto &proc_to_cell_ids    = key_value.second.proc_to_cell_ids;
+            const auto  global_index     = key_value.first;
+            const auto &proc_to_cell_ids = key_value.second.proc_to_cell_ids;
 
             const auto &get_proc_with_most_cellids = [](const auto &lhs,
                                                         const auto &rhs) {
@@ -320,12 +322,12 @@ namespace PSMF
             const auto most = std::max_element(proc_to_cell_ids.cbegin(),
                                                proc_to_cell_ids.cend(),
                                                get_proc_with_most_cellids);
-            const unsigned int subdomain_id_most          = most->first;
-            const unsigned int n_locally_owned_cells_most = most->second.size();
-            const auto         member = global_to_local_map.find(global_index);
+            const auto subdomain_id_most          = most->first;
+            const auto n_locally_owned_cells_most = most->second.size();
+            const auto member = global_to_local_map.find(global_index);
             Assert(member != global_to_local_map.cend(),
                    ExcMessage("must be listed as patch"));
-            const unsigned int n_cells = member->second.second;
+            const auto n_cells = member->second.second;
             if (my_subdomain_id == subdomain_id_most)
               {
                 AssertDimension(member->second.first,
@@ -340,13 +342,13 @@ namespace PSMF
               }
           }
 
-        for (const unsigned global_index : to_be_owned)
+        for (const auto global_index : to_be_owned)
           {
             auto &my_patch = global_to_local_map[global_index];
             my_patch.first = my_patch.second;
             global_to_ghost_id.erase(global_index);
           }
-        for (const unsigned global_index : to_be_erased)
+        for (const auto global_index : to_be_erased)
           {
             global_to_local_map.erase(global_index);
             global_to_ghost_id.erase(global_index);
@@ -358,11 +360,11 @@ namespace PSMF
        */
       {
         //: (2) determine mpi-proc with the minimal CellId for all GhostPatches
-        std::set<unsigned> to_be_owned;
+        std::set<types::global_dof_index> to_be_owned;
         for (const auto &key_value : global_to_ghost_id)
           {
-            const unsigned int global_index = key_value.first;
-            const auto &proc_to_cell_ids    = key_value.second.proc_to_cell_ids;
+            const auto  global_index     = key_value.first;
+            const auto &proc_to_cell_ids = key_value.second.proc_to_cell_ids;
 
             const auto &get_proc_with_min_cellid = [](const auto &lhs,
                                                       const auto &rhs) {
@@ -381,14 +383,14 @@ namespace PSMF
                                               proc_to_cell_ids.cend(),
                                               get_proc_with_min_cellid);
 
-            const unsigned int subdomain_id_min = min->first;
+            const auto subdomain_id_min = min->first;
             if (my_subdomain_id == subdomain_id_min)
               to_be_owned.insert(global_index);
           }
 
         //: (3) set owned GhostPatches in global_to_local_map and delete all
         //: remaining
-        for (const unsigned global_index : to_be_owned)
+        for (const auto global_index : to_be_owned)
           {
             auto &my_patch = global_to_local_map[global_index];
             my_patch.first = my_patch.second;
@@ -396,7 +398,7 @@ namespace PSMF
           }
         for (const auto &key_value : global_to_ghost_id)
           {
-            const unsigned int global_index = key_value.first;
+            const auto global_index = key_value.first;
             global_to_local_map.erase(global_index);
           }
       }
@@ -410,25 +412,25 @@ namespace PSMF
      * gathering the level cell iterators into a collection @
      * cell_collections according to the global vertex index.
      */
-    unsigned int local_index = 0;
+    types::global_dof_index local_index = 0;
     for (auto &key_value : global_to_local_map)
       {
         key_value.second.first = local_index++;
       }
-    const unsigned n_subdomains = global_to_local_map.size();
+    const auto n_subdomains = global_to_local_map.size();
     AssertDimension(n_subdomains, local_index);
     std::vector<std::vector<CellIterator>> cell_collections;
     cell_collections.resize(n_subdomains);
     for (auto &cell : dof_handler.mg_cell_iterators_on_level(level))
       for (unsigned int v = 0; v < GeometryInfo<dim>::vertices_per_cell; ++v)
         {
-          const unsigned int global_index = cell->vertex_index(v);
-          const auto         element = global_to_local_map.find(global_index);
+          const auto global_index = cell->vertex_index(v);
+          const auto element      = global_to_local_map.find(global_index);
           if (element != global_to_local_map.cend())
             {
-              const unsigned int local_index = element->second.first;
-              const unsigned int patch_size  = element->second.second;
-              auto              &collection  = cell_collections[local_index];
+              const auto local_index = element->second.first;
+              const auto patch_size  = element->second.second;
+              auto      &collection  = cell_collections[local_index];
               if (collection.empty())
                 collection.resize(patch_size);
               if (patch_size == regular_vpatch_size) // regular patch
@@ -443,9 +445,9 @@ namespace PSMF
   template <int dim, int fe_degree, typename Number>
   void
   LevelVertexPatch<dim, fe_degree, Number>::get_patch_data(
-    const PatchIterator &patch,
-    const unsigned int   patch_id,
-    const bool           is_ghost)
+    const PatchIterator          &patch,
+    const types::global_dof_index patch_id,
+    const bool                    is_ghost)
   {
     std::vector<types::global_dof_index> local_dof_indices(
       Util::pow(fe_degree + 1, dim));
@@ -459,7 +461,8 @@ namespace PSMF
         cell_ptr->get_mg_dof_indices(local_dof_indices);
 
         if (is_ghost)
-          for (unsigned int ind = 0; ind < local_dof_indices.size(); ++ind)
+          for (types::global_dof_index ind = 0; ind < local_dof_indices.size();
+               ++ind)
             patch_dofs_host[patch_id * n_patch_dofs +
                             cell * local_dof_indices.size() + ind] =
               partitioner->global_to_local(local_dof_indices[ind]);
@@ -605,16 +608,17 @@ namespace PSMF
 
         auto patch     = graph_ptr_colored[i].begin(),
              end_patch = graph_ptr_colored[i].end();
-        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+        for (types::global_dof_index p_id = 0; patch != end_patch;
+             ++patch, ++p_id)
           get_patch_data(*patch, p_id, false);
 
         alloc_arrays(&first_dof_smooth[i], n_patches * regular_vpatch_size);
 
-        cudaError_t error_code =
-          cudaMemcpy(first_dof_smooth[i],
-                     first_dof_host.data(),
-                     regular_vpatch_size * n_patches * sizeof(unsigned int),
-                     cudaMemcpyHostToDevice);
+        cudaError_t error_code = cudaMemcpy(first_dof_smooth[i],
+                                            first_dof_host.data(),
+                                            regular_vpatch_size * n_patches *
+                                              sizeof(types::global_dof_index),
+                                            cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
 
@@ -632,7 +636,8 @@ namespace PSMF
 
         auto patch     = graph_ptr_colored_ghost[i].begin(),
              end_patch = graph_ptr_colored_ghost[i].end();
-        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+        for (types::global_dof_index p_id = 0; patch != end_patch;
+             ++patch, ++p_id)
           get_patch_data(*patch, p_id, true);
 
         alloc_arrays(&patch_dofs_smooth[i], n_patches * n_patch_dofs);
@@ -640,7 +645,7 @@ namespace PSMF
         cudaError_t error_code =
           cudaMemcpy(patch_dofs_smooth[i],
                      patch_dofs_host.data(),
-                     n_patch_dofs * n_patches * sizeof(unsigned int),
+                     n_patch_dofs * n_patches * sizeof(types::global_dof_index),
                      cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
@@ -663,7 +668,8 @@ namespace PSMF
         first_dof_host.resize(n_patches * regular_vpatch_size);
 
         auto patch = tmp_ptr[i].begin(), end_patch = tmp_ptr[i].end();
-        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+        for (types::global_dof_index p_id = 0; patch != end_patch;
+             ++patch, ++p_id)
           get_patch_data(*patch, p_id, false);
 
         // alloc_and_copy_arrays(i);
@@ -671,11 +677,11 @@ namespace PSMF
         alloc_arrays(&patch_id[i], n_patches);
         alloc_arrays(&patch_type[i], n_patches * dim);
 
-        cudaError_t error_code =
-          cudaMemcpy(first_dof_laplace[i],
-                     first_dof_host.data(),
-                     regular_vpatch_size * n_patches * sizeof(unsigned int),
-                     cudaMemcpyHostToDevice);
+        cudaError_t error_code = cudaMemcpy(first_dof_laplace[i],
+                                            first_dof_host.data(),
+                                            regular_vpatch_size * n_patches *
+                                              sizeof(types::global_dof_index),
+                                            cudaMemcpyHostToDevice);
         AssertCuda(error_code);
 
         error_code = cudaMemcpy(patch_type[i],
@@ -699,7 +705,8 @@ namespace PSMF
 
         auto patch     = graph_ptr_raw_ghost[i].begin(),
              end_patch = graph_ptr_raw_ghost[i].end();
-        for (unsigned int p_id = 0; patch != end_patch; ++patch, ++p_id)
+        for (types::global_dof_index p_id = 0; patch != end_patch;
+             ++patch, ++p_id)
           get_patch_data(*patch, p_id, true);
 
         // alloc_and_copy_arrays(i);
@@ -713,10 +720,11 @@ namespace PSMF
                      cudaMemcpyHostToDevice);
         AssertCuda(error_code);
 
-        error_code = cudaMemcpy(patch_dofs_laplace[i],
-                                patch_dofs_host.data(),
-                                n_patch_dofs * n_patches * sizeof(unsigned int),
-                                cudaMemcpyHostToDevice);
+        error_code =
+          cudaMemcpy(patch_dofs_laplace[i],
+                     patch_dofs_host.data(),
+                     n_patch_dofs * n_patches * sizeof(types::global_dof_index),
+                     cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
 
@@ -783,13 +791,13 @@ namespace PSMF
     cudaError_t error_code =
       cudaMemcpy(l_to_h,
                  hl_dg_interior.data(),
-                 hl_dg_interior.size() * sizeof(unsigned int),
+                 hl_dg_interior.size() * sizeof(types::global_dof_index),
                  cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
     error_code = cudaMemcpy(h_to_l,
                             hl_dg.data(),
-                            hl_dg.size() * sizeof(unsigned int),
+                            hl_dg.size() * sizeof(types::global_dof_index),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
@@ -830,14 +838,14 @@ namespace PSMF
     local_range_start = local_range.first;
     local_range_end   = local_range.second;
 
-    auto *ghost_indices_host = new unsigned int[n_ghost_indices];
-    for (unsigned int i = 0; i < n_ghost_indices; ++i)
+    auto *ghost_indices_host = new types::global_dof_index[n_ghost_indices];
+    for (types::global_dof_index i = 0; i < n_ghost_indices; ++i)
       ghost_indices_host[i] = ghost_indices.nth_index_in_set(i);
 
     alloc_arrays(&ghost_indices_dev, n_ghost_indices);
     error_code = cudaMemcpy(ghost_indices_dev,
                             ghost_indices_host,
-                            n_ghost_indices * sizeof(unsigned int),
+                            n_ghost_indices * sizeof(types::global_dof_index),
                             cudaMemcpyHostToDevice);
     AssertCuda(error_code);
 
@@ -1592,8 +1600,9 @@ namespace PSMF
   template <int dim, int fe_degree, typename Number>
   template <typename Number1>
   void
-  LevelVertexPatch<dim, fe_degree, Number>::alloc_arrays(Number1 **array_device,
-                                                         const unsigned int n)
+  LevelVertexPatch<dim, fe_degree, Number>::alloc_arrays(
+    Number1                     **array_device,
+    const types::global_dof_index n)
   {
     cudaError_t error_code = cudaMalloc(array_device, n * sizeof(Number1));
     AssertCuda(error_code);

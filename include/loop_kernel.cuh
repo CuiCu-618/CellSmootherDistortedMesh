@@ -96,14 +96,14 @@ namespace PSMF
             const unsigned int index =
               z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d + local_tid_x;
 
-            unsigned int global_dof_indices;
+            types::global_dof_index global_dof_indices;
 
             if constexpr (is_ghost)
               global_dof_indices =
                 gpu_data.patch_dofs[patch * local_dim + gpu_data.h_to_l[index]];
             else
               {
-                const unsigned int global_index =
+                const types::global_dof_index global_index =
                   Util::compute_indices<dim, fe_degree>(
                     &gpu_data.first_dof[patch * (1 << dim)],
                     local_patch,
@@ -127,14 +127,14 @@ namespace PSMF
             const unsigned int index =
               z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d + local_tid_x;
 
-            unsigned int global_dof_indices;
+            types::global_dof_index global_dof_indices;
 
             if constexpr (is_ghost)
               global_dof_indices =
                 gpu_data.patch_dofs[patch * local_dim + gpu_data.h_to_l[index]];
             else
               {
-                const unsigned int global_index =
+                const types::global_dof_index global_index =
                   Util::compute_indices<dim, fe_degree>(
                     &gpu_data.first_dof[patch * (1 << dim)],
                     local_patch,
@@ -547,14 +547,14 @@ namespace PSMF
             const unsigned int index =
               z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d + local_tid_x;
 
-            unsigned int global_dof_indices;
+            types::global_dof_index global_dof_indices;
 
             if constexpr (is_ghost)
               global_dof_indices =
                 gpu_data.patch_dofs[patch * local_dim + gpu_data.h_to_l[index]];
             else
               {
-                const unsigned int global_index =
+                const types::global_dof_index global_index =
                   Util::compute_indices<dim, fe_degree>(
                     &gpu_data.first_dof[patch * (1 << dim)],
                     local_patch,
@@ -620,7 +620,7 @@ namespace PSMF
                   unsigned int index =
                     z * n_dofs_1d * n_dofs_1d + row * n_dofs_1d + col;
 
-                  unsigned int global_dof_indices;
+                  types::global_dof_index global_dof_indices;
 
                   if constexpr (is_ghost)
                     global_dof_indices =
@@ -628,7 +628,7 @@ namespace PSMF
                                           gpu_data.l_to_h[index_g]];
                   else
                     {
-                      const unsigned int global_index =
+                      const types::global_dof_index global_index =
                         Util::compute_indices<dim, fe_degree>(
                           &gpu_data.first_dof[patch * regular_vpatch_size],
                           local_patch,
@@ -687,14 +687,14 @@ namespace PSMF
             const unsigned int index =
               z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d + local_tid_x;
 
-            unsigned int global_dof_indices;
+            types::global_dof_index global_dof_indices;
 
             if constexpr (is_ghost)
               global_dof_indices =
                 gpu_data.patch_dofs[patch * local_dim + gpu_data.h_to_l[index]];
             else
               {
-                const unsigned int global_index =
+                const types::global_dof_index global_index =
                   Util::compute_indices<dim, fe_degree>(
                     &gpu_data.first_dof[patch * (1 << dim)],
                     local_patch,
@@ -764,7 +764,7 @@ namespace PSMF
                     unsigned int index =
                       z * n_dofs_1d * n_dofs_1d + row * (n_dofs_1d - 2) + col;
 
-                    unsigned int global_dof_indices;
+                    types::global_dof_index global_dof_indices;
 
                     if constexpr (is_ghost)
                       global_dof_indices =
@@ -772,7 +772,7 @@ namespace PSMF
                                             gpu_data.l_to_h[index_g]];
                     else
                       {
-                        const unsigned int global_index =
+                        const types::global_dof_index global_index =
                           Util::compute_indices<dim, fe_degree>(
                             &gpu_data.first_dof[patch * regular_vpatch_size],
                             local_patch,

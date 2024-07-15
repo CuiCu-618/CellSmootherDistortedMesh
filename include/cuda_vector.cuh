@@ -18,7 +18,7 @@ namespace PSMF
    * Implementation of a cuda vector class.
    * Mainly used for unsigned int.
    */
-  template <typename Number = unsigned int>
+  template <typename Number = types::global_dof_index>
   class CudaVector : public Subscriptor
   {
   public:

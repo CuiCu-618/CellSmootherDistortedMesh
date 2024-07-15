@@ -22,7 +22,7 @@ namespace PSMF
   class DoFMapping
   {
   public:
-    using value_type = unsigned int;
+    using value_type = types::global_dof_index;
 
     DoFMapping()
     {
