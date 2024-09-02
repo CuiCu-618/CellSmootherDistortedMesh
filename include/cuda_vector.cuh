@@ -81,19 +81,25 @@ namespace PSMF
 
   template <bool add, typename Number, typename Number2>
   __global__ void
-  vec_equ(Number *dst, const Number2 *src, const int N)
+  vec_equ(Number *dst, const Number2 *src, const unsigned int N)
   {
-    const int idx_base =
+    const unsigned int idx_base =
       threadIdx.x + blockIdx.x * (blockDim.x * CHUNKSIZE_ELEMWISE_OP);
 
     for (int c = 0; c < CHUNKSIZE_ELEMWISE_OP; ++c)
       {
-        const int idx = idx_base + c * BKSIZE_ELEMWISE_OP;
+        const unsigned int idx = idx_base + c * BKSIZE_ELEMWISE_OP;
         if (idx < N)
-          if (add)
-            dst[idx] += src[idx];
-          else
-            dst[idx] = src[idx];
+          {
+            if (add)
+              {
+                dst[idx] += src[idx];
+              }
+            else
+              {
+                dst[idx] = src[idx];
+              }
+          }
       }
   }
 
@@ -101,35 +107,39 @@ namespace PSMF
   void
   plain_copy(VectorType &dst, const VectorType2 &src)
   {
-    if (dst.size() != src.size())
+    if (src.locally_owned_size() == 0)
+      return;
+
+    if (dst.locally_owned_size() != src.locally_owned_size())
       {
-        dst.reinit(src.size(), true);
+        dst.reinit(src.locally_owned_size(), true);
       }
 
-    const int nblocks =
-      1 + (src.size() - 1) / (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
+    const int nblocks = 1 + (src.locally_owned_size() - 1) /
+                              (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
+
     vec_equ<add,
             typename VectorType::value_type,
             typename VectorType2::value_type>
       <<<nblocks, BKSIZE_ELEMWISE_OP>>>(dst.get_values(),
                                         src.get_values(),
-                                        src.size());
+                                        src.locally_owned_size());
     AssertCudaKernel();
   }
 
 
   template <typename Number>
   __global__ void
-  vec_invert(Number *v, const int N)
+  vec_invert(Number *v, const unsigned int N)
   {
-    const int idx_base =
+    const unsigned idx_base =
       threadIdx.x + blockIdx.x * (blockDim.x * CHUNKSIZE_ELEMWISE_OP);
 
     for (int c = 0; c < CHUNKSIZE_ELEMWISE_OP; ++c)
       {
-        const int idx = idx_base + c * BKSIZE_ELEMWISE_OP;
+        const unsigned idx = idx_base + c * BKSIZE_ELEMWISE_OP;
         if (idx < N)
-          v[idx] = 1.0 / v[idx];
+          v[idx] = (abs(v[idx]) < 1e-10) ? 1.0 : 1.0 / v[idx];
       }
   }
 
@@ -137,10 +147,14 @@ namespace PSMF
   void
   vector_invert(VectorType &vec)
   {
-    const int nblocks =
-      1 + (vec.size() - 1) / (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
+    if (vec.locally_owned_size() == 0)
+      return;
+
+    const int nblocks = 1 + (vec.locally_owned_size() - 1) /
+                              (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
     vec_invert<typename VectorType::value_type>
-      <<<nblocks, BKSIZE_ELEMWISE_OP>>>(vec.get_values(), vec.size());
+      <<<nblocks, BKSIZE_ELEMWISE_OP>>>(vec.get_values(),
+                                        vec.locally_owned_size());
     AssertCudaKernel();
   }
 

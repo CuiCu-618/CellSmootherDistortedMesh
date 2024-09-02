@@ -38,6 +38,8 @@
 
 #include <deal.II/matrix_free/hanging_nodes_internal.h>
 
+#include "utilities.cuh"
+
 namespace PSMF
 {
   // Forward declaration
@@ -208,6 +210,11 @@ namespace PSMF
       point_type *q_points;
 
       /**
+       * Pointer to the face quadrature points.
+       */
+      point_type *face_q_points;
+
+      /**
        * Map the position in the local vector to the position in the global
        * vector.
        */
@@ -283,6 +290,11 @@ namespace PSMF
        * Number of cells.
        */
       unsigned int n_cells;
+
+      /**
+       * Number of locally onwed cells.
+       */
+      unsigned int n_locally_owned_cells;
 
       /**
        * Number of faces.
@@ -625,6 +637,11 @@ namespace PSMF
     std::vector<unsigned int> n_cells;
 
     /**
+     * Number of locally owned cells in each color.
+     */
+    std::vector<unsigned int> n_locally_owned_cells;
+
+    /**
      * Number of inner faces in each color.
      */
     std::vector<unsigned int> n_inner_faces;
@@ -639,6 +656,12 @@ namespace PSMF
      * each color.
      */
     std::vector<point_type *> q_points;
+
+    /**
+     * Vector of pointers to the face quadrature points associated to the cells
+     * of each color.
+     */
+    std::vector<point_type *> face_q_points;
 
     /**
      * Map the position in the local vector to the position in the global

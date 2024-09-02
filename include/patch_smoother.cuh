@@ -281,6 +281,46 @@ namespace PSMF
   };
 
 
+  template <typename MatrixType,
+            int dim,
+            int fe_degree,
+            typename Number,
+            LaplaceVariant lapalace>
+  struct LocalSmoother<MatrixType,
+                       dim,
+                       fe_degree,
+                       Number,
+                       lapalace,
+                       SmootherVariant::Chebyshev>
+  {
+  public:
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    mutable std::size_t shared_mem;
+
+    LocalSmoother() = default;
+
+    LocalSmoother(const SmartPointer<const MatrixType>)
+    {}
+
+    template <bool is_ghost>
+    void
+    setup_kernel(const unsigned int) const
+    {}
+
+    template <typename VectorType, typename DataType, bool is_ghost>
+    void
+    loop_kernel(const VectorType &,
+                VectorType &,
+                VectorType &,
+                const DataType &,
+                const dim3 &,
+                const dim3 &,
+                cudaStream_t) const
+    {}
+  };
+
+
   // Forward declaration
   template <typename MatrixType,
             int             dim,

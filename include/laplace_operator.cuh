@@ -272,8 +272,6 @@ namespace PSMF
       LocalLaplace<dim, fe_degree, Number, kernel> local_laplace;
 
       data->cell_loop(local_laplace, src, dst);
-
-      // mf_data->copy_constrained_values(src, dst);
     }
 
     void
@@ -827,6 +825,46 @@ namespace PSMF
 
 
   template <int dim, int fe_degree, typename Number>
+  class LocalRHSOperator
+  {
+  public:
+    static const unsigned int n_dofs_1d    = fe_degree + 1;
+    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
+    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalRHSOperator()
+    {}
+
+    __device__ void
+    operator()(const unsigned int                                  cell,
+               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                      *shared_data,
+               const Number                                       *src,
+               Number                                             *dst) const
+    {
+      (void)src;
+
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+      const auto point =
+        get_quadrature_point<dim, Number>(cell, gpu_data, n_dofs_1d);
+
+      Number val = dim * numbers::PI * numbers::PI;
+      for (unsigned int d = 0; d < dim; ++d)
+        val *= sin(numbers::PI * point[d]);
+
+      fe_eval.submit_value(val);
+      fe_eval.integrate(true, false);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
+
+  template <int dim, int fe_degree, typename Number>
   class LaplaceDGOperator : public Subscriptor
   {
   public:
@@ -848,7 +886,7 @@ namespace PSMF
       mg_level    = level;
 
       if (mg_level == numbers::invalid_unsigned_int)
-        n_dofs = dof_handler->n_dofs();
+        n_dofs = dof_handler->n_locally_owned_dofs();
       else
         n_dofs = dof_handler->n_dofs(mg_level);
     }
@@ -937,6 +975,18 @@ namespace PSMF
     }
 
     void
+    compute_rhs(
+      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>       &dst,
+      const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
+      const
+    {
+      dst = 0.;
+      LocalRHSOperator<dim, fe_degree, Number> laplace_operator;
+      data->cell_loop(laplace_operator, src, dst);
+      // TODO: face terms
+    }
+
+    void
     compute_residual(
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src,
@@ -968,7 +1018,7 @@ namespace PSMF
 
       dst = 0.;
 
-      const unsigned int n_dofs = src.size();
+      const unsigned int n_dofs = src.locally_owned_size();
 
       LinearAlgebra::distributed::Vector<Number, MemorySpace::Host>
         system_rhs_host(n_dofs);
@@ -1052,7 +1102,7 @@ namespace PSMF
       rw_vector.import(system_rhs_host, VectorOperation::insert);
       system_rhs_dev.import(rw_vector, VectorOperation::insert);
 
-      vmult(dst, src);
+      // vmult(dst, src);
       dst.sadd(-1., system_rhs_dev);
     }
 
@@ -1062,17 +1112,18 @@ namespace PSMF
     {
       auto &inv_diag = inverse_diagonal_matrix->get_vector();
 
-      inv_diag.reinit(n_dofs);
+      initialize_dof_vector(inv_diag);
+      auto zero_vec = inv_diag;
 
       LocalLaplaceOperator<dim, fe_degree, Number, true> laplace_operator;
-      data->cell_loop(laplace_operator, inv_diag, inv_diag);
+      data->cell_loop(laplace_operator, zero_vec, inv_diag);
 
       LocalLaplaceBDOperator<dim, fe_degree, Number, true> laplace_bd_operator;
-      data->boundary_face_loop(laplace_bd_operator, inv_diag, inv_diag);
+      data->boundary_face_loop(laplace_bd_operator, zero_vec, inv_diag);
 
       LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
         laplace_face_operator;
-      data->inner_face_loop(laplace_face_operator, inv_diag, inv_diag);
+      data->inner_face_loop(laplace_face_operator, zero_vec, inv_diag);
 
       vector_invert(inv_diag);
 

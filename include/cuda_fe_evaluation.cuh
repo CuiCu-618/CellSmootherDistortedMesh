@@ -535,7 +535,7 @@ namespace PSMF
     FEEvaluation(const unsigned int       cell_id,
                  const data_type         *data,
                  SharedData<dim, Number> *shdata)
-    : n_cells(data->n_cells)
+    : n_cells(data -> n_cells)
     , padding_length(data->padding_length)
     , mf_object_id(data->id)
     , constraint_mask(data->constraint_mask[cell_id])
@@ -883,7 +883,7 @@ namespace PSMF
                      const data_type         *data,
                      SharedData<dim, Number> *shdata,
                      const bool               is_interior_face)
-    : n_faces(data->n_faces)
+    : n_faces(data -> n_faces)
     , n_cells(data->n_cells)
     , padding_length(data->padding_length)
     , face_padding_length(data->face_padding_length)

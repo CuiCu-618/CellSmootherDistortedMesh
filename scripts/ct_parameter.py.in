@@ -113,7 +113,14 @@ def parse_args():
         "--smooth_inv",
         default="F",
         nargs="+",
-        choices=["GLOBAL", "FUSED_L", "ConflictFree", "TensorCore", "ExactRes"],
+        choices=[
+            "GLOBAL",
+            "FUSED_L",
+            "ConflictFree",
+            "TensorCore",
+            "ExactRes",
+            "Chebyshev",
+        ],
         help="variant of the Schwarz smoother inverse operator",
     )
     parser.add_argument(
@@ -246,6 +253,9 @@ class Parameter:
             elif kernel.endswith("Res"):
                 kernel_str += r"PSMF::SmootherVariant::ExactRes, "
                 count += 1
+            elif kernel.endswith("Chebyshev"):
+                kernel_str += r"PSMF::SmootherVariant::Chebyshev, "
+                count += 1
         self.smooth_inv = (
             "constexpr std::array<PSMF::SmootherVariant, " + str(count) + ">",
             kernel_str + "}",
@@ -305,4 +315,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

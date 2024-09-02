@@ -90,7 +90,12 @@ namespace PSMF
     /**
      * Compute the residual b - Ax exactly with FE_DGQHermite element.
      */
-    ExactRes
+    ExactRes,
+
+    /**
+     * Chebyshev Smoother
+     */
+    Chebyshev
   };
 
 

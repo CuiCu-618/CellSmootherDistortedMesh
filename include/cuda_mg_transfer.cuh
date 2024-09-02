@@ -29,7 +29,6 @@
 #include <deal.II/multigrid/mg_transfer_internal.h>
 
 #include "cuda_vector.cuh"
-#include "patch_base.cuh"
 #include "utilities.cuh"
 
 using namespace dealii;
@@ -50,9 +49,6 @@ namespace PSMF
     }
   };
 
-  template <int dim, typename Number, DoFLayout dof_layout>
-  class MGTransferCUDA;
-
   /**
    * Implementation of the MGTransferBase interface for which the transfer
    * operations is implemented in a matrix-free way based on the interpolation
@@ -61,10 +57,11 @@ namespace PSMF
    * than that variant.
    */
   template <int dim, typename Number>
-  class MGTransferCUDA<dim, Number, DoFLayout::DGQ>
-    : public MGTransferBase<LinearAlgebra::distributed::Vector<
-        Number,
-        MemorySpace::CUDA>> // public Subscriptor
+  class MGTransferCUDA
+    : public MGTransferBase<
+        LinearAlgebra::distributed::Vector<Number,
+                                           MemorySpace::CUDA>> // public
+                                                               // Subscriptor
   {
   public:
     /**
@@ -351,8 +348,7 @@ namespace PSMF
     /**
      * The mg_constrained_dofs of the level systems.
      */
-    SmartPointer<const MGConstrainedDoFs,
-                 MGTransferCUDA<dim, Number, DoFLayout::DGQ>>
+    SmartPointer<const MGConstrainedDoFs, MGTransferCUDA<dim, Number>>
       mg_constrained_dofs;
 
     /**

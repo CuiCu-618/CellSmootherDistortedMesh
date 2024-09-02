@@ -38,6 +38,7 @@
 
 #include "app_utilities.h"
 #include "ct_parameter.h"
+#include "cuda_matrix_free.cuh"
 #include "solver.cuh"
 #include "utilities.cuh"
 
@@ -49,7 +50,7 @@ namespace Step64
 {
   using namespace dealii;
 
-  template <int dim, typename Number>
+  template <int dim, typename Number = double>
   class Solution : public Function<dim, Number>
   {
   public:
@@ -71,7 +72,7 @@ namespace Step64
           grad[d] = 1.;
           for (unsigned int e = 0; e < dim; ++e)
             if (d == e)
-              grad[d] *= -numbers::PI * std::cos(numbers::PI * p[e]);
+              grad[d] *= numbers::PI * std::cos(numbers::PI * p[e]);
             else
               grad[d] *= std::sin(numbers::PI * p[e]);
         }
@@ -79,7 +80,7 @@ namespace Step64
     }
   };
 
-  template <int dim, typename Number>
+  template <int dim, typename Number = double>
   class RightHandSide : public Function<dim, Number>
   {
   public:
@@ -100,8 +101,9 @@ namespace Step64
   public:
     using full_number   = double;
     using vcycle_number = CT::VCYCLE_NUMBER_;
-    using MatrixFreeDP  = PSMF::LevelVertexPatch<dim, fe_degree, full_number>;
-    using MatrixFreeSP  = PSMF::LevelVertexPatch<dim, fe_degree, vcycle_number>;
+    using MatrixFree    = PSMF::MatrixFree<dim, full_number>;
+    using VertexPatchDP = PSMF::LevelVertexPatch<dim, fe_degree, full_number>;
+    using VertexPatchSP = PSMF::LevelVertexPatch<dim, fe_degree, vcycle_number>;
 
     LaplaceProblem();
     ~LaplaceProblem();
@@ -114,7 +116,9 @@ namespace Step64
     void
     assemble_mg();
     void
-    solve_mg(unsigned int n_mg_cycles);
+    solve_mg();
+    std::pair<double, double>
+    compute_error();
 
     template <PSMF::LaplaceVariant  laplace,
               PSMF::LaplaceVariant  smooth_vmult,
@@ -137,11 +141,19 @@ namespace Step64
     std::fstream                        fout;
     std::shared_ptr<ConditionalOStream> pcout;
 
-    MGLevelObject<std::shared_ptr<MatrixFreeDP>> mfdata_dp;
-    MGLevelObject<std::shared_ptr<MatrixFreeSP>> mfdata_sp;
-    MGConstrainedDoFs                            mg_constrained_dofs;
+    IndexSet locally_owned_dofs;
+    IndexSet locally_relevant_dofs;
 
-    PSMF::MGTransferCUDA<dim, vcycle_number, CT::DOF_LAYOUT_> transfer;
+    MGLevelObject<std::shared_ptr<MatrixFree>>    level_mfdata;
+    MGLevelObject<std::shared_ptr<VertexPatchDP>> patch_data_dp;
+    MGLevelObject<std::shared_ptr<VertexPatchSP>> patch_data_sp;
+    MGConstrainedDoFs                             mg_constrained_dofs;
+    AffineConstraints<double>                     constraints;
+
+    PSMF::MGTransferCUDA<dim, vcycle_number> transfer;
+
+    LinearAlgebra::distributed::Vector<double, MemorySpace::Host>
+      ghost_solution_host;
   };
 
   template <int dim, int fe_degree>
@@ -198,6 +210,17 @@ namespace Step64
            << n_replicate << " x (" << (1 << (nlevels - 1)) << " x ("
            << fe->degree << " + 1))^" << dim << std::endl;
 
+    constraints.clear();
+    constraints.close();
+
+    locally_owned_dofs = dof_handler.locally_owned_dofs();
+    locally_relevant_dofs =
+      DoFTools::extract_locally_relevant_dofs(dof_handler);
+
+    ghost_solution_host.reinit(locally_owned_dofs,
+                               locally_relevant_dofs,
+                               mpi_communicator);
+
     setup_time += time.wall_time();
 
     *pcout << "DoF setup time:         " << setup_time << "s" << std::endl;
@@ -213,59 +236,61 @@ namespace Step64
     mg_constrained_dofs.make_zero_boundary_constraints(dof_handler,
                                                        dirichlet_boundary);
 
-    // set up a mapping for the geometry representation
-    MappingQ1<dim> mapping;
-
     unsigned int minlevel = 1;
     unsigned int maxlevel = triangulation.n_global_levels() - 1;
 
-    mfdata_dp.resize(1, maxlevel);
+    patch_data_dp.resize(minlevel, maxlevel);
+    level_mfdata.resize(minlevel, maxlevel);
 
     if (std::is_same_v<vcycle_number, float>)
-      mfdata_sp.resize(1, maxlevel);
+      patch_data_sp.resize(minlevel, maxlevel);
 
     Timer time;
     for (unsigned int level = minlevel; level <= maxlevel; ++level)
       {
-        // IndexSet relevant_dofs;
-        // DoFTools::extract_locally_relevant_level_dofs(dof_handler,
-        //                                               level,
-        //                                               relevant_dofs);
         // double-precision matrix-free data
         {
-          // AffineConstraints<full_number> level_constraints;
-          // level_constraints.reinit(relevant_dofs);
-          // level_constraints.add_lines(
-          //   mg_constrained_dofs.get_boundary_indices(level));
-          // level_constraints.close();
+          typename MatrixFree::AdditionalData additional_data;
+          additional_data.mapping_update_flags =
+            update_quadrature_points | update_values | update_gradients |
+            update_JxW_values;
+          additional_data.mapping_update_flags_inner_faces =
+            update_values | update_gradients | update_JxW_values |
+            update_normal_vectors;
+          additional_data.mg_level    = level;
+          additional_data.matrix_type = PSMF::MatrixType::level_matrix;
 
-          typename MatrixFreeDP::AdditionalData additional_data;
+          level_mfdata[level] = std::make_shared<MatrixFree>();
+          level_mfdata[level]->reinit(mapping,
+                                      dof_handler,
+                                      constraints,
+                                      QGauss<1>(fe_degree + 1),
+                                      IteratorFilters::LocallyOwnedLevelCell(),
+                                      additional_data);
+        }
+
+        {
+          typename VertexPatchDP::AdditionalData additional_data;
           additional_data.relaxation         = 1.;
           additional_data.use_coloring       = false;
           additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
           additional_data.granularity_scheme = CT::GRANULARITY_;
 
-          mfdata_dp[level] = std::make_shared<MatrixFreeDP>();
-          mfdata_dp[level]->reinit(dof_handler, level, additional_data);
+          patch_data_dp[level] = std::make_shared<VertexPatchDP>();
+          patch_data_dp[level]->reinit(dof_handler, level, additional_data);
         }
 
         // single-precision matrix-free data
         if (std::is_same_v<vcycle_number, float>)
           {
-            // AffineConstraints<vcycle_number> level_constraints;
-            // level_constraints.reinit(relevant_dofs);
-            // level_constraints.add_lines(
-            //   mg_constrained_dofs.get_boundary_indices(level));
-            // level_constraints.close();
-
-            typename MatrixFreeSP::AdditionalData additional_data;
+            typename VertexPatchSP::AdditionalData additional_data;
             additional_data.relaxation         = 1.;
             additional_data.use_coloring       = false;
             additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
             additional_data.granularity_scheme = CT::GRANULARITY_;
 
-            mfdata_sp[level] = std::make_shared<MatrixFreeSP>();
-            mfdata_sp[level]->reinit(dof_handler, level, additional_data);
+            patch_data_sp[level] = std::make_shared<VertexPatchSP>();
+            patch_data_sp[level]->reinit(dof_handler, level, additional_data);
           }
       }
 
@@ -300,11 +325,12 @@ namespace Step64
                           smooth_inv,
                           vcycle_number>
       solver(dof_handler,
-             mfdata_dp,
-             mfdata_sp,
+             level_mfdata,
+             patch_data_dp,
+             patch_data_sp,
              transfer,
-             Functions::ZeroFunction<dim, full_number>(),
-             Functions::ConstantFunction<dim, full_number>(1.),
+             Solution<dim>(),
+             RightHandSide<dim>(),
              pcout,
              1);
 
@@ -379,11 +405,44 @@ namespace Step64
             info_table[index].add_column_to_supercolumn(mem, data.solver_name);
           }
       }
+
+    if (CT::SETS_ == "error_analysis")
+      {
+        auto solution = solver.get_solution();
+
+        LinearAlgebra::ReadWriteVector<double> rw_vector(locally_owned_dofs);
+        rw_vector.import(solution, VectorOperation::insert);
+
+        ghost_solution_host.import(rw_vector, VectorOperation::insert);
+        constraints.distribute(ghost_solution_host);
+
+        const auto [l2_error, H1_error] = compute_error();
+
+        *pcout << "L2 error: " << l2_error << std::endl
+               << "H1 error: " << H1_error << std::endl
+               << std::endl;
+
+        // ghost_solution_host.print(std::cout);
+
+        info_table[index].add_value("L2_error", l2_error);
+        info_table[index].set_scientific("L2_error", true);
+        info_table[index].set_precision("L2_error", 3);
+
+        info_table[index].evaluate_convergence_rates(
+          "L2_error", "dofs", ConvergenceTable::reduction_rate_log2, dim);
+
+        info_table[index].add_value("H1_error", H1_error);
+        info_table[index].set_scientific("H1_error", true);
+        info_table[index].set_precision("H1_error", 3);
+
+        info_table[index].evaluate_convergence_rates(
+          "H1_error", "dofs", ConvergenceTable::reduction_rate_log2, dim);
+      }
   }
 
   template <int dim, int fe_degree>
   void
-  LaplaceProblem<dim, fe_degree>::solve_mg(unsigned int n_mg_cycles)
+  LaplaceProblem<dim, fe_degree>::solve_mg()
   {
     static unsigned int call_count = 0;
 
@@ -428,6 +487,13 @@ namespace Step64
                          PSMF::SmootherVariant::ExactRes>(0, 0, k, call_count);
                 break;
               }
+            case PSMF::SmootherVariant::Chebyshev:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::Chebyshev>(0, 0, k, call_count);
+                break;
+              }
             default:
               AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
           }
@@ -444,6 +510,37 @@ namespace Step64
 
     call_count++;
   }
+
+
+  template <int dim, int fe_degree>
+  std::pair<double, double>
+  LaplaceProblem<dim, fe_degree>::compute_error()
+  {
+    Vector<double> cellwise_norm(triangulation.n_active_cells());
+    VectorTools::integrate_difference(mapping,
+                                      dof_handler,
+                                      ghost_solution_host,
+                                      Solution<dim>(),
+                                      cellwise_norm,
+                                      QGauss<dim>(fe->degree + 1),
+                                      VectorTools::L2_norm);
+    const double global_norm = std::sqrt(
+      Utilities::MPI::sum(cellwise_norm.norm_sqr(), mpi_communicator));
+
+    Vector<double> cellwise_h1norm(triangulation.n_active_cells());
+    VectorTools::integrate_difference(mapping,
+                                      dof_handler,
+                                      ghost_solution_host,
+                                      Solution<dim>(),
+                                      cellwise_h1norm,
+                                      QGauss<dim>(fe->degree + 1),
+                                      VectorTools::H1_seminorm);
+    const double global_h1norm = std::sqrt(
+      Utilities::MPI::sum(cellwise_h1norm.norm_sqr(), mpi_communicator));
+
+    return std::make_pair(global_norm, global_h1norm);
+  }
+
 
   template <int dim, int fe_degree>
   void
@@ -463,25 +560,7 @@ namespace Step64
             *pcout << "Max size reached, terminating." << std::endl;
             *pcout << std::endl;
 
-            for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
-              for (unsigned int j = 0; j < CT::SMOOTH_VMULT_.size(); ++j)
-                for (unsigned int i = 0; i < CT::SMOOTH_INV_.size(); ++i)
-                  {
-                    unsigned int index = (k * CT::SMOOTH_VMULT_.size() + j) *
-                                           CT::SMOOTH_INV_.size() +
-                                         i;
-
-                    std::ostringstream oss;
-
-                    oss << "\n[" << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " "
-                        << LaplaceToString(CT::SMOOTH_VMULT_[j]) << " "
-                        << SmootherToString(CT::SMOOTH_INV_[i]) << "]\n";
-                    info_table[index].write_text(oss);
-
-                    *pcout << oss.str() << std::endl;
-                  }
-
-            return;
+            break;
           }
 
         if (cycle == 0)
@@ -513,9 +592,28 @@ namespace Step64
         setup_system();
         assemble_mg();
 
-        solve_mg(1);
+        solve_mg();
         *pcout << std::endl;
       }
+
+    {
+      for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+        for (unsigned int j = 0; j < CT::SMOOTH_VMULT_.size(); ++j)
+          for (unsigned int i = 0; i < CT::SMOOTH_INV_.size(); ++i)
+            {
+              unsigned int index =
+                (k * CT::SMOOTH_VMULT_.size() + j) * CT::SMOOTH_INV_.size() + i;
+
+              std::ostringstream oss;
+
+              oss << "\n[" << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " "
+                  << LaplaceToString(CT::SMOOTH_VMULT_[j]) << " "
+                  << SmootherToString(CT::SMOOTH_INV_[i]) << "]\n";
+              info_table[index].write_text(oss);
+
+              *pcout << oss.str() << std::endl;
+            }
+    }
   }
 } // namespace Step64
 int

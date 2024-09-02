@@ -365,6 +365,7 @@ namespace PSMF
     std::vector<dealii::types::global_dof_index> inner_face2cell_id_host;
     std::vector<dealii::types::global_dof_index> boundary_face2cell_id_host;
     std::vector<dealii::Point<dim, Number>>      q_points_host;
+    std::vector<dealii::Point<dim, Number>>      face_q_points_host;
     std::vector<Number>                          JxW_host;
     std::vector<Number>                          inv_jacobian_host;
     std::vector<Number>                          face_JxW_host;
@@ -398,8 +399,8 @@ namespace PSMF
     const unsigned int                           mg_level;
     const MatrixType                             matrix_type;
     dealii::internal::MatrixFreeFunctions::HangingNodes<dim> hanging_nodes;
-    std::vector<std::map<std::pair<int, int>, int>>          cell2cell_id;
-    std::vector<std::map<std::pair<int, int>, int>> cell2cell_id_coarse;
+    std::vector<std::map<std::tuple<int, int, int>, int>>    cell2cell_id;
+    std::vector<std::map<std::tuple<int, int, int>, int>> cell2cell_id_coarse;
   };
 
   template <int dim, typename Number>
@@ -475,6 +476,7 @@ namespace PSMF
     // We need at least three colors when we are using CUDA-aware MPI and
     // overlapping the communication
     data->n_cells.resize(std::max(n_colors, 3U), 0);
+    data->n_locally_owned_cells.resize(std::max(n_colors, 3U), 0);
     data->n_inner_faces.resize(std::max(n_colors, 3U), 0);
     data->n_boundary_faces.resize(std::max(n_colors, 3U), 0);
     data->grid_dim.resize(n_colors);
@@ -503,6 +505,9 @@ namespace PSMF
     if (update_flags & dealii::update_gradients)
       data->inv_jacobian.resize(n_colors);
 
+    if (update_flags_inner_faces & dealii::update_quadrature_points)
+      data->face_q_points.resize(n_colors);
+
     if (update_flags_inner_faces & dealii::update_JxW_values)
       data->face_JxW.resize(n_colors);
 
@@ -517,12 +522,15 @@ namespace PSMF
   void
   ReinitHelper<dim, Number>::setup_cell_arrays(const unsigned int color)
   {
-    const unsigned int n_cells         = data->n_cells[color];
+    const unsigned int n_cells = data->n_cells[color];
+    const unsigned int n_locally_owned_cells =
+      data->n_locally_owned_cells[color];
     const unsigned int cells_per_block = data->cells_per_block;
 
     // Setup kernel parameters
-    double apply_n_blocks = std::ceil(static_cast<double>(n_cells) /
-                                      static_cast<double>(cells_per_block));
+    double apply_n_blocks =
+      std::ceil(static_cast<double>(n_locally_owned_cells) /
+                static_cast<double>(cells_per_block));
     data->grid_dim[color] = dim3(apply_n_blocks);
 
     // TODO this should be a templated parameter.
@@ -613,6 +621,9 @@ namespace PSMF
     subface_number_host.resize(n_faces);
     face_orientation_host.resize(n_faces);
 
+    if (update_flags_inner_faces & dealii::update_quadrature_points)
+      face_q_points_host.resize(n_faces * face_padding_length);
+
     if (update_flags_inner_faces & dealii::update_JxW_values)
       face_JxW_host.resize(n_faces * face_padding_length);
 
@@ -645,16 +656,6 @@ namespace PSMF
 
       for (unsigned int i = 0; i < dofs_per_cell; ++i)
         lexicographic_dof_indices[i] = local_dof_indices[lexicographic_inv[i]];
-
-      const dealii::ArrayView<
-        dealii::internal::MatrixFreeFunctions::ConstraintKinds>
-        cell_id_view(constraint_mask_host[obj_id]);
-
-      hanging_nodes.setup_constraints(c,
-                                      partitioner,
-                                      {lexicographic_inv},
-                                      lexicographic_dof_indices,
-                                      cell_id_view);
 
       memcpy(&local_to_global_host[obj_id * padding_length],
              lexicographic_dof_indices.data(),
@@ -697,7 +698,10 @@ namespace PSMF
     if (matrix_type == MatrixType::active_matrix ||
         matrix_type == MatrixType::level_matrix)
       {
-        auto cell_info = std::make_pair<int, int>(cell->level(), cell->index());
+        auto cell_info =
+          std::make_tuple<int, int, int>(cell->level_subdomain_id(),
+                                         cell->level(),
+                                         cell->index());
         cell2cell_id[color][cell_info] = cell_id;
 
         fill_index_data(cell, cell_id);
@@ -707,6 +711,9 @@ namespace PSMF
 
         cell_id++;
       }
+
+    if (cell->is_ghost_on_level())
+      return;
 
     for (const unsigned int face_no : cell->face_indices())
       {
@@ -724,14 +731,17 @@ namespace PSMF
                     matrix_type == MatrixType::edge_down_matrix)
                   {
                     auto cell_info =
-                      std::make_pair<int, int>(cell->level(), cell->index());
+                      std::make_tuple<int, int, int>(cell->level_subdomain_id(),
+                                                     cell->level(),
+                                                     cell->index());
                     cell2cell_id[color][cell_info] = cell_id;
 
                     fill_index_data(cell, cell_id);
 
-                    auto cell_info_coarse =
-                      std::make_pair<int, int>(neighbor->level(),
-                                               neighbor->index());
+                    auto cell_info_coarse = std::make_tuple<int, int, int>(
+                      neighbor->level_subdomain_id(),
+                      neighbor->level(),
+                      neighbor->index());
                     cell2cell_id_coarse[color][cell_info_coarse] = cell_id;
 
                     neighbor->get_active_or_mg_dof_indices(
@@ -773,7 +783,19 @@ namespace PSMF
                                            unsigned int      &boundary_face_id,
                                            const unsigned int color)
   {
+    if (cell->is_ghost_on_level())
+      return;
+
     auto fill_data = [&](auto &fe_value, auto obj_id) {
+      if (update_flags_inner_faces & dealii::update_quadrature_points)
+        {
+          const std::vector<dealii::Point<dim>> &q_points =
+            fe_value.get_quadrature_points();
+          std::copy(q_points.begin(),
+                    q_points.end(),
+                    &face_q_points_host[obj_id * face_padding_length]);
+        }
+
       if (update_flags_inner_faces & dealii::update_JxW_values)
         {
           std::vector<double> JxW_values = fe_value.get_JxW_values();
@@ -809,8 +831,11 @@ namespace PSMF
 
     for (const unsigned int face_no : cell->face_indices())
       {
-        auto cell_info = std::make_pair<int, int>(cell->level(), cell->index());
-        auto cell_id   = cell2cell_id[color][cell_info];
+        auto cell_info =
+          std::make_tuple<int, int, int>(cell->level_subdomain_id(),
+                                         cell->level(),
+                                         cell->index());
+        auto cell_id = cell2cell_id[color][cell_info];
 
         if (cell->at_boundary(face_no))
           {
@@ -836,8 +861,9 @@ namespace PSMF
                   cell->neighbor_of_coarser_neighbor(face_no);
 
                 auto neighbor_info =
-                  std::make_pair<int, int>(neighbor->level(),
-                                           neighbor->index());
+                  std::make_tuple<int, int, int>(neighbor->level_subdomain_id(),
+                                                 neighbor->level(),
+                                                 neighbor->index());
                 int cell_id1;
 
                 if (matrix_type == MatrixType::edge_up_matrix ||
@@ -881,8 +907,9 @@ namespace PSMF
                   continue;
 
                 auto neighbor_info =
-                  std::make_pair<int, int>(neighbor->level(),
-                                           neighbor->index());
+                  std::make_tuple<int, int, int>(neighbor->level_subdomain_id(),
+                                                 neighbor->level(),
+                                                 neighbor->index());
                 auto cell_id1         = cell2cell_id[color][neighbor_info];
                 auto neighbor_face_no = cell->neighbor_face_no(face_no);
 
@@ -1018,6 +1045,15 @@ namespace PSMF
                      boundary_face2cell_id_host.size()),
                    data->n_boundary_faces[color]);
 
+    // Quadrature points
+    if (update_flags_inner_faces & dealii::update_quadrature_points)
+      {
+        alloc_and_copy(&data->face_q_points[color],
+                       dealii::ArrayView<const dealii::Point<dim, Number>>(
+                         face_q_points_host.data(), face_q_points_host.size()),
+                       n_faces * face_padding_length);
+      }
+
     // Face jacobian determinants/quadrature weights
     if (update_flags_inner_faces & dealii::update_JxW_values)
       {
@@ -1137,7 +1173,8 @@ namespace PSMF
     SharedData<dim, Number> shared_data(
       &values[local_cell * Functor::n_local_dofs], gq);
 
-    if (cell < gpu_data.n_cells) // todo should be n_cells or n_faces
+    if (cell <
+        gpu_data.n_locally_owned_cells) // todo should be n_cells or n_faces
       func(cell, &gpu_data, &shared_data, src, dst);
   }
 
@@ -1297,13 +1334,14 @@ namespace PSMF
       data_copy.inv_jacobian = inv_jacobian[color];
     if (JxW.size() > 0)
       data_copy.JxW = JxW[color];
-    data_copy.local_to_global = local_to_global[color];
-    data_copy.id              = my_id;
-    data_copy.n_cells         = n_cells[color];
-    data_copy.padding_length  = padding_length;
-    data_copy.row_start       = row_start[color];
-    data_copy.use_coloring    = use_coloring;
-    data_copy.constraint_mask = constraint_mask[color];
+    data_copy.local_to_global       = local_to_global[color];
+    data_copy.id                    = my_id;
+    data_copy.n_cells               = n_cells[color];
+    data_copy.n_locally_owned_cells = n_locally_owned_cells[color];
+    data_copy.padding_length        = padding_length;
+    data_copy.row_start             = row_start[color];
+    data_copy.use_coloring          = use_coloring;
+    data_copy.constraint_mask       = constraint_mask[color];
 
     return data_copy;
   }
@@ -1318,6 +1356,8 @@ namespace PSMF
     const unsigned int shift =
       is_boundary_face * n_inner_faces[color] * 2 * face_padding_length;
 
+    if (face_q_points.size() > 0)
+      data_copy.face_q_points = face_q_points[color];
     if (face_inv_jacobian.size() > 0)
       data_copy.face_inv_jacobian = face_inv_jacobian[color] + shift;
     if (face_JxW.size() > 0)
@@ -1360,6 +1400,7 @@ namespace PSMF
       is_boundary_face ? n_boundary_faces[color] : n_inner_faces[color];
 
     data_copy.n_cells = n_boundary_faces[color] + n_inner_faces[color] * 2;
+    data_copy.n_locally_owned_cells = data_copy.n_cells;
 
     data_copy.matrix_type = matrix_type;
 
@@ -1415,6 +1456,8 @@ namespace PSMF
                                            const VectorType &src,
                                            VectorType       &dst) const
   {
+    src.update_ghost_values();
+
     // Execute the loop on the boundary faces
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_inner_faces[i] > 0)
@@ -1427,6 +1470,8 @@ namespace PSMF
               dst.get_values());
           AssertCudaKernel();
         }
+    dst.compress(dealii::VectorOperation::add);
+    src.zero_out_ghost_values();
   }
 
 
@@ -1802,8 +1847,13 @@ namespace PSMF
     CellIterator begin(iterator_filter, beginc);
     CellIterator end(iterator_filter, endc);
 
+    // TODO: Active Cells
+    CellIterator beginl(IteratorFilters::LevelEqualTo(mg_level), beginc);
+    CellIterator endl(IteratorFilters::LevelEqualTo(mg_level), endc);
+
     std::vector<std::vector<CellIterator>> graph;
 
+    unsigned int n_ghosts = 0;
     if (begin != end)
       {
         if (additional_data.use_coloring)
@@ -1815,6 +1865,7 @@ namespace PSMF
           }
         else
           {
+            // TODO: Ghost cells
             graph.clear();
             if (additional_data.overlap_communication_computation)
               {
@@ -1868,6 +1919,13 @@ namespace PSMF
                 graph.resize(1, std::vector<CellIterator>());
                 for (auto cell = begin; cell != end; ++cell)
                   graph[0].emplace_back(cell);
+
+                for (auto cell = beginl; cell != endl; ++cell)
+                  if (cell->is_ghost_on_level())
+                    {
+                      graph[0].emplace_back(cell);
+                      n_ghosts++;
+                    }
               }
           }
       }
@@ -1896,7 +1954,9 @@ namespace PSMF
         helper.n_inner_faces    = 0;
         helper.n_boundary_faces = 0;
 
-        n_cells[i] = graph[i].size();
+        n_cells[i]               = graph[i].size();
+        n_locally_owned_cells[i] = graph[i].size() - n_ghosts;
+
         helper.setup_cell_arrays(i);
         typename std::vector<CellIterator>::iterator cell = graph[i].begin(),
                                                      end_cell = graph[i].end();
@@ -2036,6 +2096,9 @@ namespace PSMF
                                                dealii::MemorySpace::CUDA> &dst)
     const
   {
+    Util::adjust_ghost_range_if_necessary(src, partitioner);
+    Util::adjust_ghost_range_if_necessary(dst, partitioner);
+
     // in case we have compatible partitioners, we can simply use the provided
     // vectors
     if (src.get_partitioner().get() == partitioner.get() &&
@@ -2094,7 +2157,7 @@ namespace PSMF
 
             // Execute the loop on the cells
             for (unsigned int i = 0; i < n_colors; ++i)
-              if (n_cells[i] > 0)
+              if (n_locally_owned_cells[i] > 0)
                 {
                   apply_kernel_shmem<dim, Number, Functor>
                     <<<grid_dim[i], block_dim[i]>>>(func,

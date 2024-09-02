@@ -587,22 +587,31 @@ namespace PSMF
                 int row = linear_tid / (n_dofs_1d - 2) + 1;
                 int col = linear_tid % (n_dofs_1d - 2) + 1;
 
-                const unsigned int index =
-                  local_patch * local_dim + row * n_dofs_1d + col;
+                unsigned int index_g = (row - 1) * (n_dofs_1d - 2) + col - 1;
 
-                const unsigned int global_index =
-                  Util::compute_indices<dim, fe_degree>(
-                    &gpu_data.first_dof[patch * regular_vpatch_size],
-                    local_patch,
-                    col,
-                    row,
-                    0);
+                unsigned int index = row * n_dofs_1d + col;
 
-                const unsigned int global_dof_indices =
-                  gpu_data.global_to_local(global_index);
+                types::global_dof_index global_dof_indices;
+
+                if constexpr (is_ghost)
+                  global_dof_indices =
+                    gpu_data
+                      .patch_dofs[patch * local_dim + gpu_data.l_to_h[index_g]];
+                else
+                  {
+                    const types::global_dof_index global_index =
+                      Util::compute_indices<dim, fe_degree>(
+                        &gpu_data.first_dof[patch * regular_vpatch_size],
+                        local_patch,
+                        col,
+                        row,
+                        0);
+                    global_dof_indices = gpu_data.global_to_local(global_index);
+                  }
 
                 solution[global_dof_indices] =
-                  shared_data.local_dst[index] * gpu_data.relaxation;
+                  shared_data.local_dst[local_patch * local_dim + index] *
+                  gpu_data.relaxation;
               }
           }
         else if (dim == 3)

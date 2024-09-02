@@ -9,7 +9,6 @@
 
 #include "cuda_mg_transfer.cuh"
 #include "cuda_mg_transfer.template.cuh"
-#include "patch_base.cuh"
 
 namespace PSMF
 {
@@ -17,17 +16,17 @@ namespace PSMF
   //=============================================================================
   // explicit instantiations
   //=============================================================================
-  template class MGTransferCUDA<2, double, DoFLayout::DGQ>;
-  template class MGTransferCUDA<2, float, DoFLayout::DGQ>;
-  template class MGTransferCUDA<3, double, DoFLayout::DGQ>;
-  template class MGTransferCUDA<3, float, DoFLayout::DGQ>;
+  template class MGTransferCUDA<2, double>;
+  template class MGTransferCUDA<2, float>;
+  template class MGTransferCUDA<3, double>;
+  template class MGTransferCUDA<3, float>;
 
-#define INSTANTIATE_COPY_TO_MG(dim, number_type, vec_number_type)             \
-  template void MGTransferCUDA<dim, number_type, DoFLayout::DGQ>::copy_to_mg( \
-    const DoFHandler<dim> &,                                                  \
-    MGLevelObject<                                                            \
-      LinearAlgebra::distributed::Vector<number_type, MemorySpace::CUDA>> &,  \
-    const LinearAlgebra::distributed::Vector<vec_number_type,                 \
+#define INSTANTIATE_COPY_TO_MG(dim, number_type, vec_number_type)            \
+  template void MGTransferCUDA<dim, number_type>::copy_to_mg(                \
+    const DoFHandler<dim> &,                                                 \
+    MGLevelObject<                                                           \
+      LinearAlgebra::distributed::Vector<number_type, MemorySpace::CUDA>> &, \
+    const LinearAlgebra::distributed::Vector<vec_number_type,                \
                                              MemorySpace::CUDA> &) const
 
   INSTANTIATE_COPY_TO_MG(2, double, double);
@@ -40,8 +39,7 @@ namespace PSMF
 
 
 #define INSTANTIATE_COPY_FROM_MG(dim, number_type, vec_number_type)           \
-  template void                                                               \
-  MGTransferCUDA<dim, number_type, DoFLayout::DGQ>::copy_from_mg(             \
+  template void MGTransferCUDA<dim, number_type>::copy_from_mg(               \
     const DoFHandler<dim> &,                                                  \
     LinearAlgebra::distributed::Vector<vec_number_type, MemorySpace::CUDA> &, \
     const MGLevelObject<                                                      \
@@ -57,8 +55,7 @@ namespace PSMF
   INSTANTIATE_COPY_FROM_MG(3, float, double);
 
 #define INSTANTIATE_COPY_FROM_MG_ADD(dim, number_type, vec_number_type)       \
-  template void                                                               \
-  MGTransferCUDA<dim, number_type, DoFLayout::DGQ>::copy_from_mg_add(         \
+  template void MGTransferCUDA<dim, number_type>::copy_from_mg_add(           \
     const DoFHandler<dim> &,                                                  \
     LinearAlgebra::distributed::Vector<vec_number_type, MemorySpace::CUDA> &, \
     const MGLevelObject<                                                      \

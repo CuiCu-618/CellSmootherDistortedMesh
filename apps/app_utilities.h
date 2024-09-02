@@ -33,19 +33,21 @@
     return name##Strings[static_cast<int>(value)];         \
   }
 
-#define SMO_MACRO(name, v1, v2, v3, v4)               \
-  enum class name                                     \
-  {                                                   \
-    v1,                                               \
-    v2,                                               \
-    v3,                                               \
-    v4,                                               \
-  };                                                  \
-  const char *name##Strings[] = {#v1, #v2, #v3, #v4}; \
-  template <typename T>                               \
-  constexpr const char *name##ToString(T value)       \
-  {                                                   \
-    return name##Strings[static_cast<int>(value)];    \
+#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6)                 \
+  enum class name                                               \
+  {                                                             \
+    v1,                                                         \
+    v2,                                                         \
+    v3,                                                         \
+    v4,                                                         \
+    v5,                                                         \
+    v6,                                                         \
+  };                                                            \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6}; \
+  template <typename T>                                         \
+  constexpr const char *name##ToString(T value)                 \
+  {                                                             \
+    return name##Strings[static_cast<int>(value)];              \
   }
 
 #define ENUM_MACRO(name, v1, v2, v3)               \
@@ -62,7 +64,13 @@
     return name##Strings[static_cast<int>(value)]; \
   }
 
-LA_MACRO(Smoother, GLOBAL, FUSED_L, ConflictFree, TensorCore, ExactRes);
+SMO_MACRO(Smoother,
+          GLOBAL,
+          FUSED_L,
+          ConflictFree,
+          TensorCore,
+          ExactRes,
+          Chebyshev);
 LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);
@@ -186,7 +194,6 @@ namespace Util
         << GranularityToString(CT::GRANULARITY_) << std::endl
         << "Experiment set:                 " << CT::SETS_ << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
-        << "Number of MG cycles in V-cycle: " << 1 << std::endl
         << std::endl;
 
 
