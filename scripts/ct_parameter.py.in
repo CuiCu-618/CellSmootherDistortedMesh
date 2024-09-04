@@ -120,6 +120,7 @@ def parse_args():
             "TensorCore",
             "ExactRes",
             "Chebyshev",
+            "MCS",
         ],
         help="variant of the Schwarz smoother inverse operator",
     )
@@ -256,6 +257,8 @@ class Parameter:
             elif kernel.endswith("Chebyshev"):
                 kernel_str += r"PSMF::SmootherVariant::Chebyshev, "
                 count += 1
+            elif kernel.endswith("MCS"):
+                kernel_str += r"PSMF::SmootherVariant::MCS, "
         self.smooth_inv = (
             "constexpr std::array<PSMF::SmootherVariant, " + str(count) + ">",
             kernel_str + "}",

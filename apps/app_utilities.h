@@ -33,21 +33,22 @@
     return name##Strings[static_cast<int>(value)];         \
   }
 
-#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6)                 \
-  enum class name                                               \
-  {                                                             \
-    v1,                                                         \
-    v2,                                                         \
-    v3,                                                         \
-    v4,                                                         \
-    v5,                                                         \
-    v6,                                                         \
-  };                                                            \
-  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6}; \
-  template <typename T>                                         \
-  constexpr const char *name##ToString(T value)                 \
-  {                                                             \
-    return name##Strings[static_cast<int>(value)];              \
+#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6, v7)                  \
+  enum class name                                                    \
+  {                                                                  \
+    v1,                                                              \
+    v2,                                                              \
+    v3,                                                              \
+    v4,                                                              \
+    v5,                                                              \
+    v6,                                                              \
+    v7,                                                              \
+  };                                                                 \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6, #v7}; \
+  template <typename T>                                              \
+  constexpr const char *name##ToString(T value)                      \
+  {                                                                  \
+    return name##Strings[static_cast<int>(value)];                   \
   }
 
 #define ENUM_MACRO(name, v1, v2, v3)               \
@@ -70,7 +71,8 @@ SMO_MACRO(Smoother,
           ConflictFree,
           TensorCore,
           ExactRes,
-          Chebyshev);
+          Chebyshev,
+          MCS);
 LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);

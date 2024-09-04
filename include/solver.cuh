@@ -30,6 +30,7 @@
 
 #include <functional>
 
+#include "cell_base.cuh"
 #include "cuda_matrix_free.cuh"
 #include "cuda_mg_transfer.cuh"
 #include "laplace_operator.cuh"

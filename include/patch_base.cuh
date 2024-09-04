@@ -95,7 +95,12 @@ namespace PSMF
     /**
      * Chebyshev Smoother
      */
-    Chebyshev
+    Chebyshev,
+
+    /**
+     * Multiplicative Cell Smoother
+     */
+    MCS,
   };
 
 

@@ -22,7 +22,34 @@ namespace PSMF
             typename Number,
             LaplaceVariant  lapalace,
             SmootherVariant smooth>
-  struct LocalSmoother;
+  struct LocalSmoother
+  {
+  public:
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+
+    mutable std::size_t shared_mem;
+
+    LocalSmoother() = default;
+
+    LocalSmoother(const SmartPointer<const MatrixType>)
+    {}
+
+    template <bool is_ghost>
+    void
+    setup_kernel(const unsigned int) const
+    {}
+
+    template <typename VectorType, typename DataType, bool is_ghost>
+    void
+    loop_kernel(const VectorType &,
+                VectorType &,
+                VectorType &,
+                const DataType &,
+                const dim3 &,
+                const dim3 &,
+                cudaStream_t) const
+    {}
+  };
 
 
   template <typename MatrixType,
@@ -62,10 +89,10 @@ namespace PSMF
       // temp
       shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
 
-      AssertCuda(
-        cudaFuncSetAttribute(loop_kernel_seperate_inv<dim, fe_degree, Number>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             shared_mem));
+      AssertCuda(cudaFuncSetAttribute(
+        loop_kernel_seperate_inv<dim, fe_degree, Number, is_ghost>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shared_mem));
 
       block_dim = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
     }
@@ -80,14 +107,20 @@ namespace PSMF
                 const dim3 &,
                 cudaStream_t stream) const
     {
-      A->vmult(tmp, dst);
-      tmp.sadd(-1., src);
+      {
+        A->vmult(tmp, dst);
+        tmp.sadd(-1., src);
 
-      loop_kernel_seperate_inv<dim, fe_degree, Number>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
-                                                      dst.get_values(),
-                                                      solution.get_values(),
-                                                      gpu_data);
+        dst.update_ghost_values();
+        tmp.update_ghost_values();
+      }
+
+      if (grid_dim.x > 0)
+        loop_kernel_seperate_inv<dim, fe_degree, Number, is_ghost>
+          <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
+                                                        dst.get_values(),
+                                                        solution.get_values(),
+                                                        gpu_data);
     }
     mutable std::size_t                  shared_mem;
     mutable dim3                         block_dim;
@@ -149,11 +182,12 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      solution.get_values(),
-                                                      gpu_data);
+      if (grid_dim.x > 0)
+        loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>
+          <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                        dst.get_values(),
+                                                        solution.get_values(),
+                                                        gpu_data);
     }
   };
 
@@ -211,11 +245,12 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      solution.get_values(),
-                                                      gpu_data);
+      if (grid_dim.x > 0)
+        loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>
+          <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                        dst.get_values(),
+                                                        solution.get_values(),
+                                                        gpu_data);
     }
   };
 
@@ -272,52 +307,13 @@ namespace PSMF
                 const dim3       &block_dim,
                 cudaStream_t      stream) const
     {
-      loop_kernel_fused_exact<dim, fe_degree, Number, lapalace>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      solution.get_values(),
-                                                      gpu_data);
+      if (grid_dim.x > 0)
+        loop_kernel_fused_exact<dim, fe_degree, Number, lapalace>
+          <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
+                                                        dst.get_values(),
+                                                        solution.get_values(),
+                                                        gpu_data);
     }
-  };
-
-
-  template <typename MatrixType,
-            int dim,
-            int fe_degree,
-            typename Number,
-            LaplaceVariant lapalace>
-  struct LocalSmoother<MatrixType,
-                       dim,
-                       fe_degree,
-                       Number,
-                       lapalace,
-                       SmootherVariant::Chebyshev>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
-
-    LocalSmoother() = default;
-
-    LocalSmoother(const SmartPointer<const MatrixType>)
-    {}
-
-    template <bool is_ghost>
-    void
-    setup_kernel(const unsigned int) const
-    {}
-
-    template <typename VectorType, typename DataType, bool is_ghost>
-    void
-    loop_kernel(const VectorType &,
-                VectorType &,
-                VectorType &,
-                const DataType &,
-                const dim3 &,
-                const dim3 &,
-                cudaStream_t) const
-    {}
   };
 
 

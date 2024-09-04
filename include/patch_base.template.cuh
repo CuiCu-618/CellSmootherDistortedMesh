@@ -984,12 +984,12 @@ namespace PSMF
 
     src.update_ghost_values();
 
-    // TODO
+    // TODO: GLOBAL kernel
     for (unsigned int i = 0; i < regular_vpatch_size; ++i)
       {
         (*solution_ghosted) = 0;
-        // dst.update_ghost_values();
-        dst.update_ghost_values_start(0);
+        dst.update_ghost_values();
+        // dst.update_ghost_values_start(0);
 
         op.template setup_kernel<false>(patch_per_block);
 
@@ -1009,9 +1009,9 @@ namespace PSMF
 
         op.template setup_kernel<true>(patch_per_block);
 
-        dst.update_ghost_values_finish();
+        // dst.update_ghost_values_finish();
 
-        if (n_patches_smooth_ghost[i] > 0)
+        if (true || n_patches_smooth_ghost[i] > 0)
           {
             op.template loop_kernel<VectorType, Data, true>(
               src,
