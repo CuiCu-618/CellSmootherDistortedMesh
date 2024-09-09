@@ -31,6 +31,7 @@
 #include <functional>
 
 #include "cell_base.cuh"
+#include "cell_smoother.cuh"
 #include "cuda_matrix_free.cuh"
 #include "cuda_mg_transfer.cuh"
 #include "laplace_operator.cuh"
@@ -912,17 +913,21 @@ namespace PSMF
     using MatrixType = LaplaceDGOperator<dim, fe_degree, Number>;
     using SmootherType =
       PatchSmoother<MatrixType, dim, fe_degree, smooth_vmult, smooth_inverse>;
+    using CellSmootherType =
+      CellSmoother<MatrixType, dim, fe_degree, smooth_vmult, smooth_inverse>;
     using SmootherTypeCheb = PreconditionChebyshev<MatrixType, VectorType>;
     using MatrixFree       = MatrixFree<dim, Number>;
     using VertexPatchType  = LevelVertexPatch<dim, fe_degree, Number>;
+    using CellPatchType    = LevelCellPatch<dim, fe_degree, Number>;
 
     MultigridSolver(
       const DoFHandler<dim>                                 &dof_handler,
       const MGLevelObject<std::shared_ptr<MatrixFree>>      &level_mfdata,
       const MGLevelObject<std::shared_ptr<VertexPatchType>> &patch_data_dp,
       const MGLevelObject<std::shared_ptr<VertexPatchType>> &,
-      const MGTransferCUDA<dim, Number> &transfer_dp,
-      const Function<dim, Number>       &boundary_values,
+      const MGLevelObject<std::shared_ptr<CellPatchType>> &cell_data_dp,
+      const MGTransferCUDA<dim, Number>                   &transfer_dp,
+      const Function<dim, Number>                         &boundary_values,
       const Function<dim, Number> &,
       std::shared_ptr<ConditionalOStream> pcout,
       const unsigned int                  n_cycles = 1)
@@ -935,6 +940,9 @@ namespace PSMF
       , pcout(pcout)
     {
       AssertDimension(fe_degree, dof_handler.get_fe().degree);
+
+      if (smooth_inverse == PSMF::SmootherVariant::MCS)
+        minlevel = 0;
 
       matrix.resize(minlevel, maxlevel);
 
@@ -995,6 +1003,32 @@ namespace PSMF
                                                        transfer_dp,
                                                        mg_smoother_cheb,
                                                        mg_smoother_cheb,
+                                                       minlevel,
+                                                       maxlevel);
+
+          preconditioner_mg = std::make_unique<
+            PreconditionMG<dim, VectorType, MGTransferCUDA<dim, Number>>>(
+            dof_handler, *mg, transfer_dp);
+        }
+      else if (smooth_inverse == PSMF::SmootherVariant::MCS)
+        {
+          MGLevelObject<typename CellSmootherType::AdditionalData>
+            smoother_data;
+          smoother_data.resize(minlevel, maxlevel);
+          for (unsigned int level = minlevel; level <= maxlevel; ++level)
+            {
+              smoother_data[level].data = cell_data_dp[level];
+            }
+
+          mg_cell_smoother.initialize(matrix, smoother_data);
+          mg_cell_coarse.initialize(mg_cell_smoother);
+
+          mg_matrix.initialize(matrix);
+          mg = std::make_unique<Multigrid<VectorType>>(mg_matrix,
+                                                       mg_cell_coarse,
+                                                       transfer_dp,
+                                                       mg_cell_smoother,
+                                                       mg_cell_smoother,
                                                        minlevel,
                                                        maxlevel);
 
@@ -1175,6 +1209,8 @@ namespace PSMF
     {
       if constexpr (smooth_inverse == PSMF::SmootherVariant::Chebyshev)
         (mg_smoother_cheb).smooth(maxlevel, solution, rhs);
+      else if (smooth_inverse == PSMF::SmootherVariant::MCS)
+        (mg_cell_smoother).smooth(maxlevel, solution, rhs);
       else
         (mg_smoother).smooth(maxlevel, solution, rhs);
       cudaDeviceSynchronize();
@@ -1221,12 +1257,17 @@ namespace PSMF
     mutable MGSmootherPrecondition<MatrixType, SmootherTypeCheb, VectorType>
       mg_smoother_cheb;
 
+    MGSmootherPrecondition<MatrixType, CellSmootherType, VectorType>
+      mg_cell_smoother;
+
     /**
      * The coarse solver
      */
     MGCoarseGridApplySmoother<VectorType> mg_coarse;
 
     mutable MGCoarseGridApplySmoother<VectorType> mg_coarse_cheb;
+
+    mutable MGCoarseGridApplySmoother<VectorType> mg_cell_coarse;
 
     mutable std::unique_ptr<
       PreconditionMG<dim, VectorType, MGTransferCUDA<dim, Number>>>

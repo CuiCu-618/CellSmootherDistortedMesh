@@ -104,6 +104,7 @@ namespace Step64
     using MatrixFree    = PSMF::MatrixFree<dim, full_number>;
     using VertexPatchDP = PSMF::LevelVertexPatch<dim, fe_degree, full_number>;
     using VertexPatchSP = PSMF::LevelVertexPatch<dim, fe_degree, vcycle_number>;
+    using CellPatchDP   = PSMF::LevelCellPatch<dim, fe_degree, full_number>;
 
     LaplaceProblem();
     ~LaplaceProblem();
@@ -147,6 +148,7 @@ namespace Step64
     MGLevelObject<std::shared_ptr<MatrixFree>>    level_mfdata;
     MGLevelObject<std::shared_ptr<VertexPatchDP>> patch_data_dp;
     MGLevelObject<std::shared_ptr<VertexPatchSP>> patch_data_sp;
+    MGLevelObject<std::shared_ptr<CellPatchDP>>   cell_data_dp;
     MGConstrainedDoFs                             mg_constrained_dofs;
     AffineConstraints<double>                     constraints;
 
@@ -236,10 +238,11 @@ namespace Step64
     mg_constrained_dofs.make_zero_boundary_constraints(dof_handler,
                                                        dirichlet_boundary);
 
-    unsigned int minlevel = 1;
+    unsigned int minlevel = 0;
     unsigned int maxlevel = triangulation.n_global_levels() - 1;
 
     patch_data_dp.resize(minlevel, maxlevel);
+    cell_data_dp.resize(minlevel, maxlevel);
     level_mfdata.resize(minlevel, maxlevel);
 
     if (std::is_same_v<vcycle_number, float>)
@@ -292,6 +295,16 @@ namespace Step64
             patch_data_sp[level] = std::make_shared<VertexPatchSP>();
             patch_data_sp[level]->reinit(dof_handler, level, additional_data);
           }
+
+        {
+          typename CellPatchDP::AdditionalData additional_data;
+          additional_data.relaxation         = 1.;
+          additional_data.cell_per_block     = CT::PATCH_PER_BLOCK_;
+          additional_data.granularity_scheme = CT::GRANULARITY_;
+
+          cell_data_dp[level] = std::make_shared<CellPatchDP>();
+          cell_data_dp[level]->reinit(dof_handler, level, additional_data);
+        }
       }
 
     *pcout << "Matrix-free setup time: " << time.wall_time() << "s"
@@ -328,6 +341,7 @@ namespace Step64
              level_mfdata,
              patch_data_dp,
              patch_data_sp,
+             cell_data_dp,
              transfer,
              Solution<dim>(),
              RightHandSide<dim>(),
@@ -492,6 +506,13 @@ namespace Step64
                 do_solve<CT::LAPLACE_TYPE_[0],
                          CT::SMOOTH_VMULT_[0],
                          PSMF::SmootherVariant::Chebyshev>(0, 0, k, call_count);
+                break;
+              }
+            case PSMF::SmootherVariant::MCS:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::MCS>(0, 0, k, call_count);
                 break;
               }
             default:
