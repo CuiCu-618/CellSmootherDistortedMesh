@@ -200,7 +200,10 @@ namespace PSMF
         graph_ptr_colored.clear();
         graph_ptr_colored.resize(n_colors);
 
-        graph_ptr_colored[0].push_back(mg_dof.begin_mg(mg_level));
+        // TODO: root cells > 1
+        auto cell = mg_dof.begin_mg(mg_level);
+        if (cell->is_locally_owned_on_level())
+          graph_ptr_colored[0].push_back(cell);
       }
     else
       {
@@ -355,22 +358,22 @@ namespace PSMF
       {
         op.template setup_kernel<false>(cell_per_block);
 
-        if (n_cells_smooth[i] > 0)
-          {
-            op.template loop_kernel<VectorType, Data, false>(
-              src,
-              dst,
-              dst,
-              get_smooth_data(i),
-              grid_dim_smooth[i],
-              block_dim_smooth[i],
-              stream);
+        // if (n_cells_smooth[i] > 0)
+        {
+          op.template loop_kernel<VectorType, Data, false>(src,
+                                                           dst,
+                                                           dst,
+                                                           get_smooth_data(i),
+                                                           grid_dim_smooth[i],
+                                                           block_dim_smooth[i],
+                                                           stream);
 
-            AssertCudaKernel();
-          }
+          AssertCudaKernel();
+        }
 
         // dst.compress(VectorOperation::add);
       }
+    src.zero_out_ghost_values();
   }
 
   template <int dim, int fe_degree, typename Number>

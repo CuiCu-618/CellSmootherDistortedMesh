@@ -54,6 +54,13 @@ namespace PSMF
     edge_down_matrix,
   };
 
+  enum FaceIntegralType
+  {
+    compact,
+    element_wise,
+    element_wise_partial,
+  };
+
   /**
    * This class collects all the data that is stored for the matrix free
    * implementation. The storage scheme is tailored towards several loops
@@ -101,7 +108,8 @@ namespace PSMF
        * Constructor.
        */
       AdditionalData(
-        const MatrixType          matrix_type = MatrixType::active_matrix,
+        const MatrixType       matrix_type        = MatrixType::active_matrix,
+        const FaceIntegralType face_integral_type = FaceIntegralType::compact,
         const dealii::UpdateFlags mapping_update_flags =
           dealii::update_gradients | dealii::update_JxW_values,
         const dealii::UpdateFlags mapping_update_flags_boundary_faces =
@@ -112,6 +120,7 @@ namespace PSMF
         const bool         use_coloring = false,
         const bool         overlap_communication_computation = false)
         : matrix_type(matrix_type)
+        , face_integral_type(face_integral_type)
         , mapping_update_flags(mapping_update_flags)
         , mapping_update_flags_boundary_faces(
             mapping_update_flags_boundary_faces)
@@ -196,6 +205,8 @@ namespace PSMF
       bool overlap_communication_computation;
 
       MatrixType matrix_type;
+
+      FaceIntegralType face_integral_type;
     };
 
     /**
@@ -272,6 +283,11 @@ namespace PSMF
       int *face_orientation;
 
       /**
+       * Pointer to the cell to faces mapping.
+       */
+      dealii::types::global_dof_index *cell2face_id;
+
+      /**
        * ID of the associated MatrixFree object.
        */
       unsigned int id;
@@ -302,6 +318,11 @@ namespace PSMF
       unsigned int n_faces;
 
       /**
+       * Number of inner faces.
+       */
+      unsigned int n_inner_faces;
+
+      /**
        * Length of the padding.
        */
       unsigned int padding_length;
@@ -328,6 +349,8 @@ namespace PSMF
       bool use_coloring;
 
       MatrixType matrix_type;
+
+      FaceIntegralType face_integral_type;
     };
 
     /**
@@ -384,6 +407,12 @@ namespace PSMF
     Data
     get_face_data(unsigned int color) const;
 
+    /**
+     * Return the Data structure associated with @p color.
+     */
+    Data
+    get_cell_face_data(unsigned int color) const;
+
     // clang-format off
     /**
      * This method runs the loop over all cells and apply the local operation on
@@ -435,6 +464,19 @@ namespace PSMF
     boundary_face_loop(const Functor    &face_operation,
                        const VectorType &src,
                        VectorType       &dst) const;
+
+    /**
+     * This method runs the loop over all cells and apply the local operation on
+     * each element in parallel. @p cell_operation is a functor which is applied
+     * on each color. As opposed to the other variants that only runs a function
+     * on cells, this method also takes as arguments a function for the interior
+     * faces and for the boundary faces, respectively.
+     */
+    template <typename Functor, typename VectorType>
+    void
+    cell_face_loop(const Functor    &cell_face_operation,
+                   const VectorType &src,
+                   VectorType       &dst) const;
 
     /**
      * This method runs the loop over all cells and apply the local operation on
@@ -527,6 +569,8 @@ namespace PSMF
     std::size_t
     memory_consumption() const;
 
+
+    FaceIntegralType face_integral_type;
 
   private:
     /**
@@ -684,6 +728,11 @@ namespace PSMF
      * Map the boundary face to cell id.
      */
     std::vector<dealii::types::global_dof_index *> boundary_face2cell_id;
+
+    /**
+     * Map the cell id to faces.
+     */
+    std::vector<dealii::types::global_dof_index *> cell2face_id;
 
     /**
      * Vector of pointer to the cell inverse Jacobian associated to the cells of
@@ -885,6 +934,8 @@ namespace PSMF
   __host__ __device__ constexpr unsigned int
   cells_per_block_shmem(int dim, int fe_degree)
   {
+    return 1;
+
     constexpr int warp_size = 32;
 
     /* clang-format off */
@@ -953,120 +1004,6 @@ namespace PSMF
              q_point_id_in_cell<dim>(n_q_points_1d));
   }
 
-
-  /**
-   * Structure which is passed to the kernel. It is used to pass all the
-   * necessary information from the CPU to the GPU.
-   */
-  template <int dim, typename Number>
-  struct DataHost
-  {
-    /**
-     * Vector of quadrature points.
-     */
-    std::vector<dealii::Point<dim, Number>> q_points;
-
-    /**
-     * Map the position in the local vector to the position in the global
-     * vector.
-     */
-    std::vector<dealii::types::global_dof_index> local_to_global;
-
-    /**
-     * When using Multigrid Method, for one level coarse, map the position in
-     * the local vector to the position in the global vector.
-     */
-    std::vector<dealii::types::global_dof_index> l_to_g_coarse;
-
-    /**
-     * Map the face to cell id.
-     */
-    std::vector<dealii::types::global_dof_index> face2cell_id;
-
-    /**
-     * Vector of cell inverse Jacobians.
-     */
-    std::vector<Number> inv_jacobian;
-
-    /**
-     * Vector of cell Jacobian times the weights.
-     */
-    std::vector<Number> JxW;
-
-    /**
-     * Vector of face inverse Jacobians.
-     */
-    std::vector<Number> face_inv_jacobian;
-
-    /**
-     * Vector of face Jacobian times the weights.
-     */
-    std::vector<Number> face_JxW;
-
-    /**
-     * Vector of unit normal vector on a face.
-     */
-    std::vector<Number> normal_vector;
-
-    /**
-     * Vector of the face direction.
-     */
-    std::vector<unsigned int> face_number;
-
-    /**
-     * Vector of the subface number.
-     */
-    std::vector<int> subface_number;
-
-    /**
-     * Vector of the face orientation.
-     */
-    std::vector<int> face_orientation;
-
-    /**
-     * ID of the associated MatrixFree object.
-     */
-    unsigned int id;
-
-    /**
-     * Number of cells.
-     */
-    unsigned int n_cells;
-
-    /**
-     * Number of faces.
-     */
-    unsigned int n_faces;
-
-    /**
-     * Length of the padding.
-     */
-    unsigned int padding_length;
-
-    /**
-     * Length of the face padding.
-     */
-    unsigned int face_padding_length;
-
-    /**
-     * Row start (including padding).
-     */
-    unsigned int row_start;
-
-    /**
-     * Mask deciding where constraints are set on a given cell.
-     */
-    std::vector<dealii::internal::MatrixFreeFunctions::ConstraintKinds>
-      constraint_mask;
-
-    /**
-     * If true, use graph coloring has been used and we can simply add into
-     * the destingation vector. Otherwise, use atomic operations.
-     */
-    bool use_coloring;
-
-    MatrixType matrix_type;
-  };
 
 
   /*----------------------- Inline functions ---------------------------------*/

@@ -892,7 +892,8 @@ namespace PSMF
     , is_interior_face(is_interior_face)
     , matrix_type(data->matrix_type)
   {
-    auto face_no = is_interior_face ? face_id : face_id + n_faces;
+    // auto face_no = is_interior_face ? face_id : face_id + n_faces;
+    auto face_no = face_id;
 
     cell_id = data->face2cell_id[face_no];
 

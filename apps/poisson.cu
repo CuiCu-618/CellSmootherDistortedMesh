@@ -254,6 +254,7 @@ namespace Step64
         // double-precision matrix-free data
         {
           typename MatrixFree::AdditionalData additional_data;
+          additional_data.face_integral_type = CT::FACE_INTEGRAL_TYPE_[0];
           additional_data.mapping_update_flags =
             update_quadrature_points | update_values | update_gradients |
             update_JxW_values;

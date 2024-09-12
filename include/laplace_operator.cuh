@@ -699,7 +699,7 @@ namespace PSMF
       PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
         phi_inner(face, gpu_data, shared_data, true);
       PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-        phi_outer(face, gpu_data, shared_data, false);
+        phi_outer(face + gpu_data->n_faces, gpu_data, shared_data, false);
 
       phi_inner.read_dof_values(src);
       phi_inner.evaluate(true, true);
@@ -766,7 +766,7 @@ namespace PSMF
       PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
         phi_inner(face, gpu_data, shared_data, true);
       PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-        phi_outer(face, gpu_data, shared_data, false);
+        phi_outer(face + gpu_data->n_faces, gpu_data, shared_data, false);
 
       auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
                        fabs(phi_outer.inverse_length_normal_to_face()));
@@ -822,6 +822,203 @@ namespace PSMF
       phi_outer.distribute_local_to_global(dst);
     }
   };
+
+
+  template <int dim, int fe_degree, typename Number, bool diag = false>
+  class LocalCellFaceOperator
+  {
+  public:
+    static const unsigned int n_faces   = dim * 2;
+    static const unsigned int n_dofs_1d = fe_degree + 1;
+    static const unsigned int n_local_dofs =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+    static const unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalCellFaceOperator()
+    {}
+
+    __device__ Number
+    get_penalty_factor() const
+    {
+      return 1.0 * fe_degree * (fe_degree + 1);
+    }
+
+    __device__ void
+    operator()(const unsigned int                            cell,
+               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                *shared_data,
+               const Number                                 *src,
+               Number                                       *dst) const
+    {
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+
+      fe_eval.read_dof_values(src);
+      Number dof_value_in = fe_eval.get_dof_value();
+
+      fe_eval.evaluate(false, true);
+      fe_eval.submit_gradient(fe_eval.get_gradient());
+      fe_eval.integrate(false, true);
+
+      Number dof_value_out = fe_eval.get_dof_value();
+
+      gpu_data->n_cells = gpu_data->n_faces;
+      // face loop
+      for (unsigned int f = 0; f < n_faces; ++f)
+        {
+          dealii::types::global_dof_index face =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
+          dealii::types::global_dof_index face1 =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
+
+          Number coe = face == face1 ? -1 : 1;
+
+          gpu_data->n_faces = gpu_data->n_inner_faces;
+
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_inner(face, gpu_data, shared_data, true);
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_outer(face1, gpu_data, shared_data, false);
+
+          phi_inner.submit_dof_value(dof_value_in);
+          phi_inner.evaluate(true, true);
+
+          phi_outer.read_dof_values(src);
+          phi_outer.evaluate(true, true);
+
+          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
+                           fabs(phi_outer.inverse_length_normal_to_face()));
+          auto sigma = hi * get_penalty_factor();
+
+          auto solution_jump =
+            phi_inner.get_value() - phi_outer.get_value() * coe;
+          auto average_normal_derivative =
+            0.5 * (phi_inner.get_normal_derivative() +
+                   phi_outer.get_normal_derivative() * coe);
+          auto test_by_value =
+            solution_jump * sigma - average_normal_derivative;
+
+          phi_inner.submit_value(test_by_value);
+          phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+
+          phi_inner.integrate(true, true);
+          dof_value_out += phi_inner.get_dof_value();
+        }
+
+      fe_eval.submit_dof_value(dof_value_out);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
+
+  template <int dim, int fe_degree, typename Number, bool diag = false>
+  class LocalCellFacePartialOperator
+  {
+  public:
+    static const unsigned int n_faces   = dim * 2;
+    static const unsigned int n_dofs_1d = fe_degree + 1;
+    static const unsigned int n_local_dofs =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+    static const unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalCellFacePartialOperator()
+    {
+      static_assert(
+        cells_per_block == 1,
+        "This function only supports one cell per block now. TODO: multiple cells per block.");
+    }
+
+    __device__ Number
+    get_penalty_factor() const
+    {
+      return 1.0 * fe_degree * (fe_degree + 1);
+    }
+
+    __device__ void
+    operator()(const unsigned int                            cell,
+               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                *shared_data,
+               const Number                                 *src,
+               Number                                       *dst) const
+    {
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+
+      fe_eval.read_dof_values(src);
+      Number dof_value_in = fe_eval.get_dof_value();
+
+      fe_eval.evaluate(false, true);
+      fe_eval.submit_gradient(fe_eval.get_gradient());
+      fe_eval.integrate(false, true);
+
+      Number dof_value_out = fe_eval.get_dof_value();
+
+      gpu_data->n_cells = gpu_data->n_faces;
+      // face loop
+      for (unsigned int f = 0; f < n_faces; ++f)
+        {
+          dealii::types::global_dof_index face =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
+          dealii::types::global_dof_index face1 =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
+
+          if (face + face1 == 0)
+            continue;
+
+          Number coe = face == face1 ? -1 : 1;
+
+          gpu_data->n_faces = gpu_data->n_inner_faces;
+
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_inner(face, gpu_data, shared_data, true);
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_outer(face1, gpu_data, shared_data, false);
+
+          phi_inner.submit_dof_value(dof_value_in);
+          phi_inner.evaluate(true, true);
+
+          phi_outer.read_dof_values(src);
+          phi_outer.evaluate(true, true);
+
+          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
+                           fabs(phi_outer.inverse_length_normal_to_face()));
+          auto sigma = hi * get_penalty_factor();
+
+          auto solution_jump =
+            phi_inner.get_value() - phi_outer.get_value() * coe;
+          auto average_normal_derivative =
+            0.5 * (phi_inner.get_normal_derivative() +
+                   phi_outer.get_normal_derivative() * coe);
+          auto test_by_value =
+            solution_jump * sigma - average_normal_derivative;
+
+          phi_inner.submit_value(test_by_value);
+          phi_outer.submit_value(-test_by_value);
+          phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+          phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+
+          phi_inner.integrate(true, true);
+          dof_value_out += phi_inner.get_dof_value();
+
+          phi_outer.integrate(true, true);
+          phi_outer.distribute_local_to_global(dst);
+        }
+
+      fe_eval.submit_dof_value(dof_value_out);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
 
 
   template <int dim, int fe_degree, typename Number>
@@ -897,14 +1094,32 @@ namespace PSMF
             &src) const
     {
       dst = 0.;
-      LocalLaplaceOperator<dim, fe_degree, Number> laplace_operator;
-      data->cell_loop(laplace_operator, src, dst);
 
-      LocalLaplaceBDOperator<dim, fe_degree, Number> laplace_bd_operator;
-      data->boundary_face_loop(laplace_bd_operator, src, dst);
+      if (data->face_integral_type == FaceIntegralType::compact)
+        {
+          LocalLaplaceOperator<dim, fe_degree, Number> laplace_operator;
+          data->cell_loop(laplace_operator, src, dst);
 
-      LocalLaplaceFaceOperator<dim, fe_degree, Number> laplace_face_operator;
-      data->inner_face_loop(laplace_face_operator, src, dst);
+          LocalLaplaceBDOperator<dim, fe_degree, Number> laplace_bd_operator;
+          data->boundary_face_loop(laplace_bd_operator, src, dst);
+
+          LocalLaplaceFaceOperator<dim, fe_degree, Number>
+            laplace_face_operator;
+          data->inner_face_loop(laplace_face_operator, src, dst);
+        }
+      else if (data->face_integral_type == FaceIntegralType::element_wise)
+        {
+          LocalCellFaceOperator<dim, fe_degree, Number> laplace_operator;
+          data->cell_face_loop(laplace_operator, src, dst);
+        }
+      else if (data->face_integral_type ==
+               FaceIntegralType::element_wise_partial)
+        {
+          LocalCellFacePartialOperator<dim, fe_degree, Number> laplace_operator;
+          data->cell_face_loop(laplace_operator, src, dst);
+        }
+      else
+        AssertThrow(false, dealii::ExcMessage("Invalid FaceIntegralType."));
     }
 
     void

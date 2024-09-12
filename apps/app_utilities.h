@@ -74,6 +74,7 @@ SMO_MACRO(Smoother,
           Chebyshev,
           MCS);
 LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
+ENUM_MACRO(FaceIntegral, compact, element_wise, element_wise_partial);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);
 
@@ -92,10 +93,17 @@ namespace Util
     else
       AssertThrow(false, ExcMessage("Invalid Vcycle number type."));
 
+    std::string str_face_int_variant     = "";
     std::string str_laplace_variant      = "";
     std::string str_smooth_vmult_variant = "";
     std::string str_smooth_inv_variant   = "";
 
+    for (unsigned int k = 0; k < CT::FACE_INTEGRAL_TYPE_.size(); ++k)
+      {
+        str_face_int_variant +=
+          FaceIntegralToString(CT::FACE_INTEGRAL_TYPE_[k]);
+        str_face_int_variant += "_";
+      }
     for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
       {
         str_laplace_variant += LaplaceToString(CT::LAPLACE_TYPE_[k]);
@@ -124,7 +132,8 @@ namespace Util
     oss << CT::FE_DEGREE_ << "_";
     oss << n_mpi_procs << "prcs_";
     oss << n_coarse << "cell";
-    oss << "_" << str_laplace_variant;
+    oss << "_" << str_face_int_variant;
+    oss << str_laplace_variant;
     oss << str_smooth_vmult_variant;
     oss << str_smooth_inv_variant;
     oss << str_granularity;
@@ -180,6 +189,10 @@ namespace Util
         << "DoF Layout:                     "
         << DoFLayoutToString(CT::DOF_LAYOUT_) << std::endl
         << "Number type for V-cycle:        " << value_type << std::endl;
+    oss << "FaceIntegral Variant:           ";
+    for (unsigned int k = 0; k < CT::FACE_INTEGRAL_TYPE_.size(); ++k)
+      oss << FaceIntegralToString(CT::FACE_INTEGRAL_TYPE_[k]) << " ";
+    oss << std::endl;
     oss << "Laplace Variant:                ";
     for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
       oss << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " ";
@@ -196,6 +209,7 @@ namespace Util
         << GranularityToString(CT::GRANULARITY_) << std::endl
         << "Experiment set:                 " << CT::SETS_ << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
+        << "Tolerance:                      " << CT::REDUCE_ << std::endl
         << std::endl;
 
 

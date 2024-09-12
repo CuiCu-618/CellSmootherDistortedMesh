@@ -112,8 +112,8 @@ namespace PSMF
         A->vmult(tmp, dst);
         tmp.sadd(-1., src);
 
-        dst.update_ghost_values();
-        tmp.update_ghost_values();
+        // dst.update_ghost_values();
+        // tmp.update_ghost_values();
       }
 
       if (grid_dim.x > 0)

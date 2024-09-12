@@ -392,17 +392,19 @@ namespace PSMF
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       n_fine_size));
 
-    mg_kernel<dim, degree, loop_body<dim, degree, Number>>
-      <<<gd_dim, bk_dim, n_fine_size>>>(
-        dst.get_values(),
-        src.get_values(),
-        weights_on_refined[fine_level - 1]
-          .get_values(), // only has fine-level entries
-        prolongation_matrix_1d.get_values(),
-        level_dof_indices[fine_level - 1].get_values(),
-        level_dof_indices[fine_level].get_values(),
-        child_offset_in_parent[fine_level - 1].get_values(), // on coarse level
-        n_child_cell_dofs);
+    if (n_coarse_cells > 0)
+      mg_kernel<dim, degree, loop_body<dim, degree, Number>>
+        <<<gd_dim, bk_dim, n_fine_size>>>(
+          dst.get_values(),
+          src.get_values(),
+          weights_on_refined[fine_level - 1]
+            .get_values(), // only has fine-level entries
+          prolongation_matrix_1d.get_values(),
+          level_dof_indices[fine_level - 1].get_values(),
+          level_dof_indices[fine_level].get_values(),
+          child_offset_in_parent[fine_level - 1]
+            .get_values(), // on coarse level
+          n_child_cell_dofs);
 
     AssertCudaKernel();
   }

@@ -9,6 +9,7 @@ HEADER_ = """
 #define CT_PARAMETER_CUH
 
 #include "patch_base.cuh"
+#include "cuda_matrix_free.cuh"
 
 namespace CT
 {
@@ -91,6 +92,14 @@ def parse_args():
     )
     parser.add_argument(
         "-LOG", "--log-directory", default=BUILD_DIR_, help="directory of the log file"
+    )
+    parser.add_argument(
+        "-FACE",
+        "--face_integral_type",
+        default="c",
+        nargs="+",
+        choices=["compact", "element_wise", "element_wise_partial"],
+        help="variant of the face integral",
     )
     parser.add_argument(
         "-LA",
@@ -185,10 +194,30 @@ class Parameter:
         self.vcycle_number = ("using", str(options.vcycle_number))
         self.log_dir = ("const std::string", rawstr(options.log_directory))
         self.sets = ("const std::string", rawstr(options.test_sets))
+        self.face_int_prm(options.face_integral_type)
         self.laplace_prm(options.laplace_type)
         self.smooth_vmult_prm(options.smooth_vmult)
         self.smooth_inv_prm(options.smooth_inv)
         self.granularity_prm(options.granularity)
+
+    def face_int_prm(self, variant):
+        """translate the variant into parameters"""
+        kernel_str = "{"
+        count = 0
+        for kernel in variant:
+            if kernel.startswith("c"):
+                kernel_str += r"PSMF::FaceIntegralType::compact, "
+                count += 1
+            elif kernel.endswith("element_wise"):
+                kernel_str += r"PSMF::FaceIntegralType::element_wise, "
+                count += 1
+            elif kernel.endswith("element_wise_partial"):
+                kernel_str += r"PSMF::FaceIntegralType::element_wise_partial, "
+                count += 1
+        self.face_integral_type = (
+            "constexpr std::array<PSMF::FaceIntegralType, " + str(count) + ">",
+            kernel_str + "}",
+        )
 
     def laplace_prm(self, variant):
         """translate the variant into parameters"""
