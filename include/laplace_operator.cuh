@@ -916,6 +916,100 @@ namespace PSMF
   };
 
 
+  template <int dim, int fe_degree, typename Number>
+  class LocalCellFaceOperator<dim, fe_degree, Number, true>
+  {
+  public:
+    static const unsigned int n_faces   = dim * 2;
+    static const unsigned int n_dofs_1d = fe_degree + 1;
+    static const unsigned int n_local_dofs =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+    static const unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalCellFaceOperator()
+    {}
+
+    __device__ Number
+    get_penalty_factor() const
+    {
+      return 1.0 * fe_degree * (fe_degree + 1);
+    }
+
+    __device__ void
+    operator()(const unsigned int                            cell,
+               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                *shared_data,
+               const Number *,
+               Number *dst) const
+    {
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+
+      Number my_diagonal = 0.0;
+
+      const unsigned int tid = compute_index<dim, n_dofs_1d>();
+      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+        {
+          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
+          fe_eval.evaluate(false, true);
+          fe_eval.submit_gradient(fe_eval.get_gradient());
+          fe_eval.integrate(false, true);
+          if (tid == i)
+            my_diagonal = fe_eval.get_value();
+        }
+
+      gpu_data->n_cells = gpu_data->n_faces;
+      // face loop
+      for (unsigned int f = 0; f < n_faces; ++f)
+        {
+          dealii::types::global_dof_index face =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
+          dealii::types::global_dof_index face1 =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
+
+          gpu_data->n_faces = gpu_data->n_inner_faces;
+
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_inner(face, gpu_data, shared_data, true);
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_outer(face1, gpu_data, shared_data, false);
+
+          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
+                           fabs(phi_outer.inverse_length_normal_to_face()));
+          auto sigma = hi * get_penalty_factor();
+
+          for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+            {
+              phi_inner.submit_dof_value(i == tid ? 1.0 : 0.0);
+              phi_inner.evaluate(true, true);
+
+              auto solution_jump = phi_inner.get_value();
+              auto average_normal_derivative =
+                0.5 * phi_inner.get_normal_derivative();
+              auto test_by_value =
+                solution_jump * sigma - average_normal_derivative;
+
+              phi_inner.submit_value(test_by_value);
+              phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+
+              phi_inner.integrate(true, true);
+
+              if (tid == i)
+                my_diagonal += phi_inner.get_value();
+            }
+        }
+
+      fe_eval.submit_dof_value(my_diagonal);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
+
   template <int dim, int fe_degree, typename Number, bool diag = false>
   class LocalCellFacePartialOperator
   {
@@ -1010,11 +1104,142 @@ namespace PSMF
           phi_inner.integrate(true, true);
           dof_value_out += phi_inner.get_dof_value();
 
+          if (face == face1)
+            continue;
+
           phi_outer.integrate(true, true);
           phi_outer.distribute_local_to_global(dst);
         }
 
       fe_eval.submit_dof_value(dof_value_out);
+      fe_eval.distribute_local_to_global(dst);
+    }
+  };
+
+
+  template <int dim, int fe_degree, typename Number>
+  class LocalCellFacePartialOperator<dim, fe_degree, Number, true>
+  {
+  public:
+    static const unsigned int n_faces   = dim * 2;
+    static const unsigned int n_dofs_1d = fe_degree + 1;
+    static const unsigned int n_local_dofs =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+    static const unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim) * 2;
+
+    static const unsigned int cells_per_block =
+      PSMF::cells_per_block_shmem(dim, fe_degree);
+
+
+    LocalCellFacePartialOperator()
+    {
+      static_assert(
+        cells_per_block == 1,
+        "This function only supports one cell per block now. TODO: multiple cells per block.");
+    }
+
+    __device__ Number
+    get_penalty_factor() const
+    {
+      return 1.0 * fe_degree * (fe_degree + 1);
+    }
+
+    __device__ void
+    operator()(const unsigned int                            cell,
+               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
+               PSMF::SharedData<dim, Number>                *shared_data,
+               const Number                                 *src,
+               Number                                       *dst) const
+    {
+      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+        cell, gpu_data, shared_data);
+
+      Number my_diagonal = 0.0;
+
+      const unsigned int tid = compute_index<dim, n_dofs_1d>();
+      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+        {
+          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
+          fe_eval.evaluate(false, true);
+          fe_eval.submit_gradient(fe_eval.get_gradient());
+          fe_eval.integrate(false, true);
+          if (tid == i)
+            my_diagonal = fe_eval.get_value();
+        }
+
+      gpu_data->n_cells = gpu_data->n_faces;
+      // face loop
+      for (unsigned int f = 0; f < n_faces; ++f)
+        {
+          Number my_diagonal1 = 0.0;
+
+          dealii::types::global_dof_index face =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
+          dealii::types::global_dof_index face1 =
+            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
+
+          if (face + face1 == 0)
+            continue;
+
+          Number coe = face == face1 ? -1 : 1;
+
+          gpu_data->n_faces = gpu_data->n_inner_faces;
+
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_inner(face, gpu_data, shared_data, true);
+          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+            phi_outer(face1, gpu_data, shared_data, false);
+
+          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
+                           fabs(phi_outer.inverse_length_normal_to_face()));
+          auto sigma = hi * get_penalty_factor();
+
+          for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+            {
+              phi_inner.submit_dof_value(i == tid ? 1.0 : 0.0);
+              phi_inner.evaluate(true, true);
+
+              auto solution_jump = phi_inner.get_value();
+              auto average_normal_derivative =
+                0.5 * phi_inner.get_normal_derivative();
+              auto test_by_value =
+                solution_jump * sigma - average_normal_derivative;
+
+              phi_inner.submit_value(test_by_value);
+              phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+
+              phi_inner.integrate(true, true);
+
+              if (tid == i)
+                my_diagonal += phi_inner.get_value();
+            }
+
+          for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
+            {
+              phi_outer.submit_dof_value(i == tid ? 1.0 : 0.0);
+              phi_outer.evaluate(true, true);
+
+              auto solution_jump = -phi_outer.get_value();
+              auto average_normal_derivative =
+                0.5 * phi_outer.get_normal_derivative() * coe;
+              auto test_by_value =
+                solution_jump * sigma - average_normal_derivative;
+
+              phi_outer.submit_value(-test_by_value);
+              phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+
+              phi_outer.integrate(true, true);
+
+              if (tid == i)
+                my_diagonal1 = phi_outer.get_value();
+            }
+
+          phi_outer.submit_dof_value(my_diagonal1);
+          phi_outer.distribute_local_to_global(dst);
+        }
+
+      fe_eval.submit_dof_value(my_diagonal);
       fe_eval.distribute_local_to_global(dst);
     }
   };
@@ -1330,15 +1555,33 @@ namespace PSMF
       initialize_dof_vector(inv_diag);
       auto zero_vec = inv_diag;
 
-      LocalLaplaceOperator<dim, fe_degree, Number, true> laplace_operator;
-      data->cell_loop(laplace_operator, zero_vec, inv_diag);
+      if (data->face_integral_type == FaceIntegralType::compact)
+        {
+          LocalLaplaceOperator<dim, fe_degree, Number, true> laplace_operator;
+          data->cell_loop(laplace_operator, zero_vec, inv_diag);
 
-      LocalLaplaceBDOperator<dim, fe_degree, Number, true> laplace_bd_operator;
-      data->boundary_face_loop(laplace_bd_operator, zero_vec, inv_diag);
+          LocalLaplaceBDOperator<dim, fe_degree, Number, true>
+            laplace_bd_operator;
+          data->boundary_face_loop(laplace_bd_operator, zero_vec, inv_diag);
 
-      LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
-        laplace_face_operator;
-      data->inner_face_loop(laplace_face_operator, zero_vec, inv_diag);
+          LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
+            laplace_face_operator;
+          data->inner_face_loop(laplace_face_operator, zero_vec, inv_diag);
+        }
+      else if (data->face_integral_type == FaceIntegralType::element_wise)
+        {
+          LocalCellFaceOperator<dim, fe_degree, Number, true> laplace_operator;
+          data->cell_face_loop(laplace_operator, zero_vec, inv_diag);
+        }
+      else if (data->face_integral_type ==
+               FaceIntegralType::element_wise_partial)
+        {
+          LocalCellFacePartialOperator<dim, fe_degree, Number, true>
+            laplace_operator;
+          data->cell_face_loop(laplace_operator, zero_vec, inv_diag);
+        }
+      else
+        AssertThrow(false, dealii::ExcMessage("Invalid FaceIntegralType."));
 
       vector_invert(inv_diag);
 

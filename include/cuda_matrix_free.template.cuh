@@ -1635,6 +1635,9 @@ namespace PSMF
                                           const VectorType &src,
                                           VectorType       &dst) const
   {
+    Util::adjust_ghost_range_if_necessary(src, partitioner);
+    Util::adjust_ghost_range_if_necessary(dst, partitioner);
+
     src.update_ghost_values();
 
     // Execute the loop on the boundary faces
