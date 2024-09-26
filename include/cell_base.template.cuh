@@ -122,6 +122,27 @@ namespace PSMF
   }
 
   template <int dim, int fe_degree, typename Number>
+  std::vector<double>
+  LevelCellPatch<dim, fe_degree, Number>::get_cg_data() const
+  {
+    std::vector<double> vec;
+
+    auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(level);
+    LinearAlgebra::ReadWriteVector<Number> rw_vector(locally_owned_dofs);
+    rw_vector.import(*solution_ghosted, VectorOperation::insert);
+
+    total_runs  = rw_vector[0] - total_runs;
+    total_its   = rw_vector[1] - total_its;
+    total_error = rw_vector[2] - total_error;
+
+    vec.push_back(total_runs);
+    vec.push_back(total_its);
+    vec.push_back(total_error);
+
+    return vec;
+  }
+
+  template <int dim, int fe_degree, typename Number>
   void
   LevelCellPatch<dim, fe_degree, Number>::get_cell_data(
     const CellIterator           &cell,
@@ -193,21 +214,29 @@ namespace PSMF
           break;
       }
 
+    types::global_dof_index                           count = 0;
+    std::vector<std::vector<types::global_dof_index>> cell_indices;
+
     // red-black coloring
     if (mg_level == 0)
       {
         n_colors = 1;
+        cell_indices.resize(n_colors);
         graph_ptr_colored.clear();
         graph_ptr_colored.resize(n_colors);
 
         // TODO: root cells > 1
         auto cell = mg_dof.begin_mg(mg_level);
         if (cell->is_locally_owned_on_level())
-          graph_ptr_colored[0].push_back(cell);
+          {
+            graph_ptr_colored[0].push_back(cell);
+            cell_indices[0].push_back(0);
+          }
       }
     else
       {
         n_colors = 2;
+        cell_indices.resize(n_colors);
         graph_ptr_colored.clear();
         graph_ptr_colored.resize(n_colors);
 
@@ -219,18 +248,25 @@ namespace PSMF
               unsigned int index =
                 cell->parent()->child_iterator_to_index(cell);
               if (index == 0 || index == 3 || index == 5 || index == 6)
-                graph_ptr_colored[0].push_back(cell);
+                {
+                  graph_ptr_colored[0].push_back(cell);
+                  cell_indices[0].push_back(count);
+                }
               else
-                graph_ptr_colored[1].push_back(cell);
+                {
+                  graph_ptr_colored[1].push_back(cell);
+                  cell_indices[1].push_back(count);
+                }
+              count++;
             }
       }
 
     // if (level == 2)
     //   {
-    //     for (auto cell : graph_ptr_colored[0])
+    //     for (auto cell : cell_indices[0])
     //       std::cout << cell << std::endl;
     //     std::cout << std::endl;
-    //     for (auto cell : graph_ptr_colored[1])
+    //     for (auto cell : cell_indices[1])
     //       std::cout << cell << std::endl;
     //   }
 
@@ -246,14 +282,14 @@ namespace PSMF
         cell_type_host.resize(n_cells * dim);
         first_dof_host.resize(n_cells);
 
-        auto cell      = graph_ptr_colored[i].begin(),
-             end_patch = graph_ptr_colored[i].end();
-        for (types::global_dof_index c_id = 0; cell != end_patch;
-             ++cell, ++c_id)
+        auto cell     = graph_ptr_colored[i].begin(),
+             end_cell = graph_ptr_colored[i].end();
+        for (types::global_dof_index c_id = 0; cell != end_cell; ++cell, ++c_id)
           get_cell_data(*cell, c_id, false);
 
         alloc_arrays(&first_dof_smooth[i], n_cells);
         alloc_arrays(&cell_type[i], n_cells * dim);
+        alloc_arrays(&local_cell_to_global[i], n_cells);
 
         cudaError_t error_code =
           cudaMemcpy(first_dof_smooth[i],
@@ -265,6 +301,12 @@ namespace PSMF
         error_code = cudaMemcpy(cell_type[i],
                                 cell_type_host.data(),
                                 n_cells * dim * sizeof(unsigned int),
+                                cudaMemcpyHostToDevice);
+        AssertCuda(error_code);
+
+        error_code = cudaMemcpy(local_cell_to_global[i],
+                                cell_indices[i].data(),
+                                n_cells * sizeof(types::global_dof_index),
                                 cudaMemcpyHostToDevice);
         AssertCuda(error_code);
       }
@@ -315,6 +357,10 @@ namespace PSMF
     first_dof_host.shrink_to_fit();
 
     delete[] ghost_indices_host;
+
+    total_runs  = 0;
+    total_its   = 0;
+    total_error = 0;
   }
 
   template <int dim, int fe_degree, typename Number>
@@ -339,6 +385,8 @@ namespace PSMF
     data_copy.local_range_end   = local_range_end;
     data_copy.ghost_indices     = ghost_indices_dev;
 
+    data_copy.local_cell_to_global = local_cell_to_global[color];
+
     return data_copy;
   }
 
@@ -358,12 +406,14 @@ namespace PSMF
       {
         op.template setup_kernel<false>(cell_per_block);
 
+        Data smooth_data = get_smooth_data(i);
+
         // if (n_cells_smooth[i] > 0)
         {
           op.template loop_kernel<VectorType, Data, false>(src,
                                                            dst,
-                                                           dst,
-                                                           get_smooth_data(i),
+                                                           *solution_ghosted,
+                                                           smooth_data,
                                                            grid_dim_smooth[i],
                                                            block_dim_smooth[i],
                                                            stream);
@@ -600,6 +650,8 @@ namespace PSMF
     this->block_dim_laplace.resize(n_colors);
     this->first_dof_laplace.resize(n_colors);
     this->cell_type.resize(n_colors);
+
+    this->local_cell_to_global.resize(n_colors);
 
     this->n_cells_smooth.resize(n_colors);
     this->grid_dim_smooth.resize(n_colors);

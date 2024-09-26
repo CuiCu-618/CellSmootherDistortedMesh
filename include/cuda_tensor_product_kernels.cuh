@@ -27,8 +27,41 @@
 #include "cuda_matrix_free.cuh"
 
 
+#define CONFLICTFREE
+
+
 namespace PSMF
 {
+
+#ifdef CONFLICTFREE
+  // Function to calculate GCD of two numbers
+  __device__ constexpr unsigned int
+  gcd(unsigned int a, unsigned int b)
+  {
+    if (b == 0)
+      return a;
+    return gcd(b, a % b);
+  }
+
+  // Recursive template function to calculate LCM of two numbers
+  template <int a, int b>
+  struct LCM
+  {
+    static constexpr unsigned int value = (a * b) / gcd(a, b);
+  };
+
+  // Function to calculate the multiple of a number
+  template <int n, int constant>
+  __device__ constexpr unsigned int
+  calculate_multiple()
+  {
+    // Calculate the multiple of n
+    constexpr unsigned int multiple = LCM<n, constant>::value / n;
+
+    return multiple;
+  }
+#endif
+
   /**
    * For face integral, compute the offset for a given subface.
    */
@@ -124,6 +157,9 @@ namespace PSMF
     __device__
     EvaluatorTensorProduct(int mf_object_id);
 
+    __device__
+    EvaluatorTensorProduct(int mf_object_id, Number *shv, Number *shg);
+
     /**
      * Evaluate the values of a finite element function at the quadrature
      * points.
@@ -196,6 +232,9 @@ namespace PSMF
     integrate_value_and_gradient(Number *u, Number *grad_u[dim]);
 
     const int mf_object_id;
+
+    Number *shape_values;
+    Number *shape_gradients;
   };
 
 
@@ -207,6 +246,20 @@ namespace PSMF
                          n_q_points_1d,
                          Number>::EvaluatorTensorProduct(int object_id)
     : mf_object_id(object_id)
+  {}
+
+  template <int dim, int fe_degree, int n_q_points_1d, typename Number>
+  __device__
+  EvaluatorTensorProduct<evaluate_general,
+                         dim,
+                         fe_degree,
+                         n_q_points_1d,
+                         Number>::EvaluatorTensorProduct(int     object_id,
+                                                         Number *shv,
+                                                         Number *shg)
+    : mf_object_id(object_id)
+    , shape_values(shv)
+    , shape_gradients(shg)
   {}
 
   template <int dim, int fe_degree, int n_q_points_1d, typename Number>
@@ -252,23 +305,31 @@ namespace PSMF
                                         const Number *in,
                                         Number       *out) const
   {
-    const unsigned int i = (dim == 1) ? 0 : threadIdx.x % n_q_points_1d;
-    const unsigned int j = (dim == 3) ? threadIdx.y : 0;
-    const unsigned int q = (dim == 1) ? (threadIdx.x % n_q_points_1d) :
-                           (dim == 2) ? threadIdx.y :
-                                        threadIdx.z;
+#ifdef CONFLICTFREE
+    constexpr unsigned int multiple = calculate_multiple<n_q_points_1d, 16>();
 
-    // This loop simply multiply the shape function at the quadrature point by
-    // the value finite element coefficient.
+    const unsigned int z   = threadIdx.z;
+    const unsigned int row = threadIdx.y;
+    const unsigned int col = threadIdx.x % n_q_points_1d;
+
     Number t = 0;
-    for (int k = 0; k < n_q_points_1d; ++k)
+    for (unsigned int k = 0; k < n_q_points_1d; ++k)
       {
         const unsigned int shape_idx =
-          dof_to_quad ? (q + k * n_q_points_1d) : (k + q * n_q_points_1d);
+          dof_to_quad ?
+            ((direction == 0) ?
+               (col + ((k + col / multiple) % n_q_points_1d) * n_q_points_1d) :
+             (direction == 1) ? (row + k * n_q_points_1d) :
+                                (z + k * n_q_points_1d)) :
+            ((direction == 0) ?
+               ((k + col / multiple) % n_q_points_1d + col * n_q_points_1d) :
+             (direction == 1) ? (k + row * n_q_points_1d) :
+                                (k + z * n_q_points_1d));
         const unsigned int source_idx =
-          (direction == 0) ? (k + n_q_points_1d * (i + n_q_points_1d * j)) :
-          (direction == 1) ? (i + n_q_points_1d * (k + n_q_points_1d * j)) :
-                             (i + n_q_points_1d * (j + n_q_points_1d * k));
+          (direction == 0) ? ((k + col / multiple) % n_q_points_1d +
+                              n_q_points_1d * (row + n_q_points_1d * z)) :
+          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                             (col + n_q_points_1d * (row + n_q_points_1d * k));
         t +=
           shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
       }
@@ -277,14 +338,44 @@ namespace PSMF
       __syncthreads();
 
     const unsigned int destination_idx =
-      (direction == 0) ? (q + n_q_points_1d * (i + n_q_points_1d * j)) :
-      (direction == 1) ? (i + n_q_points_1d * (q + n_q_points_1d * j)) :
-                         (i + n_q_points_1d * (j + n_q_points_1d * q));
+      col + n_q_points_1d * (row + n_q_points_1d * z);
 
     if (add)
       out[destination_idx] += t;
     else
       out[destination_idx] = t;
+
+#else
+    const unsigned int z   = threadIdx.z;
+    const unsigned int row = threadIdx.y;
+    const unsigned int col = threadIdx.x % n_q_points_1d;
+
+    Number t = 0;
+    for (unsigned int k = 0; k < n_q_points_1d; ++k)
+      {
+        const unsigned int shape_idx =
+          dof_to_quad ? (row + k * n_q_points_1d) : (k + row * n_q_points_1d);
+        const unsigned int source_idx =
+          (direction == 0) ? (k + n_q_points_1d * (col + n_q_points_1d * z)) :
+          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                             (col + n_q_points_1d * (z + n_q_points_1d * k));
+        t +=
+          shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
+      }
+
+    if (in_place)
+      __syncthreads();
+
+    const unsigned int destination_idx =
+      (direction == 0) ? (row + n_q_points_1d * (col + n_q_points_1d * z)) :
+      (direction == 1) ? (col + n_q_points_1d * (row + n_q_points_1d * z)) :
+                         (col + n_q_points_1d * (z + n_q_points_1d * row));
+
+    if (add)
+      out[destination_idx] += t;
+    else
+      out[destination_idx] = t;
+#endif
   }
 
 
@@ -406,26 +497,19 @@ namespace PSMF
       {
         case 1:
           {
-            gradients<0, true, false, false>(
-              get_cell_shape_gradients<Number>(mf_object_id), u, grad_u[0]);
+            gradients<0, true, false, false>(shape_values, u, grad_u[0]);
 
             break;
           }
         case 2:
           {
-            gradients<0, true, false, false>(
-              get_cell_shape_gradients<Number>(mf_object_id), u, grad_u[0]);
-            values<0, true, false, false>(
-              get_cell_shape_values<Number>(mf_object_id), u, grad_u[1]);
+            gradients<0, true, false, false>(shape_gradients, u, grad_u[0]);
+            values<0, true, false, false>(shape_values, u, grad_u[1]);
 
             __syncthreads();
 
-            values<1, true, false, true>(get_cell_shape_values<Number>(
-                                           mf_object_id),
-                                         grad_u[0],
-                                         grad_u[0]);
-            gradients<1, true, false, true>(get_cell_shape_gradients<Number>(
-                                              mf_object_id),
+            values<1, true, false, true>(shape_values, grad_u[0], grad_u[0]);
+            gradients<1, true, false, true>(shape_gradients,
                                             grad_u[1],
                                             grad_u[1]);
 
@@ -433,40 +517,23 @@ namespace PSMF
           }
         case 3:
           {
-            gradients<0, true, false, false>(
-              get_cell_shape_gradients<Number>(mf_object_id), u, grad_u[0]);
-            values<0, true, false, false>(
-              get_cell_shape_values<Number>(mf_object_id), u, grad_u[1]);
-            values<0, true, false, false>(
-              get_cell_shape_values<Number>(mf_object_id), u, grad_u[2]);
+            gradients<0, true, false, false>(shape_gradients, u, grad_u[0]);
+            values<0, true, false, false>(shape_values, u, grad_u[1]);
+            values<0, true, false, false>(shape_values, u, grad_u[2]);
 
             __syncthreads();
 
-            values<1, true, false, true>(get_cell_shape_values<Number>(
-                                           mf_object_id),
-                                         grad_u[0],
-                                         grad_u[0]);
-            gradients<1, true, false, true>(get_cell_shape_gradients<Number>(
-                                              mf_object_id),
+            values<1, true, false, true>(shape_values, grad_u[0], grad_u[0]);
+            gradients<1, true, false, true>(shape_gradients,
                                             grad_u[1],
                                             grad_u[1]);
-            values<1, true, false, true>(get_cell_shape_values<Number>(
-                                           mf_object_id),
-                                         grad_u[2],
-                                         grad_u[2]);
+            values<1, true, false, true>(shape_values, grad_u[2], grad_u[2]);
 
             __syncthreads();
 
-            values<2, true, false, true>(get_cell_shape_values<Number>(
-                                           mf_object_id),
-                                         grad_u[0],
-                                         grad_u[0]);
-            values<2, true, false, true>(get_cell_shape_values<Number>(
-                                           mf_object_id),
-                                         grad_u[1],
-                                         grad_u[1]);
-            gradients<2, true, false, true>(get_cell_shape_gradients<Number>(
-                                              mf_object_id),
+            values<2, true, false, true>(shape_values, grad_u[0], grad_u[0]);
+            values<2, true, false, true>(shape_values, grad_u[1], grad_u[1]);
+            gradients<2, true, false, true>(shape_gradients,
                                             grad_u[2],
                                             grad_u[2]);
 
@@ -660,15 +727,13 @@ namespace PSMF
       {
         case 1:
           {
-            gradients<0, false, add, false>(
-              get_cell_shape_gradients<Number>(mf_object_id), grad_u[dim], u);
+            gradients<0, false, add, false>(shape_gradients, grad_u[dim], u);
 
             break;
           }
         case 2:
           {
-            gradients<0, false, false, true>(get_cell_shape_gradients<Number>(
-                                               mf_object_id),
+            gradients<0, false, false, true>(shape_gradients,
                                              grad_u[0],
                                              grad_u[0]);
             values<0, false, false, true>(get_cell_shape_values<Number>(
@@ -678,54 +743,35 @@ namespace PSMF
 
             __syncthreads();
 
-            values<1, false, add, false>(
-              get_cell_shape_values<Number>(mf_object_id), grad_u[0], u);
+            values<1, false, add, false>(shape_values, grad_u[0], u);
             __syncthreads();
-            gradients<1, false, true, false>(
-              get_cell_shape_gradients<Number>(mf_object_id), grad_u[1], u);
+            gradients<1, false, true, false>(shape_gradients, grad_u[1], u);
 
             break;
           }
         case 3:
           {
-            gradients<0, false, false, true>(get_cell_shape_gradients<Number>(
-                                               mf_object_id),
+            gradients<0, false, false, true>(shape_gradients,
                                              grad_u[0],
                                              grad_u[0]);
-            values<0, false, false, true>(get_cell_shape_values<Number>(
-                                            mf_object_id),
-                                          grad_u[1],
-                                          grad_u[1]);
-            values<0, false, false, true>(get_cell_shape_values<Number>(
-                                            mf_object_id),
-                                          grad_u[2],
-                                          grad_u[2]);
+            values<0, false, false, true>(shape_values, grad_u[1], grad_u[1]);
+            values<0, false, false, true>(shape_values, grad_u[2], grad_u[2]);
 
             __syncthreads();
 
-            values<1, false, false, true>(get_cell_shape_values<Number>(
-                                            mf_object_id),
-                                          grad_u[0],
-                                          grad_u[0]);
-            gradients<1, false, false, true>(get_cell_shape_gradients<Number>(
-                                               mf_object_id),
+            values<1, false, false, true>(shape_values, grad_u[0], grad_u[0]);
+            gradients<1, false, false, true>(shape_gradients,
                                              grad_u[1],
                                              grad_u[1]);
-            values<1, false, false, true>(get_cell_shape_values<Number>(
-                                            mf_object_id),
-                                          grad_u[2],
-                                          grad_u[2]);
+            values<1, false, false, true>(shape_values, grad_u[2], grad_u[2]);
 
             __syncthreads();
 
-            values<2, false, add, false>(
-              get_cell_shape_values<Number>(mf_object_id), grad_u[0], u);
+            values<2, false, add, false>(shape_values, grad_u[0], u);
             __syncthreads();
-            values<2, false, true, false>(
-              get_cell_shape_values<Number>(mf_object_id), grad_u[1], u);
+            values<2, false, true, false>(shape_values, grad_u[1], u);
             __syncthreads();
-            gradients<2, false, true, false>(
-              get_cell_shape_gradients<Number>(mf_object_id), grad_u[2], u);
+            gradients<2, false, true, false>(shape_gradients, grad_u[2], u);
 
             break;
           }
@@ -838,6 +884,13 @@ namespace PSMF
                            int face_number,
                            int subface_number);
 
+    __device__
+    EvaluatorTensorProduct(int     mf_object_id,
+                           int     face_number,
+                           int     subface_number,
+                           Number *shv,
+                           Number *shg);
+
     /**
      * Evaluate the values of a finite element function at the quadrature
      * points.
@@ -905,6 +958,9 @@ namespace PSMF
     const int mf_object_id;
     const int face_number;
     const int subface_number;
+
+    Number *shape_values;
+    Number *shape_gradients;
   };
 
 
@@ -915,6 +971,21 @@ namespace PSMF
     : mf_object_id(object_id)
     , face_number(face_number)
     , subface_number(subface_number)
+  {}
+
+  template <int dim, int fe_degree, int n_q_points_1d, typename Number>
+  __device__
+  EvaluatorTensorProduct<evaluate_face, dim, fe_degree, n_q_points_1d, Number>::
+    EvaluatorTensorProduct(int     object_id,
+                           int     face_number,
+                           int     subface_number,
+                           Number *shv,
+                           Number *shg)
+    : mf_object_id(object_id)
+    , face_number(face_number)
+    , subface_number(subface_number)
+    , shape_values(shv)
+    , shape_gradients(shg)
   {}
 
   template <int dim, int fe_degree, int n_q_points_1d, typename Number>
@@ -945,23 +1016,31 @@ namespace PSMF
   EvaluatorTensorProduct<evaluate_face, dim, fe_degree, n_q_points_1d, Number>::
     apply(Number shape_data[], const Number *in, Number *out) const
   {
-    const unsigned int i = (dim == 1) ? 0 : threadIdx.x % n_q_points_1d;
-    const unsigned int j = (dim == 3) ? threadIdx.y : 0;
-    const unsigned int q = (dim == 1) ? (threadIdx.x % n_q_points_1d) :
-                           (dim == 2) ? threadIdx.y :
-                                        threadIdx.z;
+#ifdef CONFLICTFREE
+    constexpr unsigned int multiple = calculate_multiple<n_q_points_1d, 16>();
 
-    // This loop simply multiply the shape function at the quadrature point by
-    // the value finite element coefficient.
+    const unsigned int z   = threadIdx.z;
+    const unsigned int row = threadIdx.y;
+    const unsigned int col = threadIdx.x % n_q_points_1d;
+
     Number t = 0;
-    for (int k = 0; k < n_q_points_1d; ++k)
+    for (unsigned int k = 0; k < n_q_points_1d; ++k)
       {
         const unsigned int shape_idx =
-          dof_to_quad ? (q + k * n_q_points_1d) : (k + q * n_q_points_1d);
+          dof_to_quad ?
+            ((direction == 0) ?
+               (col + ((k + col / multiple) % n_q_points_1d) * n_q_points_1d) :
+             (direction == 1) ? (row + k * n_q_points_1d) :
+                                (z + k * n_q_points_1d)) :
+            ((direction == 0) ?
+               ((k + col / multiple) % n_q_points_1d + col * n_q_points_1d) :
+             (direction == 1) ? (k + row * n_q_points_1d) :
+                                (k + z * n_q_points_1d));
         const unsigned int source_idx =
-          (direction == 0) ? (k + n_q_points_1d * (i + n_q_points_1d * j)) :
-          (direction == 1) ? (i + n_q_points_1d * (k + n_q_points_1d * j)) :
-                             (i + n_q_points_1d * (j + n_q_points_1d * k));
+          (direction == 0) ? ((k + col / multiple) % n_q_points_1d +
+                              n_q_points_1d * (row + n_q_points_1d * z)) :
+          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                             (col + n_q_points_1d * (row + n_q_points_1d * k));
         t +=
           shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
       }
@@ -970,14 +1049,44 @@ namespace PSMF
       __syncthreads();
 
     const unsigned int destination_idx =
-      (direction == 0) ? (q + n_q_points_1d * (i + n_q_points_1d * j)) :
-      (direction == 1) ? (i + n_q_points_1d * (q + n_q_points_1d * j)) :
-                         (i + n_q_points_1d * (j + n_q_points_1d * q));
+      col + n_q_points_1d * (row + n_q_points_1d * z);
 
     if (add)
       out[destination_idx] += t;
     else
       out[destination_idx] = t;
+
+#else
+    const unsigned int z   = threadIdx.z;
+    const unsigned int row = threadIdx.y;
+    const unsigned int col = threadIdx.x % n_q_points_1d;
+
+    Number t = 0;
+    for (unsigned int k = 0; k < n_q_points_1d; ++k)
+      {
+        const unsigned int shape_idx =
+          dof_to_quad ? (row + k * n_q_points_1d) : (k + row * n_q_points_1d);
+        const unsigned int source_idx =
+          (direction == 0) ? (k + n_q_points_1d * (col + n_q_points_1d * z)) :
+          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                             (col + n_q_points_1d * (z + n_q_points_1d * k));
+        t +=
+          shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
+      }
+
+    if (in_place)
+      __syncthreads();
+
+    const unsigned int destination_idx =
+      (direction == 0) ? (row + n_q_points_1d * (col + n_q_points_1d * z)) :
+      (direction == 1) ? (col + n_q_points_1d * (row + n_q_points_1d * z)) :
+                         (col + n_q_points_1d * (z + n_q_points_1d * row));
+
+    if (add)
+      out[destination_idx] += t;
+    else
+      out[destination_idx] = t;
+#endif
   }
 
 
@@ -990,31 +1099,30 @@ namespace PSMF
     constexpr unsigned int n_q_points_2d = n_q_points_1d * n_q_points_1d;
 
     const unsigned int shift = (face_number & 1) * n_q_points_2d;
-    const unsigned int offset0 =
-      compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
-                                                    subface_number);
-    const unsigned int offset1 =
-      compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
-                                                    subface_number);
-    const unsigned int offset2 =
-      compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
-                                                    subface_number);
+
+    // // local refinement
+    // const unsigned int offset0 =
+    //   compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset1 =
+    //   compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset2 =
+    //   compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
+    //                                                 subface_number);
 
 
-    Number *shape_value_dir0 =
-      face_number / 2 == 0 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset0;
+    Number *shape_value_dir0 = face_number / 2 == 0 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset0;
 
-    Number *shape_value_dir1 =
-      face_number / 2 == 1 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset1;
+    Number *shape_value_dir1 = face_number / 2 == 1 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset1;
 
-    Number *shape_value_dir2 =
-      face_number / 2 == 2 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset2;
+    Number *shape_value_dir2 = face_number / 2 == 2 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset2;
 
     switch (dim)
       {
@@ -1064,30 +1172,29 @@ namespace PSMF
     constexpr unsigned int n_q_points_2d = n_q_points_1d * n_q_points_1d;
 
     const unsigned int shift = (face_number & 1) * n_q_points_2d;
-    const unsigned int offset0 =
-      compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
-                                                    subface_number);
-    const unsigned int offset1 =
-      compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
-                                                    subface_number);
-    const unsigned int offset2 =
-      compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
-                                                    subface_number);
 
-    Number *shape_value_dir0 =
-      face_number / 2 == 0 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset0;
+    // // local refinement
+    // const unsigned int offset0 =
+    //   compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset1 =
+    //   compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset2 =
+    //   compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
+    //                                                 subface_number);
 
-    Number *shape_value_dir1 =
-      face_number / 2 == 1 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset1;
+    Number *shape_value_dir0 = face_number / 2 == 0 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset0;
 
-    Number *shape_value_dir2 =
-      face_number / 2 == 2 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset2;
+    Number *shape_value_dir1 = face_number / 2 == 1 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset1;
+
+    Number *shape_value_dir2 = face_number / 2 == 2 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset2;
 
     switch (dim)
       {
@@ -1137,46 +1244,42 @@ namespace PSMF
     constexpr unsigned int n_q_points_2d = n_q_points_1d * n_q_points_1d;
 
     const unsigned int shift = (face_number & 1) * n_q_points_2d;
-    const unsigned int offset0 =
-      compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
-                                                    subface_number);
-    const unsigned int offset1 =
-      compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
-                                                    subface_number);
-    const unsigned int offset2 =
-      compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
-                                                    subface_number);
+
+    // // local refinement
+    // const unsigned int offset0 =
+    //   compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset1 =
+    //   compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset2 =
+    //   compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
+    //                                                 subface_number);
 
 
-    Number *shape_value_dir0 =
-      face_number / 2 == 0 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset0;
+    Number *shape_value_dir0 = face_number / 2 == 0 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset0;
 
-    Number *shape_value_dir1 =
-      face_number / 2 == 1 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset1;
+    Number *shape_value_dir1 = face_number / 2 == 1 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset1;
 
-    Number *shape_value_dir2 =
-      face_number / 2 == 2 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset2;
+    Number *shape_value_dir2 = face_number / 2 == 2 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset2;
 
-    Number *shape_gradient_dir0 =
-      face_number / 2 == 0 ?
-        get_face_shape_gradients<Number>(mf_object_id) + shift :
-        get_cell_shape_gradients<Number>(mf_object_id) + offset0;
+    Number *shape_gradient_dir0 = face_number / 2 == 0 ?
+                                    shape_gradients + n_q_points_2d + shift :
+                                    shape_gradients; // + offset0;
 
-    Number *shape_gradient_dir1 =
-      face_number / 2 == 1 ?
-        get_face_shape_gradients<Number>(mf_object_id) + shift :
-        get_cell_shape_gradients<Number>(mf_object_id) + offset1;
+    Number *shape_gradient_dir1 = face_number / 2 == 1 ?
+                                    shape_gradients + n_q_points_2d + shift :
+                                    shape_gradients; // + offset1;
 
-    Number *shape_gradient_dir2 =
-      face_number / 2 == 2 ?
-        get_face_shape_gradients<Number>(mf_object_id) + shift :
-        get_cell_shape_gradients<Number>(mf_object_id) + offset2;
+    Number *shape_gradient_dir2 = face_number / 2 == 2 ?
+                                    shape_gradients + n_q_points_2d + shift :
+                                    shape_gradients; // + offset2;
 
     switch (dim)
       {
@@ -1370,46 +1473,42 @@ namespace PSMF
     constexpr unsigned int n_q_points_2d = n_q_points_1d * n_q_points_1d;
 
     const unsigned int shift = (face_number & 1) * n_q_points_2d;
-    const unsigned int offset0 =
-      compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
-                                                    subface_number);
-    const unsigned int offset1 =
-      compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
-                                                    subface_number);
-    const unsigned int offset2 =
-      compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
-                                                    subface_number);
+
+    // // local refinement
+    // const unsigned int offset0 =
+    //   compute_subface_offset<dim, n_q_points_2d, 0>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset1 =
+    //   compute_subface_offset<dim, n_q_points_2d, 1>(face_number,
+    //                                                 subface_number);
+    // const unsigned int offset2 =
+    //   compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
+    //                                                 subface_number);
 
 
-    Number *shape_value_dir0 =
-      face_number / 2 == 0 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset0;
+    Number *shape_value_dir0 = face_number / 2 == 0 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset0;
 
-    Number *shape_value_dir1 =
-      face_number / 2 == 1 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset1;
+    Number *shape_value_dir1 = face_number / 2 == 1 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset1;
 
-    Number *shape_value_dir2 =
-      face_number / 2 == 2 ?
-        get_face_shape_values<Number>(mf_object_id) + shift :
-        get_cell_shape_values<Number>(mf_object_id) + offset2;
+    Number *shape_value_dir2 = face_number / 2 == 2 ?
+                                 shape_values + n_q_points_2d + shift :
+                                 shape_values; // + offset2;
 
-    Number *shape_gradient_dir0 =
-      face_number / 2 == 0 ?
-        get_face_shape_gradients<Number>(mf_object_id) + shift :
-        get_cell_shape_gradients<Number>(mf_object_id) + offset0;
+    Number *shape_gradient_dir0 = face_number / 2 == 0 ?
+                                    shape_gradients + n_q_points_2d + shift :
+                                    shape_gradients; // + offset0;
 
-    Number *shape_gradient_dir1 =
-      face_number / 2 == 1 ?
-        get_face_shape_gradients<Number>(mf_object_id) + shift :
-        get_cell_shape_gradients<Number>(mf_object_id) + offset1;
+    Number *shape_gradient_dir1 = face_number / 2 == 1 ?
+                                    shape_gradients + n_q_points_2d + shift :
+                                    shape_gradients; // + offset1;
 
-    Number *shape_gradient_dir2 =
-      face_number / 2 == 2 ?
-        get_face_shape_gradients<Number>(mf_object_id) + shift :
-        get_cell_shape_gradients<Number>(mf_object_id) + offset2;
+    Number *shape_gradient_dir2 = face_number / 2 == 2 ?
+                                    shape_gradients + n_q_points_2d + shift :
+                                    shape_gradients; // + offset2;
 
     switch (dim)
       {

@@ -70,6 +70,9 @@ def parse_args():
         help="number of triangulation in x coordinate axes",
     )
     parser.add_argument(
+        "-DIS", "--distort", default=0.1, type=float, help="desired distort factor"
+    )
+    parser.add_argument(
         "-REDUCE", "--reduce", default=1e-8, type=float, help="desired reduction factor"
     )
     parser.add_argument(
@@ -130,6 +133,8 @@ def parse_args():
             "ExactRes",
             "Chebyshev",
             "MCS",
+            "MCS_CG",
+            "MCS_PCG",
         ],
         help="variant of the Schwarz smoother inverse operator",
     )
@@ -184,6 +189,7 @@ class Parameter:
         self.fe_degree = ("constexpr unsigned int", deg)
         self.n_replicate = ("constexpr unsigned int", options.n_replicate)
         self.patch_per_block = ("constexpr unsigned int", patch)
+        self.distort = ("constexpr double", options.distort)
         self.reduce = ("constexpr double", options.reduce)
         self.max_steps = ("constexpr unsigned int", options.max_steps)
         self.max_sizes = ("constexpr long long unsigned int", options.max_sizes)
@@ -288,6 +294,13 @@ class Parameter:
                 count += 1
             elif kernel.endswith("MCS"):
                 kernel_str += r"PSMF::SmootherVariant::MCS, "
+                count += 1
+            elif kernel.endswith("MCS_CG"):
+                kernel_str += r"PSMF::SmootherVariant::MCS_CG, "
+                count += 1
+            elif kernel.endswith("MCS_PCG"):
+                kernel_str += r"PSMF::SmootherVariant::MCS_PCG, "
+                count += 1
         self.smooth_inv = (
             "constexpr std::array<PSMF::SmootherVariant, " + str(count) + ">",
             kernel_str + "}",

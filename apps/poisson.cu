@@ -57,9 +57,14 @@ namespace Step64
     virtual Number
     value(const Point<dim> &p, const unsigned int = 0) const override final
     {
-      Number val = 1.;
+      // Number val = 1.;
+      // for (unsigned int d = 0; d < dim; ++d)
+      //   val *= std::sin(numbers::PI * p[d]);
+
+      Number val = std::exp(p[0]);
       for (unsigned int d = 0; d < dim; ++d)
-        val *= std::sin(numbers::PI * p[d]);
+        val *= p[d] * (1 - p[d]);
+
       return val;
     }
 
@@ -67,15 +72,32 @@ namespace Step64
     gradient(const Point<dim> &p, const unsigned int = 0) const override final
     {
       Tensor<1, dim, Number> grad;
-      for (unsigned int d = 0; d < dim; ++d)
+      // for (unsigned int d = 0; d < dim; ++d)
+      //   {
+      //     grad[d] = 1.;
+      //     for (unsigned int e = 0; e < dim; ++e)
+      //       if (d == e)
+      //         grad[d] *= numbers::PI * std::cos(numbers::PI * p[e]);
+      //       else
+      //         grad[d] *= std::sin(numbers::PI * p[e]);
+      //   }
+
+      if (dim == 2)
         {
-          grad[d] = 1.;
-          for (unsigned int e = 0; e < dim; ++e)
-            if (d == e)
-              grad[d] *= numbers::PI * std::cos(numbers::PI * p[e]);
-            else
-              grad[d] *= std::sin(numbers::PI * p[e]);
+          grad[0] =
+            (1 - p[0] - p[0] * p[0]) * p[1] * (1 - p[1]) * std::exp(p[0]);
+          grad[1] = p[0] * (1 - p[0]) * (1 - 2 * p[1]) * std::exp(p[0]);
         }
+      else if (dim == 3)
+        {
+          grad[0] = (1 - p[0] - p[0] * p[0]) * p[1] * (1 - p[1]) * p[2] *
+                    (1 - p[2]) * std::exp(p[0]);
+          grad[1] = p[0] * (1 - p[0]) * (1 - 2 * p[1]) * p[2] * (1 - p[2]) *
+                    std::exp(p[0]);
+          grad[2] = p[0] * (1 - p[0]) * p[1] * (1 - p[1]) * (1 - 2 * p[2]) *
+                    std::exp(p[0]);
+        }
+
       return grad;
     }
   };
@@ -87,11 +109,27 @@ namespace Step64
     virtual Number
     value(const Point<dim> &p, const unsigned int = 0) const override final
     {
-      const Number arg = numbers::PI;
-      Number       val = 1.;
-      for (unsigned int d = 0; d < dim; ++d)
-        val *= std::sin(arg * p[d]);
-      return dim * arg * arg * val;
+      // const Number arg = numbers::PI;
+      // Number       val = 1.;
+      // for (unsigned int d = 0; d < dim; ++d)
+      //   val *= std::sin(arg * p[d]);
+      // return dim * arg * arg * val;
+
+      Number val = 0;
+      if (dim == 2)
+        {
+          val += p[0] * (p[0] + 3) * p[1] * (1 - p[1]) * std::exp(p[0]);
+          val += 2 * p[0] * (1 - p[0]) * std::exp(p[0]);
+        }
+      else if (dim == 3)
+        {
+          val += p[0] * (p[0] + 3) * p[1] * (1 - p[1]) * p[2] * (1 - p[2]) *
+                 std::exp(p[0]);
+          val += 2 * p[0] * (1 - p[0]) * p[2] * (1 - p[2]) * std::exp(p[0]);
+          val += 2 * p[0] * (1 - p[0]) * p[1] * (1 - p[1]) * std::exp(p[0]);
+        }
+
+      return val;
     }
   };
 
@@ -169,7 +207,7 @@ namespace Step64
       if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::Q)
         return std::make_shared<FE_Q<dim>>(fe_degree);
       else if (CT::DOF_LAYOUT_ == PSMF::DoFLayout::DGQ)
-        return std::make_shared<FE_DGQHermite<dim>>(fe_degree);
+        return std::make_shared<FE_DGQLegendre<dim>>(fe_degree);
       return std::shared_ptr<FiniteElement<dim>>();
     }())
     , dof_handler(triangulation)
@@ -201,6 +239,15 @@ namespace Step64
   {
     Timer time;
     setup_time = 0;
+
+    srand(42);
+    GridTools::distort_random(CT::DISTORT_, triangulation, true);
+
+    if constexpr (CT::DISTORT_ > 1e-10)
+      AssertThrow(
+        CT::FACE_INTEGRAL_TYPE_[0] == PSMF::FaceIntegralType::element_wise,
+        dealii::ExcMessage(
+          "Only element_wise face integral supported for distorted mesh."));
 
     dof_handler.distribute_dofs(*fe);
     dof_handler.distribute_mg_dofs();
@@ -404,6 +451,20 @@ namespace Step64
         info_table[index].add_value(perf, data.timing / dof_handler.n_dofs());
         info_table[index].add_value(mem, data.mem_usage);
 
+        if (smooth_inv == PSMF::SmootherVariant::MCS_CG ||
+            smooth_inv == PSMF::SmootherVariant::MCS_PCG)
+          {
+            *pcout << "CG its  : " << data.cg_it << std::endl
+                   << "CG error: " << data.cg_error << std::endl
+                   << std::endl;
+
+            info_table[index].add_value("CG_it", data.cg_it);
+            info_table[index].add_value("CG_error", data.cg_error);
+
+            info_table[index].set_scientific("CG_error", true);
+            info_table[index].set_precision("CG_error", 3);
+          }
+
         if (call_count == 0)
           {
             info_table[index].set_scientific(times, true);
@@ -516,6 +577,20 @@ namespace Step64
                          PSMF::SmootherVariant::MCS>(0, 0, k, call_count);
                 break;
               }
+            case PSMF::SmootherVariant::MCS_CG:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::MCS_CG>(0, 0, k, call_count);
+                break;
+              }
+            case PSMF::SmootherVariant::MCS_PCG:
+              {
+                do_solve<CT::LAPLACE_TYPE_[0],
+                         CT::SMOOTH_VMULT_[0],
+                         PSMF::SmootherVariant::MCS_PCG>(0, 0, k, call_count);
+                break;
+              }
             default:
               AssertThrow(false, ExcMessage("Invalid Smoother Variant."));
           }
@@ -585,31 +660,33 @@ namespace Step64
             break;
           }
 
-        if (cycle == 0)
-          {
-            // auto n_replicate =
-            //   Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
+        // if (cycle == 0)
+        {
+          // auto n_replicate =
+          //   Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
 
-            parallel::distributed::Triangulation<dim> tria(
-              MPI_COMM_WORLD,
-              Triangulation<dim>::limit_level_difference_at_vertices,
-              parallel::distributed::Triangulation<
-                dim>::construct_multigrid_hierarchy);
+          parallel::distributed::Triangulation<dim> tria(
+            MPI_COMM_WORLD,
+            Triangulation<dim>::limit_level_difference_at_vertices,
+            parallel::distributed::Triangulation<
+              dim>::construct_multigrid_hierarchy);
 
-            GridGenerator::hyper_cube(tria, 0, 1);
-            if (dim == 2)
-              GridGenerator::replicate_triangulation(tria,
-                                                     {CT::N_REPLICATE_, 1},
-                                                     triangulation);
-            else if (dim == 3)
-              GridGenerator::replicate_triangulation(tria,
-                                                     {CT::N_REPLICATE_, 1, 1},
-                                                     triangulation);
+          triangulation.clear();
 
-            triangulation.refine_global(2);
-          }
-        else
-          triangulation.refine_global(1);
+          GridGenerator::hyper_cube(tria, 0, 1);
+          if (dim == 2)
+            GridGenerator::replicate_triangulation(tria,
+                                                   {CT::N_REPLICATE_, 1},
+                                                   triangulation);
+          else if (dim == 3)
+            GridGenerator::replicate_triangulation(tria,
+                                                   {CT::N_REPLICATE_, 1, 1},
+                                                   triangulation);
+
+          triangulation.refine_global(2 + cycle);
+        }
+        // else
+        //   triangulation.refine_global(1);
 
         setup_system();
         assemble_mg();
@@ -660,7 +737,7 @@ main(int argc, char *argv[])
 
       {
         LaplaceProblem<CT::DIMENSION_, CT::FE_DEGREE_> Laplace_problem;
-        Laplace_problem.run(20);
+        Laplace_problem.run(3);
       }
     }
   catch (std::exception &exc)

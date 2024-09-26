@@ -143,6 +143,9 @@ namespace PSMF
     double timing           = 0.;
     double perf             = 0.;
 
+    double cg_it    = 0;
+    double cg_error = 0;
+
     std::string
     print_comp()
     {
@@ -942,6 +945,8 @@ namespace PSMF
       AssertDimension(fe_degree, dof_handler.get_fe().degree);
 
       if (smooth_inverse == PSMF::SmootherVariant::MCS ||
+          smooth_inverse == PSMF::SmootherVariant::MCS_CG ||
+          smooth_inverse == PSMF::SmootherVariant::MCS_PCG ||
           smooth_inverse == PSMF::SmootherVariant::Chebyshev)
         minlevel = 0;
 
@@ -1011,7 +1016,9 @@ namespace PSMF
             PreconditionMG<dim, VectorType, MGTransferCUDA<dim, Number>>>(
             dof_handler, *mg, transfer_dp);
         }
-      else if (smooth_inverse == PSMF::SmootherVariant::MCS)
+      else if (smooth_inverse == PSMF::SmootherVariant::MCS ||
+               smooth_inverse == PSMF::SmootherVariant::MCS_CG ||
+               smooth_inverse == PSMF::SmootherVariant::MCS_PCG)
         {
           MGLevelObject<typename CellSmootherType::AdditionalData>
             smoother_data;
@@ -1151,20 +1158,34 @@ namespace PSMF
       solver_control.enable_history_data();
       solver_control.log_history(true);
 
-      SolverGMRES<VectorType> solver(solver_control);
+      SolverFGMRES<VectorType> solver(solver_control);
 
       Timer              time;
-      const unsigned int N         = 10;
+      const unsigned int N         = 5;
       double             best_time = 1e10;
-      for (unsigned int i = 0; i < N; ++i)
+
+      bool is_converged = true;
+      try
         {
-          time.reset();
-          time.start();
+          for (unsigned int i = 0; i < N; ++i)
+            {
+              time.reset();
+              time.start();
 
-          solution = 0;
-          solver.solve(matrix[maxlevel], solution, rhs, *this);
+              solution = 0;
+              solver.solve(matrix[maxlevel], solution, rhs, *this);
 
+              best_time = std::min(time.wall_time(), best_time);
+            }
+        }
+      catch (...)
+        {
           best_time = std::min(time.wall_time(), best_time);
+
+          is_converged = false;
+
+          *pcout << "\n!!! Solver not Converged within " << CT::MAX_STEPS_
+                 << " steps. !!!\n\n";
         }
 
       auto n_iter     = solver_control.last_step();
@@ -1195,11 +1216,25 @@ namespace PSMF
       data.convergence_rate = convergence_rate;
       data.timing           = best_time;
       data.mem_usage        = mem_usage;
+
+      if (smooth_inverse == PSMF::SmootherVariant::MCS_CG ||
+          smooth_inverse == PSMF::SmootherVariant::MCS_PCG)
+        {
+          auto vec = mg_cell_smoother.smoothers[maxlevel].get_cg_solver_info();
+
+          data.cg_it    = vec[0];
+          data.cg_error = vec[1];
+        }
+
       solver_data.push_back(data);
 
-      auto history_data = solver_control.get_history_data();
-      for (auto i = 1U; i < n_iter + 1; ++i)
-        *pcout << "step " << i << ": " << history_data[i] / residual_0 << "\n";
+      if (is_converged)
+        {
+          auto history_data = solver_control.get_history_data();
+          for (auto i = 1U; i < n_iter + 1; ++i)
+            *pcout << "step " << i << ": " << history_data[i] / residual_0
+                   << "\n";
+        }
 
       return solver_data;
     }
@@ -1210,11 +1245,18 @@ namespace PSMF
     {
       if constexpr (smooth_inverse == PSMF::SmootherVariant::Chebyshev)
         (mg_smoother_cheb).smooth(maxlevel, solution, rhs);
-      else if (smooth_inverse == PSMF::SmootherVariant::MCS)
+      else if (smooth_inverse == PSMF::SmootherVariant::MCS ||
+               smooth_inverse == PSMF::SmootherVariant::MCS_CG ||
+               smooth_inverse == PSMF::SmootherVariant::MCS_PCG)
         (mg_cell_smoother).smooth(maxlevel, solution, rhs);
       else
         (mg_smoother).smooth(maxlevel, solution, rhs);
       cudaDeviceSynchronize();
+
+      // solution.print(std::cout);
+      // std::cout << solution.l2_norm() << std::endl;
+      //
+      // AssertThrow(false, dealii::ExcMessage("debug."));
     }
 
     // run matrix-vector product in double precision
@@ -1223,6 +1265,28 @@ namespace PSMF
     {
       matrix[maxlevel].vmult(solution, rhs);
       cudaDeviceSynchronize();
+
+      // std::cout << solution.l2_norm() << std::endl;
+
+      // for (unsigned int i = 0; i < rhs.size(); ++i)
+      //   {
+      //     LinearAlgebra::ReadWriteVector<double> rw_vector(rhs.size());
+      //
+      //     // for (unsigned int i = 0; i < rhs.size(); ++i)
+      //     rw_vector[i] = 1. + 0;
+      //
+      //     rhs.import(rw_vector, VectorOperation::insert);
+      //
+      //     matrix[maxlevel].vmult(solution, rhs);
+      //
+      //     solution.print(std::cout);
+      //     std::cout << solution.l2_norm() << std::endl;
+      //
+      //     // if (i == 0)
+      //     break;
+      //   }
+      //
+      // AssertThrow(false, dealii::ExcMessage("debug."));
     }
 
   private:

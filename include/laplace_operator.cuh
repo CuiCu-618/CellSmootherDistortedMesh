@@ -368,7 +368,8 @@ namespace PSMF
             1. / std::abs((phi_face.get_normal_vector(0) *
                            phi_face.inverse_jacobian(0))[dim - 1]);
           const auto one_over_h = (0.5 / h_inner) + (0.5 / h_inner);
-          const auto gamma = fe_degree == 0 ? 1 : fe_degree * (fe_degree + 1);
+          const auto gamma =
+            fe_degree == 0 ? 1 : 1.0 * fe_degree * (fe_degree + 1);
           const VectorizedArray<double> sigma = 2.0 * gamma * one_over_h;
 
           for (const unsigned int q : phi_face.quadrature_point_indices())
@@ -1275,9 +1276,26 @@ namespace PSMF
       const auto point =
         get_quadrature_point<dim, Number>(cell, gpu_data, n_dofs_1d);
 
-      Number val = dim * numbers::PI * numbers::PI;
-      for (unsigned int d = 0; d < dim; ++d)
-        val *= sin(numbers::PI * point[d]);
+      // Number val = dim * numbers::PI * numbers::PI;
+      // for (unsigned int d = 0; d < dim; ++d)
+      //   val *= sin(numbers::PI * point[d]);
+
+      Number val = 0;
+      if constexpr (dim == 2)
+        {
+          val += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
+                 exp(point[0]);
+          val += 2 * point[0] * (1 - point[0]) * exp(point[0]);
+        }
+      else if (dim == 3)
+        {
+          val += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
+                 point[2] * (1 - point[2]) * exp(point[0]);
+          val += 2 * point[0] * (1 - point[0]) * point[2] * (1 - point[2]) *
+                 exp(point[0]);
+          val += 2 * point[0] * (1 - point[0]) * point[1] * (1 - point[1]) *
+                 exp(point[0]);
+        }
 
       fe_eval.submit_value(val);
       fe_eval.integrate(true, false);
@@ -1414,6 +1432,12 @@ namespace PSMF
       return dof_handler;
     }
 
+    std::shared_ptr<const MatrixFree<dim, Number>>
+    get_mf_data() const
+    {
+      return data;
+    }
+
     void
     compute_rhs(
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>       &dst,
@@ -1501,7 +1525,8 @@ namespace PSMF
             1. / std::abs((phi_face.get_normal_vector(0) *
                            phi_face.inverse_jacobian(0))[dim - 1]);
           const auto one_over_h = (0.5 / h_inner) + (0.5 / h_inner);
-          const auto gamma = fe_degree == 0 ? 1 : fe_degree * (fe_degree + 1);
+          const auto gamma =
+            fe_degree == 0 ? 1 : 1.0 * fe_degree * (fe_degree + 1);
           const VectorizedArray<double> sigma = 2.0 * gamma * one_over_h;
 
           for (const unsigned int q : phi_face.quadrature_point_indices())

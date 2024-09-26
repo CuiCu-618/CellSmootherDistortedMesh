@@ -33,22 +33,24 @@
     return name##Strings[static_cast<int>(value)];         \
   }
 
-#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6, v7)                  \
-  enum class name                                                    \
-  {                                                                  \
-    v1,                                                              \
-    v2,                                                              \
-    v3,                                                              \
-    v4,                                                              \
-    v5,                                                              \
-    v6,                                                              \
-    v7,                                                              \
-  };                                                                 \
-  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6, #v7}; \
-  template <typename T>                                              \
-  constexpr const char *name##ToString(T value)                      \
-  {                                                                  \
-    return name##Strings[static_cast<int>(value)];                   \
+#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6, v7, v8, v9)                    \
+  enum class name                                                              \
+  {                                                                            \
+    v1,                                                                        \
+    v2,                                                                        \
+    v3,                                                                        \
+    v4,                                                                        \
+    v5,                                                                        \
+    v6,                                                                        \
+    v7,                                                                        \
+    v8,                                                                        \
+    v9,                                                                        \
+  };                                                                           \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6, #v7, #v8, #v9}; \
+  template <typename T>                                                        \
+  constexpr const char *name##ToString(T value)                                \
+  {                                                                            \
+    return name##Strings[static_cast<int>(value)];                             \
   }
 
 #define ENUM_MACRO(name, v1, v2, v3)               \
@@ -72,7 +74,9 @@ SMO_MACRO(Smoother,
           TensorCore,
           ExactRes,
           Chebyshev,
-          MCS);
+          MCS,
+          MCS_CG,
+          MCS_PCG);
 LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
 ENUM_MACRO(FaceIntegral, compact, element_wise, element_wise_partial);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
@@ -139,6 +143,7 @@ namespace Util
     oss << str_granularity;
     oss << "_" << value_type;
     oss << "_" << CT::SETS_;
+    oss << "_Dis" << std::lround(CT::DISTORT_ * 100);
 
     return oss.str();
   }
@@ -210,6 +215,7 @@ namespace Util
         << "Experiment set:                 " << CT::SETS_ << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
         << "Tolerance:                      " << CT::REDUCE_ << std::endl
+        << "Distort factor:                 " << CT::DISTORT_ << std::endl
         << std::endl;
 
 

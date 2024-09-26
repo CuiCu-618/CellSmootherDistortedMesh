@@ -15,10 +15,12 @@
 #include <mma.h>
 
 #include "cell_base.cuh"
+#include "cuda_fe_evaluation.cuh"
 #include "patch_base.cuh"
 
 using namespace nvcuda;
 
+// #define ITERATION_INFO
 
 namespace PSMF
 {
@@ -1970,6 +1972,140 @@ namespace PSMF
   };
 
 
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::MCS_CG, 2>
+  {
+    __device__ void
+    apply_inverse(Number       *dst,
+                  Number       *src,
+                  const Number *eigenvalues,
+                  const Number *eigenvectors,
+                  Number       *tmp)
+    {
+      apply<0, true>(eigenvectors, src, tmp);
+      __syncthreads();
+      apply<1, true>(&eigenvectors[n_dofs_1d * n_dofs_1d], tmp, src);
+      __syncthreads();
+      src[threadIdx.y * n_dofs_1d + threadIdx.x % n_dofs_1d] /=
+        (eigenvalues[n_dofs_1d + threadIdx.y] +
+         eigenvalues[threadIdx.x % n_dofs_1d]);
+      __syncthreads();
+      apply<0, false>(eigenvectors, src, tmp);
+      __syncthreads();
+      apply<1, false, false>(&eigenvectors[n_dofs_1d * n_dofs_1d], tmp, dst);
+    }
+
+    template <int direction, bool contract_over_rows, bool add = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
+
+      Number pval = 0;
+
+      // kernel product: A kdot src, [N x N] * [N^dim, 1]
+      // #pragma unroll
+      for (unsigned int k = 0; k < n_dofs_1d; ++k)
+        {
+          const unsigned int shape_idx =
+            contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
+
+          const unsigned int source_idx =
+            (direction == 0) ? (col * n_dofs_1d + k) : (k * n_dofs_1d + col);
+
+          pval += shape_data[shape_idx] * in[source_idx];
+        }
+
+
+      const unsigned int destination_idx =
+        (direction == 0) ? (col * n_dofs_1d + row) : (row * n_dofs_1d + col);
+      if (add)
+        out[destination_idx] += pval;
+      else
+        out[destination_idx] = pval;
+    }
+  };
+
+
+  template <typename Number, int n_dofs_1d>
+  struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::MCS_CG, 3>
+  {
+    __device__ void
+    apply_inverse(Number       *dst,
+                  Number       *src,
+                  const Number *eigenvalues,
+                  const Number *eigenvectors,
+                  Number       *tmp)
+    {
+      constexpr unsigned int n_dofs_2d = n_dofs_1d * n_dofs_1d;
+      constexpr unsigned int local_dim = Util::pow(n_dofs_1d, 3);
+
+      apply<0, true>(eigenvectors, src, tmp);
+      __syncthreads();
+      apply<1, true>(&eigenvectors[n_dofs_2d], tmp, &tmp[local_dim]);
+      __syncthreads();
+      apply<2, true>(&eigenvectors[n_dofs_2d * 2], &tmp[local_dim], tmp);
+      __syncthreads();
+      {
+        tmp[threadIdx.z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d +
+            threadIdx.x % n_dofs_1d] /=
+          (eigenvalues[n_dofs_1d * 2 + threadIdx.z] +
+           eigenvalues[n_dofs_1d + threadIdx.y] +
+           eigenvalues[threadIdx.x % n_dofs_1d]);
+      }
+      __syncthreads();
+      apply<0, false>(eigenvectors, tmp, &tmp[local_dim]);
+      __syncthreads();
+      apply<1, false>(&eigenvectors[n_dofs_2d], &tmp[local_dim], tmp);
+      __syncthreads();
+      apply<2, false, false>(&eigenvectors[n_dofs_2d * 2], tmp, dst);
+    }
+
+    template <int direction, bool contract_over_rows, bool add = false>
+    __device__ void
+    apply(const Number *shape_data, const Number *in, Number *out)
+    {
+      constexpr unsigned int stride = n_dofs_1d * n_dofs_1d;
+
+      const unsigned int z   = threadIdx.z;
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
+
+      Number pval;
+
+      // kernel product: A kdot src, [N x N] * [N^dim, 1]
+      {
+        pval = 0;
+        // #pragma unroll
+        for (unsigned int k = 0; k < n_dofs_1d; ++k)
+          {
+            const unsigned int shape_idx =
+              contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
+
+            const unsigned int source_idx =
+              (direction == 0) ? (col * n_dofs_1d + k + z * stride) :
+              (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                 (z * n_dofs_1d + col + k * stride);
+
+            pval += shape_data[shape_idx] * in[source_idx];
+          }
+      }
+
+      {
+        const unsigned int destination_idx =
+          (direction == 0) ? (col * n_dofs_1d + row + z * stride) :
+          (direction == 1) ? (row * n_dofs_1d + col + z * stride) :
+                             (z * n_dofs_1d + col + row * stride);
+        if (add)
+          out[destination_idx] += pval;
+        else
+          out[destination_idx] = pval;
+      }
+    }
+  };
+
+
 
   template <typename Number, int n_dofs_1d>
   struct TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::GLOBAL, 2>
@@ -2852,6 +2988,596 @@ namespace PSMF
       &shared_data->tmp[local_cell * local_dim * (dim - 1)]);
     __syncthreads();
   }
+
+  template <int dim, int fe_degree, typename Number>
+  __device__ void
+  local_vmult(const unsigned int                      cell,
+              typename MatrixFree<dim, Number>::Data *fe_data,
+              SharedData<dim, Number>                *shared_data,
+              const Number                           *src,
+              Number                                 *dst)
+  {
+    constexpr unsigned int n_faces = dim * 2;
+
+    const unsigned int dof = compute_index<dim, fe_degree + 1>();
+
+    auto fe_data_n_cells = fe_data->n_cells;
+    auto fe_data_n_faces = fe_data->n_faces;
+
+    PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+      cell, fe_data, shared_data);
+
+    fe_eval.submit_dof_value(src[dof]);
+
+    fe_eval.evaluate(false, true);
+    fe_eval.submit_gradient(fe_eval.get_gradient());
+    fe_eval.integrate(false, true);
+
+    Number dof_value_out = fe_eval.get_dof_value();
+
+    fe_data->n_cells = fe_data->n_faces;
+    // face loop
+    for (unsigned int f = 0; f < n_faces; ++f)
+      {
+        dealii::types::global_dof_index face =
+          fe_data->cell2face_id[cell * n_faces * 2 + 2 * f];
+        dealii::types::global_dof_index face1 =
+          fe_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
+
+        Number coe = face == face1 ? 2 : 1;
+
+        fe_data->n_faces = fe_data->n_inner_faces;
+
+        PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+          phi_inner(face, fe_data, shared_data, true);
+        PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
+          phi_outer(face1, fe_data, shared_data, false);
+
+        phi_inner.submit_dof_value(src[dof]);
+        phi_inner.evaluate(true, true);
+
+        auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
+                         fabs(phi_outer.inverse_length_normal_to_face()));
+        auto sigma = hi * (1.0 * fe_degree * (fe_degree + 1));
+
+        auto solution_jump = phi_inner.get_value() * coe;
+        auto average_normal_derivative =
+          0.5 * phi_inner.get_normal_derivative() * coe;
+        auto test_by_value = solution_jump * sigma - average_normal_derivative;
+
+        phi_inner.submit_value(test_by_value);
+        phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+
+        phi_inner.integrate(true, true);
+        dof_value_out += phi_inner.get_dof_value();
+      }
+    __syncthreads();
+
+    dst[dof] = dof_value_out;
+    __syncthreads();
+
+    fe_data->n_cells = fe_data_n_cells;
+    fe_data->n_faces = fe_data_n_faces;
+  }
+
+
+  // TODO: multiple cells
+  // unsigned int mask = __ballot_sync(FULL_MASK, threadIdx.x < NUM_ELEMENTS);
+  template <typename Number>
+  __device__ void
+  innerProd(const int &tid, const Number *v1, const Number *v2, Number *result)
+  {
+    if (tid == 0)
+      *result = 0;
+    __syncthreads();
+
+    Number sum = 0;
+    sum += v1[tid] * v2[tid];
+
+    sum += __shfl_down_sync(-1u, sum, 16);
+    sum += __shfl_down_sync(-1u, sum, 8);
+    sum += __shfl_down_sync(-1u, sum, 4);
+    sum += __shfl_down_sync(-1u, sum, 2);
+    sum += __shfl_down_sync(-1u, sum, 1);
+
+    if ((tid % 32) == 0)
+      atomicAdd(result, sum);
+  }
+
+  template <typename Number, bool self_scaling>
+  __device__ void
+  VecSadd(const int &tid, Number *v1, Number *v2, Number alpha)
+  {
+    if (self_scaling)
+      v1[tid] = alpha * v1[tid] + v2[tid];
+    else
+      v1[tid] += alpha * v2[tid];
+  }
+
+
+
+  template <int dim, int fe_degree, typename Number, SmootherVariant smooth>
+  __device__ void
+  evaluate_cell_smooth_inv_cg(
+    const unsigned int                             local_cell,
+    const unsigned int                             global_cell_id,
+    CellSharedMemData<dim, Number, false, smooth> *shared_data,
+    typename MatrixFree<dim, Number>::Data        *fe_data)
+  {
+    constexpr unsigned int n_dofs_1d = fe_degree + 1;
+    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+
+    const unsigned int tid = threadIdx.z * n_dofs_1d * n_dofs_1d +
+                             threadIdx.y * n_dofs_1d +
+                             (threadIdx.x % n_dofs_1d);
+
+    // const unsigned int Ttid = threadIdx.z * n_dofs_1d * n_dofs_1d +
+    //                           threadIdx.y * n_dofs_1d + threadIdx.x;
+
+    Number *gq[dim];
+    for (unsigned int d = 0; d < dim; ++d)
+      gq[d] =
+        &shared_data
+           ->tmp[local_cell * local_dim * (dim + 3) + (d + 1) * local_dim];
+
+    SharedData<dim, Number> fe_shared_data(
+      &shared_data->tmp[local_cell * local_dim * (dim + 3)],
+      gq,
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 3) + local_dim * (dim + 3) +
+               local_cell * n_dofs_1d * n_dofs_1d * 3],
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 3) + local_dim * (dim + 3) +
+               (blockDim.x / n_dofs_1d + local_cell) * n_dofs_1d * n_dofs_1d *
+                 3]);
+
+    TPEvaluatorSmootherInv<Number, n_dofs_1d, smooth, dim> eval;
+    __syncthreads();
+
+    Number *x = &shared_data->local_dst[local_cell * local_dim];
+    Number *p = &shared_data->local_src[local_cell * local_dim];
+    Number *Ap =
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 3) + (dim + 1) * local_dim];
+    Number *r =
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 3) + (dim + 2) * local_dim];
+
+    r[tid] = p[tid];
+
+    Number *rsold    = &shared_data->local_vars[7 * local_cell + 0];
+    Number *norm_min = &shared_data->local_vars[7 * local_cell + 1];
+    Number *norm_act = &shared_data->local_vars[7 * local_cell + 2];
+
+    Number *alpha = &shared_data->local_vars[7 * local_cell + 3];
+    Number *beta  = &shared_data->local_vars[7 * local_cell + 4];
+
+    Number *rsnew = &shared_data->local_vars[7 * local_cell + 5];
+
+    Number *convergenced = &shared_data->local_vars[7 * local_cell + 6];
+    Number  local_flag   = -1;
+
+    constexpr unsigned int MAX_IT = 10;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
+      *convergenced = 1;
+    __syncthreads();
+
+    innerProd<Number>(tid, r, r, rsold);
+    __syncthreads();
+
+    // if (Ttid == 0 && blockIdx.x == 0)
+    //   {
+    //     printf("rsold: %f\n", *rsold);
+    //   }
+
+    if (tid == 0)
+      atomicAdd(convergenced, -2);
+
+    if (tid == 0)
+      {
+        *norm_min = sqrt(*rsold);
+        *norm_act = sqrt(*rsold);
+      }
+    __syncthreads();
+
+    Number local_norm_min = *norm_min;
+    Number local_norm_act = *norm_act;
+
+    __syncthreads();
+
+    for (unsigned int it = 0; it < MAX_IT; ++it)
+      {
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("p\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", p[i]);
+        //     printf("\n");
+        //   }
+
+        local_vmult<dim, fe_degree, Number>(
+          global_cell_id, fe_data, &fe_shared_data, p, Ap);
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("Ap\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", Ap[i]);
+        //     printf("\n");
+        //   }
+
+        innerProd<Number>(tid, p, Ap, alpha);
+        __syncthreads();
+
+        if (tid == 0)
+          *alpha = *rsold / *alpha;
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("alpha: %f\n", *alpha);
+        //   }
+
+        VecSadd<Number, false>(tid, r, Ap, -*alpha);
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("r\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", r[i]);
+        //     printf("\n");
+        //   }
+
+        innerProd<Number>(tid, r, r, rsnew);
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("rsnew: %f\n", *rsnew);
+        //   }
+
+        if (tid == 0)
+          *norm_act = sqrt(*rsnew);
+        __syncthreads();
+
+        local_norm_act = *norm_act;
+
+        if (local_norm_act < local_norm_min)
+          {
+            if (tid == 0)
+              *norm_min = *norm_act;
+
+            local_norm_min = local_norm_act;
+          }
+        else if (local_flag < 0 && fabs(*alpha) < 1e-7)
+          // (local_norm_act >= local_norm_min || fabs(*alpha) < 1e-10))
+          {
+            local_flag = 1;
+            if (tid == 0)
+              atomicAdd(convergenced, 2);
+          }
+
+        VecSadd<Number, false>(tid, x, p, *alpha);
+        __syncthreads();
+
+        if (local_flag < 0 && *norm_min < 1e-9)
+          {
+            local_flag = 1;
+            if (tid == 0)
+              atomicAdd(convergenced, 2);
+          }
+
+        if (tid == 0)
+          *beta = *rsnew / *rsold;
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("beta: %f\n", *beta);
+        //   }
+
+        if (*convergenced > 0)
+          {
+#ifdef ITERATION_INFO
+            if (tid == 0 && blockIdx.x == 0)
+              printf("Converged 1. # it: %d, residual: %e\n", it, *norm_min);
+#endif
+
+            p[0] = 1;         // number of runs
+            p[1] = it;        // number of its
+            p[2] = *norm_min; // number of erros
+
+            return;
+          }
+
+        VecSadd<Number, true>(tid, p, r, *beta);
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("p\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", p[i]);
+        //     printf("\n\n");
+        //   }
+
+        if (tid == 0)
+          *rsold = *rsnew;
+      }
+
+#ifdef ITERATION_INFO
+    if (tid == 0 && blockIdx.x == 0)
+      printf("Converged 0. # it: %d, residual: %e\n", MAX_IT, *norm_min);
+#endif
+
+    p[0] = 1;         // number of runs
+    p[1] = MAX_IT;    // number of its
+    p[2] = *norm_min; // number of erros
+  }
+
+
+  template <int dim, int fe_degree, typename Number, SmootherVariant smooth>
+  __device__ void
+  evaluate_cell_smooth_inv_pcg(
+    const unsigned int                             local_cell,
+    const unsigned int                             global_cell_id,
+    CellSharedMemData<dim, Number, false, smooth> *shared_data,
+    typename MatrixFree<dim, Number>::Data        *fe_data)
+  {
+    constexpr unsigned int n_dofs_1d = fe_degree + 1;
+    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+
+    const unsigned int tid = threadIdx.z * n_dofs_1d * n_dofs_1d +
+                             threadIdx.y * n_dofs_1d +
+                             (threadIdx.x % n_dofs_1d);
+
+    // const unsigned int Ttid = threadIdx.z * n_dofs_1d * n_dofs_1d +
+    //                           threadIdx.y * n_dofs_1d + threadIdx.x;
+
+    Number *gq[dim];
+    for (unsigned int d = 0; d < dim; ++d)
+      gq[d] =
+        &shared_data
+           ->tmp[local_cell * local_dim * (dim + 4) + (d + 1) * local_dim];
+
+    SharedData<dim, Number> fe_shared_data(
+      &shared_data->tmp[local_cell * local_dim * (dim + 4)],
+      gq,
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 4) + local_dim * (dim + 4) +
+               local_cell * n_dofs_1d * n_dofs_1d * 3],
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 4) + local_dim * (dim + 4) +
+               (blockDim.x / n_dofs_1d + local_cell) * n_dofs_1d * n_dofs_1d *
+                 3]);
+
+    TPEvaluatorSmootherInv<Number, n_dofs_1d, SmootherVariant::MCS_CG, dim>
+      eval;
+    __syncthreads();
+
+    Number *x = &shared_data->local_dst[local_cell * local_dim];
+    Number *r = &shared_data->local_src[local_cell * local_dim];
+    Number *Ap =
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 4) + (dim + 1) * local_dim];
+    Number *p =
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 4) + (dim + 2) * local_dim];
+    Number *z =
+      &shared_data
+         ->tmp[local_cell * local_dim * (dim + 4) + (dim + 3) * local_dim];
+
+    eval.apply_inverse(
+      z,
+      r,
+      &shared_data->local_mass[local_cell * n_dofs_1d * dim],
+      &shared_data->local_derivative[local_cell * n_dofs_1d * n_dofs_1d * dim],
+      &shared_data->tmp[local_cell * local_dim * (dim + 4)]);
+    __syncthreads();
+
+    // if (tid == 0 && blockIdx.x == 0)
+    //   {
+    //     printf("z\n");
+    //     for (unsigned int i = 0; i < local_dim; ++i)
+    //       printf("%f ", z[i]);
+    //     printf("\n");
+    //   }
+    //
+
+    p[tid] = z[tid];
+
+    Number *rsold    = &shared_data->local_vars[7 * local_cell + 0];
+    Number *norm_min = &shared_data->local_vars[7 * local_cell + 1];
+    Number *norm_act = &shared_data->local_vars[7 * local_cell + 2];
+
+    Number *alpha = &shared_data->local_vars[7 * local_cell + 3];
+    Number *beta  = &shared_data->local_vars[7 * local_cell + 4];
+
+    Number *rsnew = &shared_data->local_vars[7 * local_cell + 5];
+
+    Number *convergenced = &shared_data->local_vars[7 * local_cell + 6];
+    Number  local_flag   = -1;
+
+    constexpr unsigned int MAX_IT = 5; // MAX_IT = 2 also works
+
+    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
+      *convergenced = 1;
+    __syncthreads();
+
+    innerProd<Number>(tid, r, z, rsold);
+    __syncthreads();
+
+    // if (Ttid == 0 && blockIdx.x == 0)
+    //   {
+    //     printf("rsold: %f\n", *rsold);
+    //   }
+
+    if (tid == 0)
+      atomicAdd(convergenced, -2);
+
+    if (tid == 0)
+      {
+        *norm_min = sqrt(*rsold);
+        *norm_act = sqrt(*rsold);
+      }
+    __syncthreads();
+
+    Number local_norm_min = *norm_min;
+    Number local_norm_act = *norm_act;
+
+    __syncthreads();
+
+    for (unsigned int it = 0; it < MAX_IT; ++it)
+      {
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("p\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", p[i]);
+        //     printf("\n");
+        //   }
+
+        local_vmult<dim, fe_degree, Number>(
+          global_cell_id, fe_data, &fe_shared_data, p, Ap);
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("Ap\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", Ap[i]);
+        //     printf("\n");
+        //   }
+
+        innerProd<Number>(tid, p, Ap, alpha);
+        __syncthreads();
+
+        if (tid == 0)
+          *alpha = *rsold / *alpha;
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("alpha: %f\n", *alpha);
+        //   }
+
+        VecSadd<Number, false>(tid, r, Ap, -*alpha);
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("r\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", r[i]);
+        //     printf("\n");
+        //   }
+
+        innerProd<Number>(tid, r, r, rsnew);
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("rsnew: %f\n", *rsnew);
+        //   }
+
+        if (tid == 0)
+          *norm_act = sqrt(*rsnew);
+        __syncthreads();
+
+        local_norm_act = *norm_act;
+
+        if (local_norm_act < local_norm_min)
+          {
+            if (tid == 0)
+              *norm_min = *norm_act;
+
+            local_norm_min = local_norm_act;
+          }
+        else if (local_flag < 0 && fabs(*alpha) < 1e-7)
+          // (local_norm_act >= local_norm_min || fabs(*alpha) < 1e-10))
+          {
+            local_flag = 1;
+            if (tid == 0)
+              atomicAdd(convergenced, 2);
+          }
+
+        VecSadd<Number, false>(tid, x, p, *alpha);
+        __syncthreads();
+
+        if (local_flag < 0 && *norm_min < 1e-9)
+          {
+            local_flag = 1;
+            if (tid == 0)
+              atomicAdd(convergenced, 2);
+          }
+
+        eval.apply_inverse(
+          z,
+          r,
+          &shared_data->local_mass[local_cell * n_dofs_1d * dim],
+          &shared_data
+             ->local_derivative[local_cell * n_dofs_1d * n_dofs_1d * dim],
+          &shared_data->tmp[local_cell * local_dim * (dim + 4)]);
+        __syncthreads();
+
+        innerProd<Number>(tid, r, z, rsnew);
+        __syncthreads();
+
+        if (tid == 0)
+          *beta = *rsnew / *rsold;
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("beta: %f\n", *beta);
+        //   }
+
+        if (*convergenced > 0)
+          {
+#ifdef ITERATION_INFO
+            if (tid == 0 && blockIdx.x == 0)
+              printf("Converged 1. # it: %d, residual: %e\n", it, *norm_min);
+#endif
+
+            if (tid == 0)
+              {
+                r[0] = 1;         // number of runs
+                r[1] = it;        // number of its
+                r[2] = *norm_min; // number of erros
+              }
+
+            return;
+          }
+
+        VecSadd<Number, true>(tid, p, z, *beta);
+        __syncthreads();
+
+        // if (Ttid == 0 && blockIdx.x == 0)
+        //   {
+        //     printf("p\n");
+        //     for (unsigned int i = 0; i < local_dim; ++i)
+        //       printf("%f ", p[i]);
+        //     printf("\n\n");
+        //   }
+
+        if (tid == 0)
+          *rsold = *rsnew;
+      }
+
+#ifdef ITERATION_INFO
+    if (tid == 0 && blockIdx.x == 0)
+      printf("Converged 0. # it: %d, residual: %e\n", MAX_IT, *norm_min);
+#endif
+
+    if (tid == 0)
+      {
+        r[0] = 1;         // number of runs
+        r[1] = MAX_IT;    // number of its
+        r[2] = *norm_min; // number of erros
+      }
+  }
+
 
 } // namespace PSMF
 

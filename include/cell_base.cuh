@@ -12,6 +12,8 @@
 #ifndef CELL_BASE_CUH
 #define CELL_BASE_CUH
 
+#include "patch_base.cuh"
+
 using namespace dealii;
 
 /**
@@ -134,6 +136,11 @@ namespace PSMF
       unsigned int *cell_type;
 
       /**
+       * Pointer to local cell index to global index.
+       */
+      types::global_dof_index *local_cell_to_global;
+
+      /**
        * Pointer to 1D mass matrix for lapalace operator.
        */
       Number *laplace_mass_1d;
@@ -238,6 +245,9 @@ namespace PSMF
      */
     std::size_t
     memory_consumption() const;
+
+    std::vector<double>
+    get_cg_data() const;
 
   private:
     /**
@@ -376,6 +386,11 @@ namespace PSMF
     std::vector<unsigned int> cell_type_host;
 
     /**
+     * Vector of pointer to local cell index to global index.
+     */
+    std::vector<types::global_dof_index *> local_cell_to_global;
+
+    /**
      * Pointer to 1D mass matrix for lapalace operator.
      */
     Number *laplace_mass_1d;
@@ -422,6 +437,21 @@ namespace PSMF
      */
     types::global_dof_index *ghost_indices_dev;
 
+    /*
+     * Total number of statistics for local CG solver
+     */
+    mutable Number total_runs;
+
+    /*
+     * Total number of iterations
+     */
+    mutable Number total_its;
+
+    /*
+     * Total number of residual norms
+     */
+    mutable Number total_error;
+
     /**
      * Shared pointer to store the parallel partitioning information. This
      * information can be shared between several vectors that have the same
@@ -441,7 +471,10 @@ namespace PSMF
    * Structure to pass the shared memory into a general user function.
    * TODO: specialize for cell loop and cell loop
    */
-  template <int dim, typename Number, bool is_laplace>
+  template <int dim,
+            typename Number,
+            bool            is_laplace,
+            SmootherVariant smooth = SmootherVariant::MCS>
   struct CellSharedMemData
   {
     /**
@@ -465,6 +498,13 @@ namespace PSMF
       local_derivative =
         local_mass + n_buff * n_dofs_1d * n_dofs_1d_padding * n;
       tmp = local_derivative + n_buff * n_dofs_1d * n_dofs_1d_padding * n * dim;
+
+      if constexpr (smooth == SmootherVariant::MCS_CG)
+        local_vars = tmp + n_buff * local_dim * (dim + 3) +
+                     n_buff * n_dofs_1d * n_dofs_1d_padding * 6;
+      else if (smooth == SmootherVariant::MCS_PCG)
+        local_vars = tmp + n_buff * local_dim * (dim + 4) +
+                     n_buff * n_dofs_1d * n_dofs_1d_padding * 6;
     }
 
 
@@ -507,6 +547,11 @@ namespace PSMF
      * Shared memory for internal buffer.
      */
     Number *tmp;
+
+    /**
+     * Shared memory for coeff in CG.
+     */
+    Number *local_vars;
   };
 
   /**
@@ -516,6 +561,8 @@ namespace PSMF
   __host__ __device__ constexpr unsigned int
   cell_granularity_shmem()
   {
+    return 1;
+
     return dim == 2 ? (fe_degree == 1 ? 32 :
                        fe_degree == 2 ? 16 :
                        fe_degree == 3 ? 4 :

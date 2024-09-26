@@ -947,6 +947,7 @@ namespace PSMF
                   }
                 else if (neighbor < cell)
                   {
+                    // TODO: level == 0, i.e only one cell
                     if (data->face_integral_type ==
                         FaceIntegralType::element_wise_partial)
                       {
@@ -1232,36 +1233,87 @@ namespace PSMF
       dst[constrained_dofs[dof]] = val;
   }
 
-  template <int dim, typename Number, typename Functor>
-  __global__ void
-  apply_kernel_shmem(Functor                                func,
-                     typename MatrixFree<dim, Number>::Data gpu_data,
-                     const Number                          *src,
-                     Number                                *dst)
-  {
-    constexpr unsigned int cells_per_block = Functor::cells_per_block;
+  extern __shared__ double data_dd[];
+  extern __shared__ float  data_ff[];
 
+  template <typename Number>
+  __device__ inline Number *
+  get_shared_data();
+
+  template <>
+  __device__ inline double *
+  get_shared_data()
+  {
+    return data_dd;
+  }
+
+  template <>
+  __device__ inline float *
+  get_shared_data()
+  {
+    return data_ff;
+  }
+
+  template <int dim, typename Number, typename Functor>
+  __global__ void __launch_bounds__(512, 1)
+    apply_kernel_shmem(Functor                                func,
+                       typename MatrixFree<dim, Number>::Data gpu_data,
+                       const Number                          *src,
+                       Number                                *dst)
+  {
+    constexpr unsigned int n_dofs_2d = Functor::n_dofs_1d * Functor::n_dofs_1d;
+    constexpr unsigned int cells_per_block = Functor::cells_per_block;
     constexpr unsigned int n_dofs_per_block =
       cells_per_block * Functor::n_local_dofs;
     constexpr unsigned int n_q_points_per_block =
       cells_per_block * Functor::n_q_points;
-    // TODO make use of dynamically allocated shared memory
-    __shared__ Number values[n_dofs_per_block];
-    __shared__ Number gradients[dim][n_q_points_per_block];
 
     const unsigned int local_cell = threadIdx.x / Functor::n_dofs_1d;
     const unsigned int cell       = local_cell + cells_per_block * blockIdx.x;
 
+    Number *data = get_shared_data<Number>();
+
     Number *gq[dim];
     for (unsigned int d = 0; d < dim; ++d)
-      gq[d] = &gradients[d][local_cell * Functor::n_q_points];
+      gq[d] = &data[n_dofs_per_block + d * n_q_points_per_block +
+                    local_cell * Functor::n_q_points];
 
     SharedData<dim, Number> shared_data(
-      &values[local_cell * Functor::n_local_dofs], gq);
+      &data[local_cell * Functor::n_local_dofs],
+      gq,
+      &data[n_dofs_per_block * (dim + 1) + local_cell * n_dofs_2d * 3],
+      &data[n_dofs_per_block * (dim + 1) +
+            (cells_per_block + local_cell) * n_dofs_2d * 3]);
 
     if (cell <
         gpu_data.n_locally_owned_cells) // todo should be n_cells or n_faces
       func(cell, &gpu_data, &shared_data, src, dst);
+  }
+
+  template <int dim, typename Number, typename Functor>
+  std::size_t
+  allocate_shared_memory()
+  {
+    constexpr unsigned int cells_per_block = Functor::cells_per_block;
+    constexpr unsigned int n_dofs_1d       = Functor::n_dofs_1d;
+    constexpr unsigned int n_dofs_per_block =
+      cells_per_block * Functor::n_local_dofs;
+    constexpr unsigned int n_q_points_per_block =
+      cells_per_block * Functor::n_q_points;
+
+    std::size_t shared_mem = 0;
+
+    shared_mem += n_dofs_per_block * sizeof(Number);
+    shared_mem += dim * n_q_points_per_block * sizeof(Number);
+
+    shared_mem += 2 * cells_per_block * n_dofs_1d * n_dofs_1d * sizeof(Number);
+    shared_mem += 4 * cells_per_block * n_dofs_1d * n_dofs_1d * sizeof(Number);
+
+    AssertCuda(cudaFuncSetAttribute(apply_kernel_shmem<dim, Number, Functor>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    shared_mem));
+
+    return shared_mem;
   }
 
 
@@ -1589,13 +1641,14 @@ namespace PSMF
                                            VectorType       &dst) const
   {
     src.update_ghost_values();
+    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
 
     // Execute the loop on the boundary faces
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_inner_faces[i] > 0)
         {
           apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim_inner_face[i], block_dim_inner_face[i]>>>(
+            <<<grid_dim_inner_face[i], block_dim_inner_face[i], shared_mem>>>(
               func,
               get_face_data<false>(i),
               src.get_values(),
@@ -1615,13 +1668,16 @@ namespace PSMF
                                               const VectorType &src,
                                               VectorType       &dst) const
   {
+    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
+
     // Execute the loop on the boundary faces
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_boundary_faces[i] > 0)
         {
-          apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim_boundary_face[i], block_dim_boundary_face[i]>>>(
-              func, get_face_data<true>(i), src.get_values(), dst.get_values());
+          apply_kernel_shmem<dim, Number, Functor><<<grid_dim_boundary_face[i],
+                                                     block_dim_boundary_face[i],
+                                                     shared_mem>>>(
+            func, get_face_data<true>(i), src.get_values(), dst.get_values());
           AssertCudaKernel();
         }
   }
@@ -1639,16 +1695,17 @@ namespace PSMF
     Util::adjust_ghost_range_if_necessary(dst, partitioner);
 
     src.update_ghost_values();
+    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
 
     // Execute the loop on the boundary faces
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_cells[i] > 0)
         {
           apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim[i], block_dim[i]>>>(func,
-                                            get_cell_face_data(i),
-                                            src.get_values(),
-                                            dst.get_values());
+            <<<grid_dim[i], block_dim[i], shared_mem>>>(func,
+                                                        get_cell_face_data(i),
+                                                        src.get_values(),
+                                                        dst.get_values());
           AssertCudaKernel();
         }
     dst.compress(dealii::VectorOperation::add);
@@ -2231,15 +2288,17 @@ namespace PSMF
                                             const VectorType &src,
                                             VectorType       &dst) const
   {
+    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
+
     // Execute the loop on the cells
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_cells[i] > 0)
         {
           apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim[i], block_dim[i]>>>(func,
-                                            get_data(i),
-                                            src.get_values(),
-                                            dst.get_values());
+            <<<grid_dim[i], block_dim[i], shared_mem>>>(func,
+                                                        get_data(i),
+                                                        src.get_values(),
+                                                        dst.get_values());
           AssertCudaKernel();
         }
   }
@@ -2261,6 +2320,8 @@ namespace PSMF
     Util::adjust_ghost_range_if_necessary(src, partitioner);
     Util::adjust_ghost_range_if_necessary(dst, partitioner);
 
+    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
+
     // in case we have compatible partitioners, we can simply use the provided
     // vectors
     if (src.get_partitioner().get() == partitioner.get() &&
@@ -2275,10 +2336,10 @@ namespace PSMF
             if (n_cells[0] > 0)
               {
                 apply_kernel_shmem<dim, Number, Functor>
-                  <<<grid_dim[0], block_dim[0]>>>(func,
-                                                  get_data(0),
-                                                  src.get_values(),
-                                                  dst.get_values());
+                  <<<grid_dim[0], block_dim[0], shared_mem>>>(func,
+                                                              get_data(0),
+                                                              src.get_values(),
+                                                              dst.get_values());
                 AssertCudaKernel();
               }
             src.update_ghost_values_finish();
@@ -2288,10 +2349,10 @@ namespace PSMF
             if (n_cells[1] > 0)
               {
                 apply_kernel_shmem<dim, Number, Functor>
-                  <<<grid_dim[1], block_dim[1]>>>(func,
-                                                  get_data(1),
-                                                  src.get_values(),
-                                                  dst.get_values());
+                  <<<grid_dim[1], block_dim[1], shared_mem>>>(func,
+                                                              get_data(1),
+                                                              src.get_values(),
+                                                              dst.get_values());
                 AssertCudaKernel();
                 // We need a synchronization point because we don't want
                 // CUDA-aware MPI to start the MPI communication until the
@@ -2305,10 +2366,10 @@ namespace PSMF
             if (n_cells[2] > 0)
               {
                 apply_kernel_shmem<dim, Number, Functor>
-                  <<<grid_dim[2], block_dim[2]>>>(func,
-                                                  get_data(2),
-                                                  src.get_values(),
-                                                  dst.get_values());
+                  <<<grid_dim[2], block_dim[2], shared_mem>>>(func,
+                                                              get_data(2),
+                                                              src.get_values(),
+                                                              dst.get_values());
                 AssertCudaKernel();
               }
             dst.compress_finish(dealii::VectorOperation::add);
@@ -2322,10 +2383,8 @@ namespace PSMF
               if (n_locally_owned_cells[i] > 0)
                 {
                   apply_kernel_shmem<dim, Number, Functor>
-                    <<<grid_dim[i], block_dim[i]>>>(func,
-                                                    get_data(i),
-                                                    src.get_values(),
-                                                    dst.get_values());
+                    <<<grid_dim[i], block_dim[i], shared_mem>>>(
+                      func, get_data(i), src.get_values(), dst.get_values());
                 }
             dst.compress(dealii::VectorOperation::add);
           }
@@ -2348,10 +2407,11 @@ namespace PSMF
           if (n_cells[i] > 0)
             {
               apply_kernel_shmem<dim, Number, Functor>
-                <<<grid_dim[i], block_dim[i]>>>(func,
-                                                get_data(i),
-                                                ghosted_src.get_values(),
-                                                ghosted_dst.get_values());
+                <<<grid_dim[i], block_dim[i], shared_mem>>>(
+                  func,
+                  get_data(i),
+                  ghosted_src.get_values(),
+                  ghosted_dst.get_values());
               AssertCudaKernel();
             }
 

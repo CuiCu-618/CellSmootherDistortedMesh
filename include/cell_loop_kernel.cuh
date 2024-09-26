@@ -13,6 +13,7 @@
 #define CELL_LOOP_KERNEL_CUH
 
 #include "cell_base.cuh"
+#include "cuda_matrix_free.cuh"
 #include "evaluate_kernel.cuh"
 #include "patch_base.cuh"
 
@@ -139,6 +140,124 @@ namespace PSMF
           }
       }
   }
+
+
+  template <int dim,
+            int fe_degree,
+            typename Number,
+            SmootherVariant smooth,
+            bool            is_ghost = false>
+  __global__ void __launch_bounds__(512, 1) cell_loop_kernel_seperate_inv_cg(
+    const Number                                               *src,
+    Number                                                     *dst,
+    Number                                                     *solution,
+    const typename LevelCellPatch<dim, fe_degree, Number>::Data gpu_data,
+    typename MatrixFree<dim, Number>::Data                      fe_data)
+  {
+    constexpr unsigned int n_dofs_1d = fe_degree + 1;
+    constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+
+    const unsigned int cell_per_block = gpu_data.cell_per_block;
+    const unsigned int local_cell     = threadIdx.x / n_dofs_1d;
+    const unsigned int cell        = local_cell + cell_per_block * blockIdx.x;
+    const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
+
+    const unsigned int tid = threadIdx.z * n_dofs_1d * n_dofs_1d +
+                             threadIdx.y * n_dofs_1d + local_tid_x;
+
+    if (cell < gpu_data.n_cells)
+      {
+        CellSharedMemData<dim, Number, false, smooth> shared_data(
+          get_shared_data_ptr<Number>(), cell_per_block, n_dofs_1d, local_dim);
+
+        auto global_cell_id = gpu_data.local_cell_to_global[cell];
+
+        unsigned int cell_type = 0;
+        for (unsigned int d = 0; d < dim; ++d)
+          cell_type += gpu_data.cell_type[cell * dim + d] * Util::pow(3, d);
+
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            shared_data.local_mass[local_cell * n_dofs_1d * dim +
+                                   d * n_dofs_1d + local_tid_x] =
+              gpu_data.eigenvalues[cell_type * n_dofs_1d * dim + d * n_dofs_1d +
+                                   local_tid_x];
+
+            if (threadIdx.z == 0)
+              shared_data
+                .local_derivative[local_cell * n_dofs_1d * n_dofs_1d * dim +
+                                  d * n_dofs_1d * n_dofs_1d + tid] =
+                gpu_data.eigenvectors[cell_type * n_dofs_1d * n_dofs_1d * dim +
+                                      d * n_dofs_1d * n_dofs_1d + tid];
+          }
+
+        {
+          types::global_dof_index global_dof_indices;
+
+          if constexpr (is_ghost)
+            {
+            }
+          else
+            {
+              const unsigned int global_index = gpu_data.first_dof[cell] + tid;
+
+              global_dof_indices = gpu_data.global_to_local(global_index);
+            }
+
+          shared_data.local_src[local_cell * local_dim + tid] =
+            src[global_dof_indices];
+
+          shared_data.local_dst[local_cell * local_dim + tid] = 0;
+          // dst[global_dof_indices];
+        }
+
+        if constexpr (smooth == SmootherVariant::MCS_CG)
+          evaluate_cell_smooth_inv_cg<dim,
+                                      fe_degree,
+                                      Number,
+                                      SmootherVariant::MCS_CG>(local_cell,
+                                                               global_cell_id,
+                                                               &shared_data,
+                                                               &fe_data);
+        else if (smooth == SmootherVariant::MCS_PCG)
+          evaluate_cell_smooth_inv_pcg<dim,
+                                       fe_degree,
+                                       Number,
+                                       SmootherVariant::MCS_PCG>(local_cell,
+                                                                 global_cell_id,
+                                                                 &shared_data,
+                                                                 &fe_data);
+
+        {
+          types::global_dof_index global_dof_indices;
+
+          if constexpr (is_ghost)
+            {
+            }
+          else
+            {
+              const unsigned int global_index = gpu_data.first_dof[cell] + tid;
+
+              global_dof_indices = gpu_data.global_to_local(global_index);
+            }
+
+          dst[global_dof_indices] +=
+            shared_data.local_dst[local_cell * local_dim + tid] *
+            gpu_data.relaxation;
+
+          if (tid == 0)
+            {
+              atomicAdd(&solution[0],
+                        shared_data.local_src[local_cell * local_dim + 0]);
+              atomicAdd(&solution[1],
+                        shared_data.local_src[local_cell * local_dim + 1]);
+              atomicAdd(&solution[2],
+                        shared_data.local_src[local_cell * local_dim + 2]);
+            }
+        }
+      }
+  }
+
 
   // template <int dim,
   //           int fe_degree,

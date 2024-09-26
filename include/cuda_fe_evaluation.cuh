@@ -24,12 +24,12 @@
 #include <deal.II/base/tensor.h>
 #include <deal.II/base/utilities.h>
 
-#include <deal.II/matrix_free/cuda_hanging_nodes_internal.h>
 #include <deal.II/matrix_free/evaluation_flags.h>
 
 #include "cuda_matrix_free.cuh"
 #include "cuda_tensor_product_kernels.cuh"
 
+// #define UNIFORM_MESH
 
 namespace PSMF
 {
@@ -285,6 +285,9 @@ namespace PSMF
     // Internal buffer
     Number *values;
     Number *gradients[dim];
+
+    Number *shape_values;
+    Number *shape_gradients;
   };
 
 
@@ -521,6 +524,9 @@ namespace PSMF
     // Internal buffer
     Number *values;
     Number *gradients[dim];
+
+    Number *shape_values;
+    Number *shape_gradients;
   };
 
 
@@ -541,13 +547,30 @@ namespace PSMF
     , constraint_mask(data->constraint_mask[cell_id])
     , use_coloring(data->use_coloring)
     , values(shdata->values)
+    , shape_values(shdata->shape_values)
+    , shape_gradients(shdata->shape_gradients)
   {
+#ifdef UNIFORM_MESH
+    inv_jac = data->inv_jacobian;
+    JxW     = data->JxW;
+#else
+    inv_jac = data->inv_jacobian + padding_length * cell_id;
+    JxW     = data->JxW + padding_length * cell_id;
+#endif
+
     local_to_global = data->local_to_global + padding_length * cell_id;
-    inv_jac         = data->inv_jacobian + padding_length * cell_id;
-    JxW             = data->JxW + padding_length * cell_id;
 
     for (unsigned int i = 0; i < dim; ++i)
       gradients[i] = shdata->gradients[i];
+
+    if (threadIdx.z == 0)
+      {
+        const unsigned int idx = compute_index<dim, n_q_points_1d>();
+
+        shape_values[idx] = get_cell_shape_values<Number>(mf_object_id)[idx];
+        shape_gradients[idx] =
+          get_cell_shape_gradients<Number>(mf_object_id)[idx];
+      }
   }
 
 
@@ -565,14 +588,11 @@ namespace PSMF
                   components");
     const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
-    const dealii::types::global_dof_index src_idx = local_to_global[idx];
+    const dealii::types::global_dof_index src_idx = local_to_global[0];
     // Use the read-only data cache.
-    values[idx] = __ldg(&src[src_idx]);
+    values[idx] = __ldg(&src[src_idx + idx]);
 
     __syncthreads();
-
-    dealii::CUDAWrappers::internal::
-      resolve_hanging_nodes<dim, fe_degree, false>(constraint_mask, values);
   }
 
 
@@ -588,18 +608,15 @@ namespace PSMF
   {
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
-    dealii::CUDAWrappers::internal::resolve_hanging_nodes<dim, fe_degree, true>(
-      constraint_mask, values);
 
     const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
-    const dealii::types::global_dof_index destination_idx =
-      local_to_global[idx];
+    const dealii::types::global_dof_index destination_idx = local_to_global[0];
 
     if (use_coloring)
-      dst[destination_idx] += values[idx];
+      dst[destination_idx + idx] += values[idx];
     else
-      atomicAdd(&dst[destination_idx], values[idx]);
+      atomicAdd(&dst[destination_idx + idx], values[idx]);
   }
 
 
@@ -621,7 +638,7 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
-      evaluator_tensor_product(mf_object_id);
+      evaluator_tensor_product(mf_object_id, shape_values, shape_gradients);
     if (evaluate_val == true && evaluate_grad == true)
       {
         evaluator_tensor_product.value_and_gradient_at_quad_pts(values,
@@ -677,7 +694,7 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
-      evaluator_tensor_product(mf_object_id);
+      evaluator_tensor_product(mf_object_id, shape_values, shape_gradients);
     if (integrate_val == true && integrate_grad == true)
       {
         evaluator_tensor_product.integrate_value_and_gradient(values,
@@ -784,10 +801,13 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    // TODO optimize if the mesh is uniform
-    const unsigned int q_point      = compute_index<dim, n_q_points_1d>();
-    const Number      *inv_jacobian = &inv_jac[q_point];
-    gradient_type      grad;
+    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
+#ifdef UNIFORM_MESH
+    const Number *inv_jacobian = &inv_jac[0];
+#else
+    const Number *inv_jacobian = &inv_jac[q_point];
+#endif
+    gradient_type grad;
     for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
       {
         Number tmp = 0.;
@@ -840,9 +860,12 @@ namespace PSMF
   FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_gradient(const gradient_type &grad_in)
   {
-    // TODO optimize if the mesh is uniform
-    const unsigned int q_point      = compute_index<dim, n_q_points_1d>();
-    const Number      *inv_jacobian = &inv_jac[q_point];
+    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
+#ifdef UNIFORM_MESH
+    const Number *inv_jacobian = &inv_jac[0];
+#else
+    const Number *inv_jacobian = &inv_jac[q_point];
+#endif
     for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
       {
         Number tmp = 0.;
@@ -891,6 +914,8 @@ namespace PSMF
     , use_coloring(data->use_coloring)
     , is_interior_face(is_interior_face)
     , matrix_type(data->matrix_type)
+    , shape_values(shdata->shape_values)
+    , shape_gradients(shdata->shape_gradients)
   {
     // auto face_no = is_interior_face ? face_id : face_id + n_faces;
     auto face_no = face_id;
@@ -900,8 +925,14 @@ namespace PSMF
     local_to_global = data->local_to_global + padding_length * cell_id;
     l_to_g_coarse   = data->l_to_g_coarse + padding_length * cell_id;
 
-    inv_jac        = data->face_inv_jacobian + face_padding_length * face_no;
-    JxW            = data->face_JxW + face_padding_length * face_no;
+#ifdef UNIFORM_MESH
+    inv_jac = data->face_inv_jacobian;
+    JxW     = data->face_JxW;
+#else
+    inv_jac = data->face_inv_jacobian + face_padding_length * face_no;
+    JxW     = data->face_JxW + face_padding_length * face_no;
+#endif
+
     normal_vec     = data->normal_vector + face_padding_length * face_no;
     face_number    = data->face_number[face_no];
     subface_number = data->subface_number[face_no];
@@ -931,6 +962,26 @@ namespace PSMF
 
     for (unsigned int i = 0; i < dim; ++i)
       gradients[i] = &shdata->gradients[i][shift];
+
+    if (threadIdx.z == 0)
+      {
+        const unsigned int idx = compute_index<dim, n_q_points_1d>();
+
+        shape_values[idx] = get_cell_shape_values<Number>(mf_object_id)[idx];
+        shape_values[idx + n_q_points_1d * n_q_points_1d] =
+          get_face_shape_values<Number>(mf_object_id)[idx];
+        shape_values[idx + n_q_points_1d * n_q_points_1d * 2] =
+          get_face_shape_values<Number>(
+            mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
+
+        shape_gradients[idx] =
+          get_cell_shape_gradients<Number>(mf_object_id)[idx];
+        shape_gradients[idx + n_q_points_1d * n_q_points_1d] =
+          get_face_shape_gradients<Number>(mf_object_id)[idx];
+        shape_gradients[idx + n_q_points_1d * n_q_points_1d * 2] =
+          get_face_shape_gradients<Number>(
+            mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
+      }
   }
 
   template <int dim,
@@ -946,12 +997,12 @@ namespace PSMF
                   components");
     const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
-    const dealii::types::global_dof_index src_idx = local_to_global[idx];
+    const dealii::types::global_dof_index src_idx = local_to_global[0];
     // Use the read-only data cache.
     if (ignore_read)
       values[idx] = 0;
     else
-      values[idx] = __ldg(&src[src_idx]);
+      values[idx] = __ldg(&src[src_idx + idx]);
 
     __syncthreads();
   }
@@ -972,17 +1023,17 @@ namespace PSMF
 
     const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
-    const dealii::types::global_dof_index destination_idx = l_to_g_coarse[idx];
+    const dealii::types::global_dof_index destination_idx = l_to_g_coarse[0];
 
     if (use_coloring)
       {
         if (!ignore_write)
-          dst[destination_idx] += values[idx];
+          dst[destination_idx + idx] += values[idx];
       }
     else
       {
         if (!ignore_write)
-          atomicAdd(&dst[destination_idx], values[idx]);
+          atomicAdd(&dst[destination_idx + idx], values[idx]);
       }
   }
 
@@ -1004,7 +1055,11 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
-      evaluator_tensor_product(mf_object_id, face_number, subface_number);
+      evaluator_tensor_product(mf_object_id,
+                               face_number,
+                               subface_number,
+                               shape_values,
+                               shape_gradients);
     if (evaluate_val == true && evaluate_grad == true)
       {
         // todo:
@@ -1048,7 +1103,11 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
-      evaluator_tensor_product(mf_object_id, face_number, subface_number);
+      evaluator_tensor_product(mf_object_id,
+                               face_number,
+                               subface_number,
+                               shape_values,
+                               shape_gradients);
     if (integrate_val == true && integrate_grad == true)
       {
         // todo
@@ -1164,11 +1223,14 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    // TODO optimize if the mesh is uniform
     const unsigned int q_point = compute_index<dim, n_q_points_1d>();
     const unsigned int q_point_face =
       compute_face_index<dim, n_q_points_1d>(face_number / 2);
+#ifdef UNIFORM_MESH
+    const Number *inv_jacobian = &inv_jac[0];
+#else
     const Number *inv_jacobian = &inv_jac[q_point_face];
+#endif
     gradient_type grad;
     for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
       {
@@ -1194,11 +1256,14 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_gradient(const gradient_type &grad_in)
   {
-    // TODO optimize if the mesh is uniform
     const unsigned int q_point = compute_index<dim, n_q_points_1d>();
     const unsigned int q_point_face =
       compute_face_index<dim, n_q_points_1d>(face_number / 2);
+#ifdef UNIFORM_MESH
+    const Number *inv_jacobian = &inv_jac[0];
+#else
     const Number *inv_jacobian = &inv_jac[q_point_face];
+#endif
     for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
       {
         Number tmp = 0.;
@@ -1230,10 +1295,13 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    // TODO optimize if the mesh is uniform
     const unsigned int q_point_face =
       compute_face_index<dim, n_q_points_1d>(face_number / 2);
+#ifdef UNIFORM_MESH
+    const Number *normal_vector = &normal_vec[0];
+#else
     const Number *normal_vector = &normal_vec[q_point_face];
+#endif
 
     gradient_type grad              = get_gradient();
     value_type    normal_derivative = 0.;
@@ -1256,12 +1324,16 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_normal_derivative(const value_type &grad_in)
   {
-    // TODO optimize if the mesh is uniform
     const unsigned int q_point = compute_index<dim, n_q_points_1d>();
     const unsigned int q_point_face =
       compute_face_index<dim, n_q_points_1d>(face_number / 2);
+#ifdef UNIFORM_MESH
+    const Number *normal_vector = &normal_vec[0];
+    const Number *inv_jacobian  = &inv_jac[0];
+#else
     const Number *normal_vector = &normal_vec[q_point_face];
     const Number *inv_jacobian  = &inv_jac[q_point_face];
+#endif
 
     const Number coe = is_interior_face ? 1. : -1.;
 

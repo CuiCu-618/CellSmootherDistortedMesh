@@ -915,6 +915,16 @@ namespace PSMF
         gradients[d] = gq[d];
     }
 
+    __device__
+    SharedData(Number *vd, Number *gq[dim], Number *shv, Number *shg)
+      : values(vd)
+      , shape_values(shv)
+      , shape_gradients(shg)
+    {
+      for (unsigned int d = 0; d < dim; ++d)
+        gradients[d] = gq[d];
+    }
+
     /**
      * Shared memory for dof and quad values.
      */
@@ -926,6 +936,16 @@ namespace PSMF
      * format, i.e. first, all gradients in the x-direction come...
      */
     Number *gradients[dim];
+
+    /*
+     * Shared memory for 1D shape values.
+     */
+    Number *shape_values;
+
+    /*
+     * Shared memory for 1D shape gradients.
+     */
+    Number *shape_gradients;
   };
 
   // This function determines the number of cells per block, possibly at compile

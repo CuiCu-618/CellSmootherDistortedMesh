@@ -99,8 +99,21 @@ namespace PSMF
 
     /**
      * Multiplicative Cell Smoother
+     * fast diagnolization as local solver
      */
     MCS,
+
+    /**
+     * Multiplicative Cell Smoother
+     * CG as local solver
+     */
+    MCS_CG,
+
+    /**
+     * Multiplicative Cell Smoother
+     * PCG as local solver, preconditioned by FD
+     */
+    MCS_PCG,
   };
 
 
