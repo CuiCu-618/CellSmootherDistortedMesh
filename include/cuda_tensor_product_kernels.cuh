@@ -308,9 +308,10 @@ namespace PSMF
 #ifdef CONFLICTFREE
     constexpr unsigned int multiple = calculate_multiple<n_q_points_1d, 16>();
 
-    const unsigned int z   = threadIdx.z;
-    const unsigned int row = threadIdx.y;
-    const unsigned int col = threadIdx.x % n_q_points_1d;
+    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
+    const unsigned int row =
+      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+    const unsigned int col = threadIdx.x;
 
     Number t = 0;
     for (unsigned int k = 0; k < n_q_points_1d; ++k)
@@ -346,9 +347,10 @@ namespace PSMF
       out[destination_idx] = t;
 
 #else
-    const unsigned int z   = threadIdx.z;
-    const unsigned int row = threadIdx.y;
-    const unsigned int col = threadIdx.x % n_q_points_1d;
+    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
+    const unsigned int row =
+      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+    const unsigned int col = threadIdx.x;
 
     Number t = 0;
     for (unsigned int k = 0; k < n_q_points_1d; ++k)
@@ -1019,9 +1021,10 @@ namespace PSMF
 #ifdef CONFLICTFREE
     constexpr unsigned int multiple = calculate_multiple<n_q_points_1d, 16>();
 
-    const unsigned int z   = threadIdx.z;
-    const unsigned int row = threadIdx.y;
-    const unsigned int col = threadIdx.x % n_q_points_1d;
+    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
+    const unsigned int row =
+      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+    const unsigned int col = threadIdx.x;
 
     Number t = 0;
     for (unsigned int k = 0; k < n_q_points_1d; ++k)
@@ -1057,9 +1060,10 @@ namespace PSMF
       out[destination_idx] = t;
 
 #else
-    const unsigned int z   = threadIdx.z;
-    const unsigned int row = threadIdx.y;
-    const unsigned int col = threadIdx.x % n_q_points_1d;
+    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
+    const unsigned int row =
+      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+    const unsigned int col = threadIdx.x;
 
     Number t = 0;
     for (unsigned int k = 0; k < n_q_points_1d; ++k)
@@ -1112,17 +1116,32 @@ namespace PSMF
     //                                                 subface_number);
 
 
-    Number *shape_value_dir0 = face_number / 2 == 0 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset0;
+    Number *shape_value_dir0 =
+      face_number / 2 == 0 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset0;
 
-    Number *shape_value_dir1 = face_number / 2 == 1 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset1;
+    Number *shape_value_dir1 =
+      face_number / 2 == 1 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset1;
 
-    Number *shape_value_dir2 = face_number / 2 == 2 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset2;
+    Number *shape_value_dir2 =
+      face_number / 2 == 2 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset2;
 
     switch (dim)
       {
@@ -1184,17 +1203,32 @@ namespace PSMF
     //   compute_subface_offset<dim, n_q_points_2d, 2>(face_number,
     //                                                 subface_number);
 
-    Number *shape_value_dir0 = face_number / 2 == 0 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset0;
+    Number *shape_value_dir0 =
+      face_number / 2 == 0 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset0;
 
-    Number *shape_value_dir1 = face_number / 2 == 1 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset1;
+    Number *shape_value_dir1 =
+      face_number / 2 == 1 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset1;
 
-    Number *shape_value_dir2 = face_number / 2 == 2 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset2;
+    Number *shape_value_dir2 =
+      face_number / 2 == 2 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset2;
 
     switch (dim)
       {
@@ -1257,29 +1291,59 @@ namespace PSMF
     //                                                 subface_number);
 
 
-    Number *shape_value_dir0 = face_number / 2 == 0 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset0;
+    Number *shape_value_dir0 =
+      face_number / 2 == 0 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset0;
 
-    Number *shape_value_dir1 = face_number / 2 == 1 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset1;
+    Number *shape_value_dir1 =
+      face_number / 2 == 1 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset1;
 
-    Number *shape_value_dir2 = face_number / 2 == 2 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset2;
+    Number *shape_value_dir2 =
+      face_number / 2 == 2 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset2;
 
-    Number *shape_gradient_dir0 = face_number / 2 == 0 ?
-                                    shape_gradients + n_q_points_2d + shift :
-                                    shape_gradients; // + offset0;
+    Number *shape_gradient_dir0 =
+      face_number / 2 == 0 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_gradients<Number>(mf_object_id) + shift :
+#else
+        shape_gradients + n_q_points_2d + shift :
+#endif
+        shape_gradients; // + offset0;
 
-    Number *shape_gradient_dir1 = face_number / 2 == 1 ?
-                                    shape_gradients + n_q_points_2d + shift :
-                                    shape_gradients; // + offset1;
+    Number *shape_gradient_dir1 =
+      face_number / 2 == 1 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_gradients<Number>(mf_object_id) + shift :
+#else
+        shape_gradients + n_q_points_2d + shift :
+#endif
+        shape_gradients; // + offset1;
 
-    Number *shape_gradient_dir2 = face_number / 2 == 2 ?
-                                    shape_gradients + n_q_points_2d + shift :
-                                    shape_gradients; // + offset2;
+    Number *shape_gradient_dir2 =
+      face_number / 2 == 2 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_gradients<Number>(mf_object_id) + shift :
+#else
+        shape_gradients + n_q_points_2d + shift :
+#endif
+        shape_gradients; // + offset2;
 
     switch (dim)
       {
@@ -1486,29 +1550,59 @@ namespace PSMF
     //                                                 subface_number);
 
 
-    Number *shape_value_dir0 = face_number / 2 == 0 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset0;
+    Number *shape_value_dir0 =
+      face_number / 2 == 0 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset0;
 
-    Number *shape_value_dir1 = face_number / 2 == 1 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset1;
+    Number *shape_value_dir1 =
+      face_number / 2 == 1 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset1;
 
-    Number *shape_value_dir2 = face_number / 2 == 2 ?
-                                 shape_values + n_q_points_2d + shift :
-                                 shape_values; // + offset2;
+    Number *shape_value_dir2 =
+      face_number / 2 == 2 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_values<Number>(mf_object_id) + shift :
+#else
+        shape_values + n_q_points_2d + shift :
+#endif
+        shape_values; // + offset2;
 
-    Number *shape_gradient_dir0 = face_number / 2 == 0 ?
-                                    shape_gradients + n_q_points_2d + shift :
-                                    shape_gradients; // + offset0;
+    Number *shape_gradient_dir0 =
+      face_number / 2 == 0 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_gradients<Number>(mf_object_id) + shift :
+#else
+        shape_gradients + n_q_points_2d + shift :
+#endif
+        shape_gradients; // + offset0;
 
-    Number *shape_gradient_dir1 = face_number / 2 == 1 ?
-                                    shape_gradients + n_q_points_2d + shift :
-                                    shape_gradients; // + offset1;
+    Number *shape_gradient_dir1 =
+      face_number / 2 == 1 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_gradients<Number>(mf_object_id) + shift :
+#else
+        shape_gradients + n_q_points_2d + shift :
+#endif
+        shape_gradients; // + offset1;
 
-    Number *shape_gradient_dir2 = face_number / 2 == 2 ?
-                                    shape_gradients + n_q_points_2d + shift :
-                                    shape_gradients; // + offset2;
+    Number *shape_gradient_dir2 =
+      face_number / 2 == 2 ?
+#if MEMORY_TYPE == 1
+        get_face_shape_gradients<Number>(mf_object_id) + shift :
+#else
+        shape_gradients + n_q_points_2d + shift :
+#endif
+        shape_gradients; // + offset2;
 
     switch (dim)
       {

@@ -307,19 +307,21 @@ namespace PSMF
         // tmp.update_ghost_values();
       }
 
-      auto fe_data = A->get_mf_data()->get_cell_face_data(0);
-
       if (grid_dim.x > 0)
-        cell_loop_kernel_seperate_inv_cg<dim,
-                                         fe_degree,
-                                         Number,
-                                         SmootherVariant::MCS_PCG,
-                                         is_ghost>
-          <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
-                                                        dst.get_values(),
-                                                        solution.get_values(),
-                                                        gpu_data,
-                                                        fe_data);
+        {
+          auto fe_data = A->get_mf_data()->get_cell_face_data(0);
+
+          cell_loop_kernel_seperate_inv_cg<dim,
+                                           fe_degree,
+                                           Number,
+                                           SmootherVariant::MCS_PCG,
+                                           is_ghost>
+            <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
+                                                          dst.get_values(),
+                                                          solution.get_values(),
+                                                          gpu_data,
+                                                          fe_data);
+        }
     }
     mutable std::size_t                  shared_mem;
     mutable dim3                         block_dim;

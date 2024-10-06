@@ -40,6 +40,11 @@
 
 #include "utilities.cuh"
 
+#define MEMORY_TYPE 2
+// 0: global memory
+// 1: constant memory
+// 2: shared memory
+
 namespace PSMF
 {
   // Forward declaration
@@ -268,6 +273,12 @@ namespace PSMF
       Number *normal_vector;
 
       /**
+       * Pointer to the 1D shape info.
+       */
+      Number *cell_face_shape_values;
+      Number *cell_face_shape_gradients;
+
+      /**
        * Pointer to the face direction.
        */
       unsigned int *face_number;
@@ -336,11 +347,6 @@ namespace PSMF
        * Row start (including padding).
        */
       unsigned int row_start;
-
-      /**
-       * Mask deciding where constraints are set on a given cell.
-       */
-      dealii::internal::MatrixFreeFunctions::ConstraintKinds *constraint_mask;
 
       /**
        * If true, use graph coloring has been used and we can simply add into
@@ -765,6 +771,12 @@ namespace PSMF
     std::vector<Number *> normal_vector;
 
     /**
+     * Pointer to the 1D shape info.
+     */
+    Number *cell_face_shape_values;
+    Number *cell_face_shape_gradients;
+
+    /**
      * Vector of pointer to the face direction.
      */
     std::vector<unsigned int *> face_number;
@@ -954,15 +966,27 @@ namespace PSMF
   __host__ __device__ constexpr unsigned int
   cells_per_block_shmem(int dim, int fe_degree)
   {
+    constexpr int warp_size = 32;
+
+    return dim==2 ? (fe_degree==1 ? warp_size :    // 128
+                     fe_degree==2 ? warp_size/4 :  //  72
+                     fe_degree==3 ? warp_size/8 :  //  64
+                     fe_degree==4 ? warp_size/8 :  // 100
+                     1) :
+           dim==3 ? (fe_degree==1 ? 1 :  //  
+                     fe_degree==2 ? 8 : // 1 < 2 < 4 < 8 > 16  
+                     fe_degree==3 ? 2 : // 1 2 4 8 same perf
+                     1) : 1;
+  }
+
+
+  __host__ __device__ constexpr unsigned int
+  faces_per_block_shmem(int dim, int fe_degree)
+  {
     return 1;
 
     constexpr int warp_size = 32;
 
-    /* clang-format off */
-    // We are limiting the number of threads according to the
-    // following formulas:
-    //  - in 2D: `threads = cells * (k+1)^d <= 4*warp_size`
-    //  - in 3D: `threads = cells * (k+1)^d <= 2*warp_size`
     return dim==2 ? (fe_degree==1 ? warp_size :    // 128
                      fe_degree==2 ? warp_size/4 :  //  72
                      fe_degree==3 ? warp_size/8 :  //  64
@@ -971,7 +995,6 @@ namespace PSMF
            dim==3 ? (fe_degree==1 ? warp_size/4 :  //  64
                      fe_degree==2 ? warp_size/16 : //  54
                      1) : 1;
-    /* clang-format on */
   }
 
 
@@ -985,11 +1008,13 @@ namespace PSMF
   __device__ inline unsigned int
   q_point_id_in_cell(const unsigned int n_q_points_1d)
   {
-    return (
-      dim == 1 ? threadIdx.x % n_q_points_1d :
-      dim == 2 ? threadIdx.x % n_q_points_1d + n_q_points_1d * threadIdx.y :
-                 threadIdx.x % n_q_points_1d +
-                   n_q_points_1d * (threadIdx.y + n_q_points_1d * threadIdx.z));
+    return (dim == 1 ?
+              threadIdx.x % n_q_points_1d :
+            dim == 2 ?
+              threadIdx.x + n_q_points_1d * (threadIdx.y % n_q_points_1d) :
+              threadIdx.x + n_q_points_1d *
+                              (threadIdx.y +
+                               n_q_points_1d * (threadIdx.z % n_q_points_1d)));
   }
 
   /**

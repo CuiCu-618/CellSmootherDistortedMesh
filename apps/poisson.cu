@@ -613,6 +613,9 @@ namespace Step64
   std::pair<double, double>
   LaplaceProblem<dim, fe_degree>::compute_error()
   {
+    if (dof_handler.n_dofs() > 1e7)
+      return std::make_pair(0, 0);
+
     Vector<double> cellwise_norm(triangulation.n_active_cells());
     VectorTools::integrate_difference(mapping,
                                       dof_handler,

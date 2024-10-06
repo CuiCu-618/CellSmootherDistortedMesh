@@ -1022,9 +1022,7 @@ namespace PSMF
     static const unsigned int n_q_points =
       Utilities::pow(fe_degree + 1, dim) * 2;
 
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
+    static const unsigned int cells_per_block = 1;
 
     LocalCellFacePartialOperator()
     {
@@ -1129,9 +1127,7 @@ namespace PSMF
     static const unsigned int n_q_points =
       Utilities::pow(fe_degree + 1, dim) * 2;
 
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
+    static const unsigned int cells_per_block = 1;
 
     LocalCellFacePartialOperator()
     {

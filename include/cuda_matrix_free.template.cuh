@@ -544,17 +544,17 @@ namespace PSMF
 
     if (dim == 2)
       {
-        data->block_dim[color] = dim3(n_dofs_1d * cells_per_block, n_dofs_1d);
+        data->block_dim[color] = dim3(n_dofs_1d, n_dofs_1d * cells_per_block);
       }
     else if (dim == 3)
       {
         data->block_dim[color] =
-          dim3(n_dofs_1d * cells_per_block, n_dofs_1d, n_dofs_1d);
+          dim3(n_dofs_1d, n_dofs_1d, n_dofs_1d * cells_per_block);
       }
     else
       AssertThrow(false, dealii::ExcMessage("Invalid dimension."));
 
-    local_to_global_host.resize(n_cells * padding_length);
+    local_to_global_host.resize(n_cells);
     l_to_g_coarse_host.resize(n_cells * padding_length);
 
     if (matrix_type == MatrixType::edge_up_matrix ||
@@ -607,16 +607,16 @@ namespace PSMF
     if (dim == 2)
       {
         data->block_dim_inner_face[color] =
-          dim3(n_dofs_1d * inner_faces_per_block, n_dofs_1d);
+          dim3(n_dofs_1d, n_dofs_1d * inner_faces_per_block);
         data->block_dim_boundary_face[color] =
-          dim3(n_dofs_1d * boundary_faces_per_block, n_dofs_1d);
+          dim3(n_dofs_1d, n_dofs_1d * boundary_faces_per_block);
       }
     else if (dim == 3)
       {
         data->block_dim_inner_face[color] =
-          dim3(n_dofs_1d * inner_faces_per_block, n_dofs_1d, n_dofs_1d);
+          dim3(n_dofs_1d, n_dofs_1d, n_dofs_1d * inner_faces_per_block);
         data->block_dim_boundary_face[color] =
-          dim3(n_dofs_1d * boundary_faces_per_block, n_dofs_1d, n_dofs_1d);
+          dim3(n_dofs_1d, n_dofs_1d, n_dofs_1d * boundary_faces_per_block);
       }
     else
       AssertThrow(false, dealii::ExcMessage("Invalid dimension."));
@@ -664,9 +664,9 @@ namespace PSMF
       for (unsigned int i = 0; i < dofs_per_cell; ++i)
         lexicographic_dof_indices[i] = local_dof_indices[lexicographic_inv[i]];
 
-      memcpy(&local_to_global_host[obj_id * padding_length],
+      memcpy(&local_to_global_host[obj_id],
              lexicographic_dof_indices.data(),
-             dofs_per_cell * sizeof(dealii::types::global_dof_index));
+             1 * sizeof(dealii::types::global_dof_index));
     };
 
     auto fill_cell_data = [&](auto &fe_value, auto obj_id) {
@@ -1017,7 +1017,7 @@ namespace PSMF
     alloc_and_copy(&data->local_to_global[color],
                    dealii::ArrayView<const dealii::types::global_dof_index>(
                      local_to_global_host.data(), local_to_global_host.size()),
-                   n_cells * padding_length);
+                   n_cells);
 
     // Local-to-global mapping
     alloc_and_copy(&data->l_to_g_coarse[color],
@@ -1268,7 +1268,9 @@ namespace PSMF
     constexpr unsigned int n_q_points_per_block =
       cells_per_block * Functor::n_q_points;
 
-    const unsigned int local_cell = threadIdx.x / Functor::n_dofs_1d;
+    const unsigned int local_cell = dim == 2 ?
+                                      threadIdx.y / Functor::n_dofs_1d :
+                                      threadIdx.z / Functor::n_dofs_1d;
     const unsigned int cell       = local_cell + cells_per_block * blockIdx.x;
 
     Number *data = get_shared_data<Number>();
@@ -1326,7 +1328,9 @@ namespace PSMF
     constexpr unsigned int cells_per_block =
       cells_per_block_shmem(dim, Functor::n_dofs_1d - 1);
 
-    const unsigned int local_cell = threadIdx.x / Functor::n_dofs_1d;
+    const unsigned int local_cell = dim == 2 ?
+                                      threadIdx.y / Functor::n_dofs_1d :
+                                      threadIdx.z / Functor::n_dofs_1d;
     const unsigned int cell =
       local_cell + cells_per_block * (blockIdx.x + gridDim.x * blockIdx.y);
 
@@ -1480,7 +1484,9 @@ namespace PSMF
     data_copy.padding_length        = padding_length;
     data_copy.row_start             = row_start[color];
     data_copy.use_coloring          = use_coloring;
-    data_copy.constraint_mask       = constraint_mask[color];
+
+    data_copy.cell_face_shape_values    = cell_face_shape_values;
+    data_copy.cell_face_shape_gradients = cell_face_shape_gradients;
 
     return data_copy;
   }
@@ -1543,6 +1549,9 @@ namespace PSMF
 
     data_copy.matrix_type = matrix_type;
 
+    data_copy.cell_face_shape_values    = cell_face_shape_values;
+    data_copy.cell_face_shape_gradients = cell_face_shape_gradients;
+
     return data_copy;
   }
 
@@ -1565,7 +1574,6 @@ namespace PSMF
     data_copy.padding_length        = padding_length;
     data_copy.row_start             = row_start[color];
     data_copy.use_coloring          = use_coloring;
-    data_copy.constraint_mask       = constraint_mask[color];
 
     data_copy.cell2face_id = cell2face_id[color];
 
@@ -1587,6 +1595,9 @@ namespace PSMF
     data_copy.face_padding_length = face_padding_length;
 
     data_copy.face2cell_id = inner_face2cell_id[color];
+
+    data_copy.cell_face_shape_values    = cell_face_shape_values;
+    data_copy.cell_face_shape_gradients = cell_face_shape_gradients;
 
     return data_copy;
   }
@@ -1956,9 +1967,9 @@ namespace PSMF
       }
 
     // todo: use less constant memory
+    std::vector<Number> face_shape_value;
     if (update_flags_inner_faces & dealii::update_values)
       {
-        std::vector<Number> face_shape_value;
         face_shape_value.resize(2 * n_shape_values);
         // point 0
         auto shape_value_on_face0 =
@@ -1982,9 +1993,9 @@ namespace PSMF
         AssertCuda(cuda_error);
       }
 
+    std::vector<Number> face_shape_gradients;
     if (update_flags_inner_faces & dealii::update_gradients)
       {
-        std::vector<Number> face_shape_gradients;
         face_shape_gradients.resize(2 * n_shape_values);
         // point 0
         auto shape_gradients_on_face0 =
@@ -2033,10 +2044,46 @@ namespace PSMF
         AssertCuda(cuda_error);
       }
 
+    // copy shape data to global memory
+    {
+      std::vector<Number> cell_face_shape_value_host;
+      cell_face_shape_value_host.resize(3 * n_shape_values);
+
+      std::vector<Number> cell_face_shape_gradients_host;
+      cell_face_shape_gradients_host.resize(3 * n_shape_values);
+
+      for (unsigned int i = 0; i < n_shape_values; ++i)
+        {
+          cell_face_shape_value_host[i] =
+            shape_info.data.front().shape_values[i];
+          cell_face_shape_gradients_host[i] =
+            shape_info.data.front().shape_gradients[i];
+        }
+
+      for (unsigned int i = 0; i < 2 * n_shape_values; ++i)
+        {
+          cell_face_shape_value_host[n_shape_values + i] = face_shape_value[i];
+          cell_face_shape_gradients_host[n_shape_values + i] =
+            face_shape_gradients[i];
+        }
+
+      alloc_and_copy(
+        &cell_face_shape_values,
+        dealii::ArrayView<const Number>(cell_face_shape_value_host.data(),
+                                        cell_face_shape_value_host.size()),
+        3 * n_shape_values);
+
+      alloc_and_copy(
+        &cell_face_shape_gradients,
+        dealii::ArrayView<const Number>(cell_face_shape_gradients_host.data(),
+                                        cell_face_shape_gradients_host.size()),
+        3 * n_shape_values);
+    }
+
     // Setup the number of cells per CUDA thread block
     cells_per_block          = cells_per_block_shmem(dim, fe_degree);
-    inner_faces_per_block    = 1; // todo
-    boundary_faces_per_block = 1; // todo
+    inner_faces_per_block    = 1; // TODO:
+    boundary_faces_per_block = 1; // TODO:
 
     ReinitHelper<dim, Number> helper(this,
                                      mapping,

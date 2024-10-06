@@ -29,7 +29,7 @@
 #include "cuda_matrix_free.cuh"
 #include "cuda_tensor_product_kernels.cuh"
 
-// #define UNIFORM_MESH
+#define UNIFORM_MESH
 
 namespace PSMF
 {
@@ -41,11 +41,12 @@ namespace PSMF
   __device__ inline unsigned int
   compute_index()
   {
-    return (dim == 1 ? threadIdx.x % n_points_1d :
-            dim == 2 ? threadIdx.x % n_points_1d + n_points_1d * threadIdx.y :
-                       threadIdx.x % n_points_1d +
-                         n_points_1d *
-                           (threadIdx.y + n_points_1d * threadIdx.z));
+    return (
+      dim == 1 ? threadIdx.x % n_points_1d :
+      dim == 2 ? threadIdx.x + n_points_1d * (threadIdx.y % n_points_1d) :
+                 threadIdx.x +
+                   n_points_1d *
+                     (threadIdx.y + n_points_1d * (threadIdx.z % n_points_1d)));
   }
 
 
@@ -59,12 +60,12 @@ namespace PSMF
   {
     return (
       dim == 1 ? 0 :
-      dim == 2 ? (face_number == 0 ? threadIdx.y : threadIdx.x % n_points_1d) :
+      dim == 2 ? (face_number == 0 ? threadIdx.y % n_points_1d : threadIdx.x) :
                  (face_number == 0 ?
-                    threadIdx.y + n_points_1d * threadIdx.z :
+                    threadIdx.y + n_points_1d * (threadIdx.z % n_points_1d) :
                   face_number == 1 ?
-                    ((threadIdx.x % n_points_1d) * n_points_1d) + threadIdx.z :
-                    threadIdx.x % n_points_1d + n_points_1d * threadIdx.y));
+                    threadIdx.x * n_points_1d + threadIdx.z % n_points_1d :
+                    threadIdx.x + n_points_1d * threadIdx.y));
   }
 
   /**
@@ -274,9 +275,6 @@ namespace PSMF
     unsigned int                     n_cells;
     unsigned int                     padding_length;
     const unsigned int               mf_object_id;
-
-    const dealii::internal::MatrixFreeFunctions::ConstraintKinds
-      constraint_mask;
 
     const bool use_coloring;
 
@@ -544,7 +542,6 @@ namespace PSMF
     : n_cells(data -> n_cells)
     , padding_length(data->padding_length)
     , mf_object_id(data->id)
-    , constraint_mask(data->constraint_mask[cell_id])
     , use_coloring(data->use_coloring)
     , values(shdata->values)
     , shape_values(shdata->shape_values)
@@ -558,12 +555,16 @@ namespace PSMF
     JxW     = data->JxW + padding_length * cell_id;
 #endif
 
-    local_to_global = data->local_to_global + padding_length * cell_id;
+    local_to_global = data->local_to_global + cell_id;
 
     for (unsigned int i = 0; i < dim; ++i)
       gradients[i] = shdata->gradients[i];
 
-    if (threadIdx.z == 0)
+#if MEMORY_TYPE == 0
+    shape_values    = data->cell_face_shape_values;
+    shape_gradients = data->cell_face_shape_gradients;
+#elif MEMORY_TYPE == 2
+    if (threadIdx.z % n_q_points_1d == 0)
       {
         const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
@@ -571,6 +572,7 @@ namespace PSMF
         shape_gradients[idx] =
           get_cell_shape_gradients<Number>(mf_object_id)[idx];
       }
+#endif
   }
 
 
@@ -638,7 +640,15 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
+#if MEMORY_TYPE == 0
       evaluator_tensor_product(mf_object_id, shape_values, shape_gradients);
+#elif MEMORY_TYPE == 1
+      evaluator_tensor_product(mf_object_id,
+                               get_cell_shape_values<Number>(mf_object_id),
+                               get_cell_shape_gradients<Number>(mf_object_id));
+#elif MEMORY_TYPE == 2
+      evaluator_tensor_product(mf_object_id, shape_values, shape_gradients);
+#endif
     if (evaluate_val == true && evaluate_grad == true)
       {
         evaluator_tensor_product.value_and_gradient_at_quad_pts(values,
@@ -694,7 +704,15 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
+#if MEMORY_TYPE == 0
       evaluator_tensor_product(mf_object_id, shape_values, shape_gradients);
+#elif MEMORY_TYPE == 1
+      evaluator_tensor_product(mf_object_id,
+                               get_cell_shape_values<Number>(mf_object_id),
+                               get_cell_shape_gradients<Number>(mf_object_id));
+#elif MEMORY_TYPE == 2
+      evaluator_tensor_product(mf_object_id, shape_values, shape_gradients);
+#endif
     if (integrate_val == true && integrate_grad == true)
       {
         evaluator_tensor_product.integrate_value_and_gradient(values,
@@ -922,8 +940,8 @@ namespace PSMF
 
     cell_id = data->face2cell_id[face_no];
 
-    local_to_global = data->local_to_global + padding_length * cell_id;
-    l_to_g_coarse   = data->l_to_g_coarse + padding_length * cell_id;
+    local_to_global = data->local_to_global + cell_id;
+    l_to_g_coarse   = data->l_to_g_coarse + cell_id;
 
 #ifdef UNIFORM_MESH
     inv_jac = data->face_inv_jacobian;
@@ -963,7 +981,11 @@ namespace PSMF
     for (unsigned int i = 0; i < dim; ++i)
       gradients[i] = &shdata->gradients[i][shift];
 
-    if (threadIdx.z == 0)
+#if MEMORY_TYPE == 0
+    shape_values    = data->cell_face_shape_values;
+    shape_gradients = data->cell_face_shape_gradients;
+#elif MEMORY_TYPE == 2
+    if (threadIdx.z % n_q_points_1d == 0)
       {
         const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
@@ -982,6 +1004,7 @@ namespace PSMF
           get_face_shape_gradients<Number>(
             mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
       }
+#endif
   }
 
   template <int dim,
@@ -1055,11 +1078,25 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
+#if MEMORY_TYPE == 0
       evaluator_tensor_product(mf_object_id,
                                face_number,
                                subface_number,
                                shape_values,
                                shape_gradients);
+#elif MEMORY_TYPE == 1
+      evaluator_tensor_product(mf_object_id,
+                               face_number,
+                               subface_number,
+                               get_cell_shape_values<Number>(mf_object_id),
+                               get_cell_shape_gradients<Number>(mf_object_id));
+#elif MEMORY_TYPE == 2
+      evaluator_tensor_product(mf_object_id,
+                               face_number,
+                               subface_number,
+                               shape_values,
+                               shape_gradients);
+#endif
     if (evaluate_val == true && evaluate_grad == true)
       {
         // todo:
@@ -1103,11 +1140,25 @@ namespace PSMF
                            fe_degree,
                            n_q_points_1d,
                            Number>
+#if MEMORY_TYPE == 0
       evaluator_tensor_product(mf_object_id,
                                face_number,
                                subface_number,
                                shape_values,
                                shape_gradients);
+#elif MEMORY_TYPE == 1
+      evaluator_tensor_product(mf_object_id,
+                               face_number,
+                               subface_number,
+                               get_cell_shape_values<Number>(mf_object_id),
+                               get_cell_shape_gradients<Number>(mf_object_id));
+#elif MEMORY_TYPE == 2
+      evaluator_tensor_product(mf_object_id,
+                               face_number,
+                               subface_number,
+                               shape_values,
+                               shape_gradients);
+#endif
     if (integrate_val == true && integrate_grad == true)
       {
         // todo

@@ -125,19 +125,22 @@ namespace PSMF
   std::vector<double>
   LevelCellPatch<dim, fe_degree, Number>::get_cg_data() const
   {
-    std::vector<double> vec;
+    std::vector<double> vec(3);
 
     auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(level);
     LinearAlgebra::ReadWriteVector<Number> rw_vector(locally_owned_dofs);
     rw_vector.import(*solution_ghosted, VectorOperation::insert);
 
-    total_runs  = rw_vector[0] - total_runs;
-    total_its   = rw_vector[1] - total_its;
-    total_error = rw_vector[2] - total_error;
+    if (Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) != 0)
+      return vec;
 
-    vec.push_back(total_runs);
-    vec.push_back(total_its);
-    vec.push_back(total_error);
+    total_runs  = rw_vector.local_element(0) - total_runs;
+    total_its   = rw_vector.local_element(1) - total_its;
+    total_error = rw_vector.local_element(2) - total_error;
+
+    vec[0] = total_runs;
+    vec[1] = total_its;
+    vec[2] = total_error;
 
     return vec;
   }
