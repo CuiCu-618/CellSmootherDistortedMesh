@@ -975,7 +975,8 @@ namespace PSMF
                      1) :
            dim==3 ? (fe_degree==1 ? 1 :  //  
                      fe_degree==2 ? 8 : // 1 < 2 < 4 < 8 > 16  
-                     fe_degree==3 ? 2 : // 1 2 4 8 same perf
+                     fe_degree==3 ? 4 : // 1 < 2 < 4 < 8 > 16 
+                     fe_degree==7 ? 1 : // 1 > 2  
                      1) : 1;
   }
 
@@ -1004,17 +1005,14 @@ namespace PSMF
    *
    * @relates MatrixFree
    */
-  template <int dim>
+  template <int dim, int n_q_points_1d>
   __device__ inline unsigned int
-  q_point_id_in_cell(const unsigned int n_q_points_1d)
+  q_point_id_in_cell()
   {
-    return (dim == 1 ?
-              threadIdx.x % n_q_points_1d :
-            dim == 2 ?
-              threadIdx.x + n_q_points_1d * (threadIdx.y % n_q_points_1d) :
-              threadIdx.x + n_q_points_1d *
-                              (threadIdx.y +
-                               n_q_points_1d * (threadIdx.z % n_q_points_1d)));
+    return (
+      dim == 1 ? threadIdx.x % n_q_points_1d :
+      dim == 2 ? threadIdx.x + n_q_points_1d * (threadIdx.y % n_q_points_1d) :
+                 threadIdx.x + n_q_points_1d * (threadIdx.y % n_q_points_1d));
   }
 
   /**
@@ -1039,14 +1037,13 @@ namespace PSMF
    *
    * @relates MatrixFree
    */
-  template <int dim, typename Number>
+  template <int dim, typename Number, int n_q_points_1d>
   __device__ inline typename MatrixFree<dim, Number>::point_type &
   get_quadrature_point(const unsigned int                            cell,
                        const typename MatrixFree<dim, Number>::Data *data,
-                       const unsigned int n_q_points_1d)
+                       const unsigned int                            index)
   {
-    return *(data->q_points + data->padding_length * cell +
-             q_point_id_in_cell<dim>(n_q_points_1d));
+    return *(data->q_points + data->padding_length * cell + index);
   }
 
 

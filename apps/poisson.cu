@@ -140,9 +140,12 @@ namespace Step64
     using full_number   = double;
     using vcycle_number = CT::VCYCLE_NUMBER_;
     using MatrixFree    = PSMF::MatrixFree<dim, full_number>;
-    using VertexPatchDP = PSMF::LevelVertexPatch<dim, fe_degree, full_number>;
-    using VertexPatchSP = PSMF::LevelVertexPatch<dim, fe_degree, vcycle_number>;
-    using CellPatchDP   = PSMF::LevelCellPatch<dim, fe_degree, full_number>;
+    using MatrixFreeSP  = PSMF::MatrixFree<dim, vcycle_number>;
+    using CellPatch     = PSMF::LevelCellPatch<dim, fe_degree, vcycle_number>;
+
+    // using VertexPatchDP = PSMF::LevelVertexPatch<dim, fe_degree,
+    // full_number>; using VertexPatchSP = PSMF::LevelVertexPatch<dim,
+    // fe_degree, vcycle_number>;
 
     LaplaceProblem();
     ~LaplaceProblem();
@@ -183,12 +186,14 @@ namespace Step64
     IndexSet locally_owned_dofs;
     IndexSet locally_relevant_dofs;
 
-    MGLevelObject<std::shared_ptr<MatrixFree>>    level_mfdata;
-    MGLevelObject<std::shared_ptr<VertexPatchDP>> patch_data_dp;
-    MGLevelObject<std::shared_ptr<VertexPatchSP>> patch_data_sp;
-    MGLevelObject<std::shared_ptr<CellPatchDP>>   cell_data_dp;
-    MGConstrainedDoFs                             mg_constrained_dofs;
-    AffineConstraints<double>                     constraints;
+    MGLevelObject<std::shared_ptr<MatrixFree>>   level_mfdata;
+    MGLevelObject<std::shared_ptr<MatrixFreeSP>> level_mfdata_sp;
+    MGLevelObject<std::shared_ptr<CellPatch>>    cell_data;
+    MGConstrainedDoFs                            mg_constrained_dofs;
+    AffineConstraints<full_number>               constraints;
+
+    // MGLevelObject<std::shared_ptr<VertexPatchDP>> patch_data_dp;
+    // MGLevelObject<std::shared_ptr<VertexPatchSP>> patch_data_sp;
 
     PSMF::MGTransferCUDA<dim, vcycle_number> transfer;
 
@@ -214,6 +219,11 @@ namespace Step64
     , setup_time(0.)
     , pcout(std::make_shared<ConditionalOStream>(std::cout, false))
   {
+#if TENSORCORE != 0
+    static_assert(
+      fe_degree == 7 && std::is_same_v<vcycle_number, double>,
+      "TensorCore only works for k = 7 with double precision for now.");
+#endif
     const auto filename = Util::get_filename();
     if (Utilities::MPI::this_mpi_process(mpi_communicator) == 0)
       {
@@ -288,12 +298,15 @@ namespace Step64
     unsigned int minlevel = 0;
     unsigned int maxlevel = triangulation.n_global_levels() - 1;
 
-    patch_data_dp.resize(minlevel, maxlevel);
-    cell_data_dp.resize(minlevel, maxlevel);
+    cell_data.resize(minlevel, maxlevel);
     level_mfdata.resize(minlevel, maxlevel);
+    // patch_data_dp.resize(minlevel, maxlevel);
 
     if (std::is_same_v<vcycle_number, float>)
-      patch_data_sp.resize(minlevel, maxlevel);
+      {
+        level_mfdata_sp.resize(minlevel, maxlevel);
+        // patch_data_sp.resize(minlevel, maxlevel);
+      }
 
     Timer time;
     for (unsigned int level = minlevel; level <= maxlevel; ++level)
@@ -302,9 +315,15 @@ namespace Step64
         {
           typename MatrixFree::AdditionalData additional_data;
           additional_data.face_integral_type = CT::FACE_INTEGRAL_TYPE_[0];
-          additional_data.mapping_update_flags =
-            update_quadrature_points | update_values | update_gradients |
-            update_JxW_values;
+
+          if (level == maxlevel)
+            additional_data.mapping_update_flags =
+              update_quadrature_points | update_values | update_gradients |
+              update_JxW_values;
+          else
+            additional_data.mapping_update_flags =
+              update_values | update_gradients | update_JxW_values;
+
           additional_data.mapping_update_flags_inner_faces =
             update_values | update_gradients | update_JxW_values |
             update_normal_vectors;
@@ -321,38 +340,65 @@ namespace Step64
         }
 
         {
-          typename VertexPatchDP::AdditionalData additional_data;
-          additional_data.relaxation         = 1.;
-          additional_data.use_coloring       = false;
-          additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
-          additional_data.granularity_scheme = CT::GRANULARITY_;
-
-          patch_data_dp[level] = std::make_shared<VertexPatchDP>();
-          patch_data_dp[level]->reinit(dof_handler, level, additional_data);
-        }
-
-        // single-precision matrix-free data
-        if (std::is_same_v<vcycle_number, float>)
-          {
-            typename VertexPatchSP::AdditionalData additional_data;
-            additional_data.relaxation         = 1.;
-            additional_data.use_coloring       = false;
-            additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
-            additional_data.granularity_scheme = CT::GRANULARITY_;
-
-            patch_data_sp[level] = std::make_shared<VertexPatchSP>();
-            patch_data_sp[level]->reinit(dof_handler, level, additional_data);
-          }
-
-        {
-          typename CellPatchDP::AdditionalData additional_data;
+          typename CellPatch::AdditionalData additional_data;
           additional_data.relaxation         = 1.;
           additional_data.cell_per_block     = CT::PATCH_PER_BLOCK_;
           additional_data.granularity_scheme = CT::GRANULARITY_;
 
-          cell_data_dp[level] = std::make_shared<CellPatchDP>();
-          cell_data_dp[level]->reinit(dof_handler, level, additional_data);
+          cell_data[level] = std::make_shared<CellPatch>();
+          cell_data[level]->reinit(dof_handler, level, additional_data);
         }
+
+        if (std::is_same_v<vcycle_number, float>)
+          {
+            AffineConstraints<vcycle_number> dummy;
+
+            {
+              typename MatrixFreeSP::AdditionalData additional_data;
+              additional_data.face_integral_type = CT::FACE_INTEGRAL_TYPE_[0];
+              additional_data.mapping_update_flags =
+                update_values | update_gradients | update_JxW_values;
+              additional_data.mapping_update_flags_inner_faces =
+                update_values | update_gradients | update_JxW_values |
+                update_normal_vectors;
+              additional_data.mg_level    = level;
+              additional_data.matrix_type = PSMF::MatrixType::level_matrix;
+
+              level_mfdata_sp[level] = std::make_shared<MatrixFreeSP>();
+              level_mfdata_sp[level]->reinit(
+                mapping,
+                dof_handler,
+                dummy,
+                QGauss<1>(fe_degree + 1),
+                IteratorFilters::LocallyOwnedLevelCell(),
+                additional_data);
+            }
+          }
+
+        // {
+        //   typename VertexPatchDP::AdditionalData additional_data;
+        //   additional_data.relaxation         = 1.;
+        //   additional_data.use_coloring       = false;
+        //   additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
+        //   additional_data.granularity_scheme = CT::GRANULARITY_;
+        //
+        //   patch_data_dp[level] = std::make_shared<VertexPatchDP>();
+        //   patch_data_dp[level]->reinit(dof_handler, level, additional_data);
+        // }
+        //
+        // // single-precision matrix-free data
+        // if (std::is_same_v<vcycle_number, float>)
+        //   {
+        //     typename VertexPatchSP::AdditionalData additional_data;
+        //     additional_data.relaxation         = 1.;
+        //     additional_data.use_coloring       = false;
+        //     additional_data.patch_per_block    = CT::PATCH_PER_BLOCK_;
+        //     additional_data.granularity_scheme = CT::GRANULARITY_;
+        //
+        //     patch_data_sp[level] = std::make_shared<VertexPatchSP>();
+        //     patch_data_sp[level]->reinit(dof_handler, level,
+        //     additional_data);
+        //   }
       }
 
     *pcout << "Matrix-free setup time: " << time.wall_time() << "s"
@@ -387,17 +433,20 @@ namespace Step64
                           vcycle_number>
       solver(dof_handler,
              level_mfdata,
-             patch_data_dp,
-             patch_data_sp,
-             cell_data_dp,
+             level_mfdata_sp,
+             cell_data,
              transfer,
              Solution<dim>(),
              RightHandSide<dim>(),
              pcout,
              1);
 
-    *pcout << "\nMG with [" << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " "
-           << LaplaceToString(CT::SMOOTH_VMULT_[j]) << " "
+    *pcout << "\nMG with ["
+#ifdef CONFLICTFREE
+           << "ConflictFree "
+#else
+           << "Basic "
+#endif
            << SmootherToString(CT::SMOOTH_INV_[i]) << "]\n";
 
     unsigned int index =
@@ -708,8 +757,12 @@ namespace Step64
 
               std::ostringstream oss;
 
-              oss << "\n[" << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " "
-                  << LaplaceToString(CT::SMOOTH_VMULT_[j]) << " "
+              oss << "\n["
+#ifdef CONFLICTFREE
+                  << "ConflictFree "
+#else
+                  << "Basic "
+#endif
                   << SmootherToString(CT::SMOOTH_INV_[i]) << "]\n";
               info_table[index].write_text(oss);
 
@@ -740,7 +793,7 @@ main(int argc, char *argv[])
 
       {
         LaplaceProblem<CT::DIMENSION_, CT::FE_DEGREE_> Laplace_problem;
-        Laplace_problem.run(3);
+        Laplace_problem.run(6);
       }
     }
   catch (std::exception &exc)

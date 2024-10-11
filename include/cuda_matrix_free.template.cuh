@@ -548,8 +548,7 @@ namespace PSMF
       }
     else if (dim == 3)
       {
-        data->block_dim[color] =
-          dim3(n_dofs_1d, n_dofs_1d, n_dofs_1d * cells_per_block);
+        data->block_dim[color] = dim3(n_dofs_1d, n_dofs_1d * cells_per_block);
       }
     else
       AssertThrow(false, dealii::ExcMessage("Invalid dimension."));
@@ -614,9 +613,9 @@ namespace PSMF
     else if (dim == 3)
       {
         data->block_dim_inner_face[color] =
-          dim3(n_dofs_1d, n_dofs_1d, n_dofs_1d * inner_faces_per_block);
+          dim3(n_dofs_1d, n_dofs_1d * inner_faces_per_block);
         data->block_dim_boundary_face[color] =
-          dim3(n_dofs_1d, n_dofs_1d, n_dofs_1d * boundary_faces_per_block);
+          dim3(n_dofs_1d, n_dofs_1d * boundary_faces_per_block);
       }
     else
       AssertThrow(false, dealii::ExcMessage("Invalid dimension."));
@@ -1255,7 +1254,7 @@ namespace PSMF
   }
 
   template <int dim, typename Number, typename Functor>
-  __global__ void __launch_bounds__(512, 1)
+  __global__ void __launch_bounds__(256, 1)
     apply_kernel_shmem(Functor                                func,
                        typename MatrixFree<dim, Number>::Data gpu_data,
                        const Number                          *src,
@@ -1268,9 +1267,7 @@ namespace PSMF
     constexpr unsigned int n_q_points_per_block =
       cells_per_block * Functor::n_q_points;
 
-    const unsigned int local_cell = dim == 2 ?
-                                      threadIdx.y / Functor::n_dofs_1d :
-                                      threadIdx.z / Functor::n_dofs_1d;
+    const unsigned int local_cell = threadIdx.y / Functor::n_dofs_1d;
     const unsigned int cell       = local_cell + cells_per_block * blockIdx.x;
 
     Number *data = get_shared_data<Number>();
@@ -1328,9 +1325,7 @@ namespace PSMF
     constexpr unsigned int cells_per_block =
       cells_per_block_shmem(dim, Functor::n_dofs_1d - 1);
 
-    const unsigned int local_cell = dim == 2 ?
-                                      threadIdx.y / Functor::n_dofs_1d :
-                                      threadIdx.z / Functor::n_dofs_1d;
+    const unsigned int local_cell = threadIdx.y / Functor::n_dofs_1d;
     const unsigned int cell =
       local_cell + cells_per_block * (blockIdx.x + gridDim.x * blockIdx.y);
 
@@ -1889,23 +1884,23 @@ namespace PSMF
                          cudaMemcpyHostToDevice);
     AssertCuda(cuda_error);
 
-    cuda_error =
-      cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
-                         sub_shape_info0.data.front().shape_values.data(),
-                         size_shape_values,
-                         (my_id * data_array_size + n_shape_values) *
-                           sizeof(Number),
-                         cudaMemcpyHostToDevice);
-    AssertCuda(cuda_error);
+    // cuda_error =
+    //   cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
+    //                      sub_shape_info0.data.front().shape_values.data(),
+    //                      size_shape_values,
+    //                      (my_id * data_array_size + n_shape_values) *
+    //                        sizeof(Number),
+    //                      cudaMemcpyHostToDevice);
+    // AssertCuda(cuda_error);
 
-    cuda_error =
-      cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
-                         sub_shape_info1.data.front().shape_values.data(),
-                         size_shape_values,
-                         (my_id * data_array_size + n_shape_values * 2) *
-                           sizeof(Number),
-                         cudaMemcpyHostToDevice);
-    AssertCuda(cuda_error);
+    // cuda_error =
+    //   cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
+    //                      sub_shape_info1.data.front().shape_values.data(),
+    //                      size_shape_values,
+    //                      (my_id * data_array_size + n_shape_values * 2) *
+    //                        sizeof(Number),
+    //                      cudaMemcpyHostToDevice);
+    // AssertCuda(cuda_error);
 
     if (update_flags & dealii::update_gradients)
       {
@@ -1925,21 +1920,21 @@ namespace PSMF
                              cudaMemcpyHostToDevice);
         AssertCuda(cuda_error);
 
-        cuda_error = cudaMemcpyToSymbol(
-          get_cell_shape_gradients<Number>(0),
-          sub_shape_info0.data.front().shape_gradients.data(),
-          size_shape_values,
-          (my_id * data_array_size + n_shape_values) * sizeof(Number),
-          cudaMemcpyHostToDevice);
-        AssertCuda(cuda_error);
+        // cuda_error = cudaMemcpyToSymbol(
+        //   get_cell_shape_gradients<Number>(0),
+        //   sub_shape_info0.data.front().shape_gradients.data(),
+        //   size_shape_values,
+        //   (my_id * data_array_size + n_shape_values) * sizeof(Number),
+        //   cudaMemcpyHostToDevice);
+        // AssertCuda(cuda_error);
 
-        cuda_error = cudaMemcpyToSymbol(
-          get_cell_shape_gradients<Number>(0),
-          sub_shape_info1.data.front().shape_gradients.data(),
-          size_shape_values,
-          (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
-          cudaMemcpyHostToDevice);
-        AssertCuda(cuda_error);
+        // cuda_error = cudaMemcpyToSymbol(
+        //   get_cell_shape_gradients<Number>(0),
+        //   sub_shape_info1.data.front().shape_gradients.data(),
+        //   size_shape_values,
+        //   (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
+        //   cudaMemcpyHostToDevice);
+        // AssertCuda(cuda_error);
 
         cuda_error =
           cudaMemcpyToSymbol(get_cell_co_shape_gradients<Number>(0),
@@ -1949,21 +1944,21 @@ namespace PSMF
                              cudaMemcpyHostToDevice);
         AssertCuda(cuda_error);
 
-        cuda_error = cudaMemcpyToSymbol(
-          get_cell_co_shape_gradients<Number>(0),
-          sub_shape_info_co0.data.front().shape_gradients.data(),
-          size_co_shape_values,
-          (my_id * data_array_size + n_shape_values) * sizeof(Number),
-          cudaMemcpyHostToDevice);
-        AssertCuda(cuda_error);
+        // cuda_error = cudaMemcpyToSymbol(
+        //   get_cell_co_shape_gradients<Number>(0),
+        //   sub_shape_info_co0.data.front().shape_gradients.data(),
+        //   size_co_shape_values,
+        //   (my_id * data_array_size + n_shape_values) * sizeof(Number),
+        //   cudaMemcpyHostToDevice);
+        // AssertCuda(cuda_error);
 
-        cuda_error = cudaMemcpyToSymbol(
-          get_cell_co_shape_gradients<Number>(0),
-          sub_shape_info_co1.data.front().shape_gradients.data(),
-          size_co_shape_values,
-          (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
-          cudaMemcpyHostToDevice);
-        AssertCuda(cuda_error);
+        // cuda_error = cudaMemcpyToSymbol(
+        //   get_cell_co_shape_gradients<Number>(0),
+        //   sub_shape_info_co1.data.front().shape_gradients.data(),
+        //   size_co_shape_values,
+        //   (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
+        //   cudaMemcpyHostToDevice);
+        // AssertCuda(cuda_error);
       }
 
     // todo: use less constant memory
@@ -2215,6 +2210,7 @@ namespace PSMF
           locally_owned_dofs, locally_relevant_dofs, *comm);
       }
 
+    Timer t1;
     for (unsigned int i = 0; i < n_colors; ++i)
       {
         helper.n_inner_faces    = 0;
@@ -2236,6 +2232,8 @@ namespace PSMF
 
         helper.alloc_and_copy_arrays(i);
       }
+    // std::cout << t1.wall_time() << std::endl;
+    t1.restart();
 
     // Setup faces
     for (unsigned int i = 0; i < n_colors; ++i)
@@ -2251,6 +2249,7 @@ namespace PSMF
 
         helper.alloc_and_copy_face_arrays(i);
       }
+    // std::cout << t1.wall_time() << std::endl;
 
     // Setup row starts
     if (n_colors > 0)

@@ -178,9 +178,9 @@ namespace PSMF
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
 
-      block_dim = dim3(cell_per_block * n_dofs_1d, n_dofs_1d, n_dofs_1d);
+      block_dim = dim3(cell_per_block * n_dofs_1d, n_dofs_1d);
 
-      size_t newStackSize = 1024 + 1024; // 2 KB
+      size_t newStackSize = 1024 * 3; // 2 KB
       AssertCuda(cudaDeviceSetLimit(cudaLimitStackSize, newStackSize));
 
       size_t stackSize;
@@ -208,19 +208,22 @@ namespace PSMF
         // tmp.update_ghost_values();
       }
 
-      auto fe_data = A->get_mf_data()->get_cell_face_data(0);
 
       if (grid_dim.x > 0)
-        cell_loop_kernel_seperate_inv_cg<dim,
-                                         fe_degree,
-                                         Number,
-                                         SmootherVariant::MCS_CG,
-                                         is_ghost>
-          <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
-                                                        dst.get_values(),
-                                                        solution.get_values(),
-                                                        gpu_data,
-                                                        fe_data);
+        {
+          auto fe_data = A->get_mf_data()->get_cell_face_data(0);
+
+          cell_loop_kernel_seperate_inv_cg<dim,
+                                           fe_degree,
+                                           Number,
+                                           SmootherVariant::MCS_CG,
+                                           is_ghost>
+            <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
+                                                          dst.get_values(),
+                                                          solution.get_values(),
+                                                          gpu_data,
+                                                          fe_data);
+        }
     }
     mutable std::size_t                  shared_mem;
     mutable dim3                         block_dim;
@@ -277,9 +280,9 @@ namespace PSMF
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
 
-      block_dim = dim3(cell_per_block * n_dofs_1d, n_dofs_1d, n_dofs_1d);
+      block_dim = dim3(cell_per_block * n_dofs_1d, n_dofs_1d);
 
-      size_t newStackSize = 1024 + 1024; // 2 KB
+      size_t newStackSize = 1024 * 3; // 2 KB
       AssertCuda(cudaDeviceSetLimit(cudaLimitStackSize, newStackSize));
 
       size_t stackSize;
@@ -376,13 +379,13 @@ namespace PSMF
 
     template <typename VectorType, typename DataType, bool is_ghost>
     void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                VectorType       &solution,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
+    loop_kernel(const VectorType &,
+                VectorType &,
+                VectorType &,
+                const DataType &,
+                const dim3 &,
+                const dim3 &,
+                cudaStream_t) const
     {
       // if (grid_dim.x > 0)
       //   loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>
@@ -439,13 +442,13 @@ namespace PSMF
 
     template <typename VectorType, typename DataType, bool is_ghost>
     void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                VectorType       &solution,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
+    loop_kernel(const VectorType &,
+                VectorType &,
+                VectorType &,
+                const DataType &,
+                const dim3 &,
+                const dim3 &,
+                cudaStream_t) const
     {
       // if (grid_dim.x > 0)
       //   loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>
@@ -501,13 +504,13 @@ namespace PSMF
 
     template <typename VectorType, typename DataType, bool is_ghost>
     void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                VectorType       &solution,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
+    loop_kernel(const VectorType &,
+                VectorType &,
+                VectorType &,
+                const DataType &,
+                const dim3 &,
+                const dim3 &,
+                cudaStream_t) const
     {
       // if (grid_dim.x > 0)
       //   loop_kernel_fused_exact<dim, fe_degree, Number, lapalace>

@@ -2047,13 +2047,14 @@ namespace PSMF
       __syncthreads();
       apply<2, true>(&eigenvectors[n_dofs_2d * 2], &tmp[local_dim], tmp);
       __syncthreads();
-      {
-        tmp[threadIdx.z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d +
-            threadIdx.x % n_dofs_1d] /=
-          (eigenvalues[n_dofs_1d * 2 + threadIdx.z] +
-           eigenvalues[n_dofs_1d + threadIdx.y] +
-           eigenvalues[threadIdx.x % n_dofs_1d]);
-      }
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          tmp[z * n_dofs_1d * n_dofs_1d + threadIdx.y * n_dofs_1d +
+              threadIdx.x % n_dofs_1d] /=
+            (eigenvalues[n_dofs_1d * 2 + z] +
+             eigenvalues[n_dofs_1d + threadIdx.y] +
+             eigenvalues[threadIdx.x % n_dofs_1d]);
+        }
       __syncthreads();
       apply<0, false>(eigenvectors, tmp, &tmp[local_dim]);
       __syncthreads();
@@ -2066,42 +2067,91 @@ namespace PSMF
     __device__ void
     apply(const Number *shape_data, const Number *in, Number *out)
     {
-      constexpr unsigned int stride = n_dofs_1d * n_dofs_1d;
+#ifdef CONFLICTFREE
+      constexpr int multiple = Util::calculate_multiple<n_dofs_1d, 16>();
+      constexpr int stride   = n_dofs_1d * n_dofs_1d;
 
-      const unsigned int z   = threadIdx.z;
       const unsigned int row = threadIdx.y;
       const unsigned int col = threadIdx.x % n_dofs_1d;
 
-      Number pval;
-
+      Number pval[n_dofs_1d];
       // kernel product: A kdot src, [N x N] * [N^dim, 1]
-      {
-        pval = 0;
-        // #pragma unroll
-        for (unsigned int k = 0; k < n_dofs_1d; ++k)
-          {
-            const unsigned int shape_idx =
-              contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          pval[z] = 0;
+          // #pragma unroll
+          for (unsigned int k = 0; k < n_dofs_1d; ++k)
+            {
+              const unsigned int shape_idx =
+                contract_over_rows ?
+                  (direction == 0) ?
+                  col + ((k + col / multiple) % n_dofs_1d) * n_dofs_1d :
+                  (direction == 1) ? k * n_dofs_1d + row :
+                                     k * n_dofs_1d + z :
+                (direction == 0) ?
+                  col * n_dofs_1d + (k + col / multiple) % n_dofs_1d :
+                (direction == 1) ? row * n_dofs_1d + k :
+                                   z * n_dofs_1d + k;
 
-            const unsigned int source_idx =
-              (direction == 0) ? (col * n_dofs_1d + k + z * stride) :
-              (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
-                                 (z * n_dofs_1d + col + k * stride);
+              const unsigned int source_idx =
+                (direction == 0) ?
+                  (row * n_dofs_1d + (k + col / multiple) % n_dofs_1d +
+                   z * stride) :
+                (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                   (row * n_dofs_1d + col + k * stride);
 
-            pval += shape_data[shape_idx] * in[source_idx];
-          }
-      }
+              pval[z] += shape_data[shape_idx] * in[source_idx];
+            }
+        }
 
-      {
-        const unsigned int destination_idx =
-          (direction == 0) ? (col * n_dofs_1d + row + z * stride) :
-          (direction == 1) ? (row * n_dofs_1d + col + z * stride) :
-                             (z * n_dofs_1d + col + row * stride);
-        if (add)
-          out[destination_idx] += pval;
-        else
-          out[destination_idx] = pval;
-      }
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          const unsigned int destination_idx =
+            row * n_dofs_1d + col + z * stride;
+
+          if (add)
+            out[destination_idx] += pval[z];
+          else
+            out[destination_idx] = pval[z];
+        }
+#else
+      constexpr unsigned int stride = n_dofs_1d * n_dofs_1d;
+
+      const unsigned int row = threadIdx.y;
+      const unsigned int col = threadIdx.x % n_dofs_1d;
+
+      Number pval[n_dofs_1d];
+      // kernel product: A kdot src, [N x N] * [N^dim, 1]
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          pval[z] = 0;
+          // #pragma unroll
+          for (unsigned int k = 0; k < n_dofs_1d; ++k)
+            {
+              const unsigned int shape_idx =
+                contract_over_rows ? k * n_dofs_1d + row : row * n_dofs_1d + k;
+
+              const unsigned int source_idx =
+                (direction == 0) ? (col * n_dofs_1d + k + z * stride) :
+                (direction == 1) ? (k * n_dofs_1d + col + z * stride) :
+                                   (z * n_dofs_1d + col + k * stride);
+
+              pval[z] += shape_data[shape_idx] * in[source_idx];
+            }
+        }
+
+      for (unsigned int z = 0; z < n_dofs_1d; ++z)
+        {
+          const unsigned int destination_idx =
+            (direction == 0) ? (col * n_dofs_1d + row + z * stride) :
+            (direction == 1) ? (row * n_dofs_1d + col + z * stride) :
+                               (z * n_dofs_1d + col + row * stride);
+          if (add)
+            out[destination_idx] += pval[z];
+          else
+            out[destination_idx] = pval[z];
+        }
+#endif
     }
   };
 
@@ -2997,6 +3047,9 @@ namespace PSMF
               const Number                           *src,
               Number                                 *dst)
   {
+    constexpr unsigned int n_dofs_1d = fe_degree + 1;
+    constexpr unsigned int n_dofs_z  = dim == 3 ? fe_degree + 1 : 1;
+
     constexpr unsigned int n_faces = dim * 2;
 
     const unsigned int dof = compute_index<dim, fe_degree + 1>();
@@ -3007,13 +3060,17 @@ namespace PSMF
     PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
       cell, fe_data, shared_data);
 
-    fe_eval.submit_dof_value(src[dof]);
+    cuda::std::array<Number, n_dofs_z> val;
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      val[i] = src[dof + i * n_dofs_1d * n_dofs_1d];
+
+    fe_eval.submit_dof_value(val);
 
     fe_eval.evaluate(false, true);
     fe_eval.submit_gradient(fe_eval.get_gradient());
     fe_eval.integrate(false, true);
 
-    Number dof_value_out = fe_eval.get_dof_value();
+    auto dof_value_out = fe_eval.get_dof_value();
 
     fe_data->n_cells = fe_data->n_faces;
     // face loop
@@ -3033,27 +3090,35 @@ namespace PSMF
         PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
           phi_outer(face1, fe_data, shared_data, false);
 
-        phi_inner.submit_dof_value(src[dof]);
+        phi_inner.submit_dof_value(val);
         phi_inner.evaluate(true, true);
 
         auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
                          fabs(phi_outer.inverse_length_normal_to_face()));
         auto sigma = hi * (1.0 * fe_degree * (fe_degree + 1));
 
-        auto solution_jump = phi_inner.get_value() * coe;
-        auto average_normal_derivative =
-          0.5 * phi_inner.get_normal_derivative() * coe;
-        auto test_by_value = solution_jump * sigma - average_normal_derivative;
+        auto solution_jump             = phi_inner.get_value();
+        auto average_normal_derivative = phi_inner.get_normal_derivative();
 
+        cuda::std::array<Number, n_dofs_z> test_by_value;
+        for (unsigned int i = 0; i < n_dofs_z; ++i)
+          {
+            test_by_value[i] = solution_jump[i] * coe * sigma -
+                               0.5 * average_normal_derivative[i] * coe;
+            solution_jump[i] = -solution_jump[i] * 0.5 * coe;
+          }
         phi_inner.submit_value(test_by_value);
-        phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+        phi_inner.submit_normal_derivative(solution_jump);
 
         phi_inner.integrate(true, true);
-        dof_value_out += phi_inner.get_dof_value();
+        auto out = phi_inner.get_dof_value();
+        for (unsigned int i = 0; i < n_dofs_z; ++i)
+          dof_value_out[i] += out[i];
       }
     __syncthreads();
 
-    dst[dof] = dof_value_out;
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      dst[dof + i * n_dofs_1d * n_dofs_1d] = dof_value_out[i];
     __syncthreads();
 
     fe_data->n_cells = fe_data_n_cells;
@@ -3063,7 +3128,7 @@ namespace PSMF
 
   // TODO: multiple cells
   // unsigned int mask = __ballot_sync(FULL_MASK, threadIdx.x < NUM_ELEMENTS);
-  template <typename Number>
+  template <int n_dofs_1d, typename Number>
   __device__ void
   innerProd(const int &tid, const Number *v1, const Number *v2, Number *result)
   {
@@ -3072,7 +3137,9 @@ namespace PSMF
     __syncthreads();
 
     Number sum = 0;
-    sum += v1[tid] * v2[tid];
+    for (unsigned int i = 0; i < n_dofs_1d; ++i)
+      sum += v1[tid + i * n_dofs_1d * n_dofs_1d] *
+             v2[tid + i * n_dofs_1d * n_dofs_1d];
 
     sum += __shfl_down_sync(-1u, sum, 16);
     sum += __shfl_down_sync(-1u, sum, 8);
@@ -3084,14 +3151,18 @@ namespace PSMF
       atomicAdd(result, sum);
   }
 
-  template <typename Number, bool self_scaling>
+  template <int n_dofs_1d, typename Number, bool self_scaling>
   __device__ void
   VecSadd(const int &tid, Number *v1, Number *v2, Number alpha)
   {
-    if (self_scaling)
-      v1[tid] = alpha * v1[tid] + v2[tid];
-    else
-      v1[tid] += alpha * v2[tid];
+    for (unsigned int i = 0; i < n_dofs_1d; ++i)
+      if (self_scaling)
+        v1[tid + i * n_dofs_1d * n_dofs_1d] =
+          alpha * v1[tid + i * n_dofs_1d * n_dofs_1d] +
+          v2[tid + i * n_dofs_1d * n_dofs_1d];
+      else
+        v1[tid + i * n_dofs_1d * n_dofs_1d] +=
+          alpha * v2[tid + i * n_dofs_1d * n_dofs_1d];
   }
 
 
@@ -3106,10 +3177,10 @@ namespace PSMF
   {
     constexpr unsigned int n_dofs_1d = fe_degree + 1;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : fe_degree + 1;
 
-    const unsigned int tid = threadIdx.z * n_dofs_1d * n_dofs_1d +
-                             threadIdx.y * n_dofs_1d +
-                             (threadIdx.x % n_dofs_1d);
+    const unsigned int tid =
+      threadIdx.y * n_dofs_1d + (threadIdx.x % n_dofs_1d);
 
     // const unsigned int Ttid = threadIdx.z * n_dofs_1d * n_dofs_1d +
     //                           threadIdx.y * n_dofs_1d + threadIdx.x;
@@ -3143,7 +3214,8 @@ namespace PSMF
       &shared_data
          ->tmp[local_cell * local_dim * (dim + 3) + (dim + 2) * local_dim];
 
-    r[tid] = p[tid];
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      r[tid + i * n_dofs_1d * n_dofs_1d] = p[tid + i * n_dofs_1d * n_dofs_1d];
 
     Number *rsold    = &shared_data->local_vars[7 * local_cell + 0];
     Number *norm_min = &shared_data->local_vars[7 * local_cell + 1];
@@ -3159,11 +3231,11 @@ namespace PSMF
 
     constexpr unsigned int MAX_IT = 10;
 
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
+    if (threadIdx.x == 0 && threadIdx.y == 0)
       *convergenced = 1;
     __syncthreads();
 
-    innerProd<Number>(tid, r, r, rsold);
+    innerProd<n_dofs_z, Number>(tid, r, r, rsold);
     __syncthreads();
 
     // if (Ttid == 0 && blockIdx.x == 0)
@@ -3207,7 +3279,7 @@ namespace PSMF
         //     printf("\n");
         //   }
 
-        innerProd<Number>(tid, p, Ap, alpha);
+        innerProd<n_dofs_z, Number>(tid, p, Ap, alpha);
         __syncthreads();
 
         if (tid == 0)
@@ -3219,7 +3291,7 @@ namespace PSMF
         //     printf("alpha: %f\n", *alpha);
         //   }
 
-        VecSadd<Number, false>(tid, r, Ap, -*alpha);
+        VecSadd<n_dofs_z, Number, false>(tid, r, Ap, -*alpha);
         __syncthreads();
 
         // if (Ttid == 0 && blockIdx.x == 0)
@@ -3230,7 +3302,7 @@ namespace PSMF
         //     printf("\n");
         //   }
 
-        innerProd<Number>(tid, r, r, rsnew);
+        innerProd<n_dofs_z, Number>(tid, r, r, rsnew);
         __syncthreads();
 
         // if (Ttid == 0 && blockIdx.x == 0)
@@ -3259,7 +3331,7 @@ namespace PSMF
               atomicAdd(convergenced, 2);
           }
 
-        VecSadd<Number, false>(tid, x, p, *alpha);
+        VecSadd<n_dofs_z, Number, false>(tid, x, p, *alpha);
         __syncthreads();
 
         if (local_flag < 0 && *norm_min < 1e-9)
@@ -3292,7 +3364,7 @@ namespace PSMF
             return;
           }
 
-        VecSadd<Number, true>(tid, p, r, *beta);
+        VecSadd<n_dofs_z, Number, true>(tid, p, r, *beta);
         __syncthreads();
 
         // if (Ttid == 0 && blockIdx.x == 0)
@@ -3328,10 +3400,10 @@ namespace PSMF
   {
     constexpr unsigned int n_dofs_1d = fe_degree + 1;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : fe_degree + 1;
 
-    const unsigned int tid = threadIdx.z * n_dofs_1d * n_dofs_1d +
-                             threadIdx.y * n_dofs_1d +
-                             (threadIdx.x % n_dofs_1d);
+    const unsigned int tid =
+      threadIdx.y * n_dofs_1d + (threadIdx.x % n_dofs_1d);
 
     // const unsigned int Ttid = threadIdx.z * n_dofs_1d * n_dofs_1d +
     //                           threadIdx.y * n_dofs_1d + threadIdx.x;
@@ -3386,7 +3458,8 @@ namespace PSMF
     //   }
     //
 
-    p[tid] = z[tid];
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      p[tid + i * n_dofs_1d * n_dofs_1d] = z[tid + i * n_dofs_1d * n_dofs_1d];
 
     Number *rsold    = &shared_data->local_vars[7 * local_cell + 0];
     Number *norm_min = &shared_data->local_vars[7 * local_cell + 1];
@@ -3402,11 +3475,11 @@ namespace PSMF
 
     constexpr unsigned int MAX_IT = 5; // MAX_IT = 2 also works
 
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
+    if (threadIdx.x == 0 && threadIdx.y == 0)
       *convergenced = 1;
     __syncthreads();
 
-    innerProd<Number>(tid, r, z, rsold);
+    innerProd<n_dofs_z, Number>(tid, r, z, rsold);
     __syncthreads();
 
     // if (Ttid == 0 && blockIdx.x == 0)
@@ -3450,7 +3523,7 @@ namespace PSMF
         //     printf("\n");
         //   }
 
-        innerProd<Number>(tid, p, Ap, alpha);
+        innerProd<n_dofs_z, Number>(tid, p, Ap, alpha);
         __syncthreads();
 
         if (tid == 0)
@@ -3462,7 +3535,7 @@ namespace PSMF
         //     printf("alpha: %f\n", *alpha);
         //   }
 
-        VecSadd<Number, false>(tid, r, Ap, -*alpha);
+        VecSadd<n_dofs_z, Number, false>(tid, r, Ap, -*alpha);
         __syncthreads();
 
         // if (Ttid == 0 && blockIdx.x == 0)
@@ -3473,7 +3546,7 @@ namespace PSMF
         //     printf("\n");
         //   }
 
-        innerProd<Number>(tid, r, r, rsnew);
+        innerProd<n_dofs_z, Number>(tid, r, r, rsnew);
         __syncthreads();
 
         // if (Ttid == 0 && blockIdx.x == 0)
@@ -3502,7 +3575,7 @@ namespace PSMF
               atomicAdd(convergenced, 2);
           }
 
-        VecSadd<Number, false>(tid, x, p, *alpha);
+        VecSadd<n_dofs_z, Number, false>(tid, x, p, *alpha);
         __syncthreads();
 
         if (local_flag < 0 && *norm_min < 1e-9)
@@ -3521,7 +3594,7 @@ namespace PSMF
           &shared_data->tmp[local_cell * local_dim * (dim + 4)]);
         __syncthreads();
 
-        innerProd<Number>(tid, r, z, rsnew);
+        innerProd<n_dofs_z, Number>(tid, r, z, rsnew);
         __syncthreads();
 
         if (tid == 0)
@@ -3550,7 +3623,7 @@ namespace PSMF
             return;
           }
 
-        VecSadd<Number, true>(tid, p, z, *beta);
+        VecSadd<n_dofs_z, Number, true>(tid, p, z, *beta);
         __syncthreads();
 
         // if (Ttid == 0 && blockIdx.x == 0)

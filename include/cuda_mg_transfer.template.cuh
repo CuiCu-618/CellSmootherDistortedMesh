@@ -339,15 +339,15 @@ namespace PSMF
   } // namespace internal
 
   template <int dim, int degree, typename loop_body, typename Number>
-  __global__ void
-  mg_kernel(Number                        *dst,
-            const Number                  *src,
-            const Number                  *weights,
-            const Number                  *shape_values,
-            const types::global_dof_index *dof_indices_coarse,
-            const types::global_dof_index *dof_indices_fine,
-            const types::global_dof_index *child_offset_in_parent,
-            const unsigned int             n_child_cell_dofs)
+  __global__ void __launch_bounds__(1024, 1)
+    mg_kernel(Number                        *dst,
+              const Number                  *src,
+              const Number                  *weights,
+              const Number                  *shape_values,
+              const types::global_dof_index *dof_indices_coarse,
+              const types::global_dof_index *dof_indices_fine,
+              const types::global_dof_index *child_offset_in_parent,
+              const unsigned int             n_child_cell_dofs)
   {
     const unsigned int            n_fine      = Util::pow(degree * 2 + 2, dim);
     const unsigned int            coarse_cell = blockIdx.x;

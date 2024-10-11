@@ -28,8 +28,9 @@
 
 #include "cuda_matrix_free.cuh"
 #include "cuda_tensor_product_kernels.cuh"
+#include <cuda/std/array>
 
-#define UNIFORM_MESH
+// #define UNIFORM_MESH
 
 namespace PSMF
 {
@@ -41,12 +42,9 @@ namespace PSMF
   __device__ inline unsigned int
   compute_index()
   {
-    return (
-      dim == 1 ? threadIdx.x % n_points_1d :
-      dim == 2 ? threadIdx.x + n_points_1d * (threadIdx.y % n_points_1d) :
-                 threadIdx.x +
-                   n_points_1d *
-                     (threadIdx.y + n_points_1d * (threadIdx.z % n_points_1d)));
+    return (dim == 1 ? threadIdx.x % n_points_1d :
+            dim == 2 ? threadIdx.x + n_points_1d * (threadIdx.y % n_points_1d) :
+                       threadIdx.x + n_points_1d * (threadIdx.y % n_points_1d));
   }
 
 
@@ -56,16 +54,16 @@ namespace PSMF
    */
   template <int dim, int n_points_1d>
   __device__ inline unsigned int
-  compute_face_index(unsigned int face_number)
+  compute_face_index(unsigned int face_number, unsigned int z = 0)
   {
-    return (
-      dim == 1 ? 0 :
-      dim == 2 ? (face_number == 0 ? threadIdx.y % n_points_1d : threadIdx.x) :
-                 (face_number == 0 ?
-                    threadIdx.y + n_points_1d * (threadIdx.z % n_points_1d) :
-                  face_number == 1 ?
-                    threadIdx.x * n_points_1d + threadIdx.z % n_points_1d :
-                    threadIdx.x + n_points_1d * threadIdx.y));
+    return (dim == 1 ?
+              0 :
+            dim == 2 ?
+              (face_number == 0 ? threadIdx.y % n_points_1d : threadIdx.x) :
+              (face_number == 0 ? threadIdx.y % n_points_1d + n_points_1d * z :
+               face_number == 1 ? threadIdx.x + n_points_1d * z :
+                                  threadIdx.x +
+                                    n_points_1d * (threadIdx.y % n_points_1d)));
   }
 
   /**
@@ -101,15 +99,17 @@ namespace PSMF
   class FEEvaluation
   {
   public:
+    static constexpr unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
     /**
      * An alias for scalar quantities.
      */
-    using value_type = Number;
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     /**
      * An alias for vectorial quantities.
      */
-    using gradient_type = dealii::Tensor<1, dim, Number>;
+    using gradient_type = cuda::std::array<value_type, dim>;
 
     /**
      * An alias for vectorial quantities.
@@ -323,15 +323,17 @@ namespace PSMF
   class FEFaceEvaluation
   {
   public:
+    static constexpr unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
     /**
      * An alias for scalar quantities.
      */
-    using value_type = Number;
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     /**
      * An alias for vectorial quantities.
      */
-    using gradient_type = dealii::Tensor<1, dim, Number>;
+    using gradient_type = cuda::std::array<value_type, dim>;
 
     /**
      * An alias to kernel specific information.
@@ -475,7 +477,7 @@ namespace PSMF
      * length must be computed by the product of the inverse Jacobian times the
      * normal vector in real coordinates.
      */
-    __device__ value_type
+    __device__ Number
     inverse_length_normal_to_face();
 
     // clang-format off
@@ -564,14 +566,18 @@ namespace PSMF
     shape_values    = data->cell_face_shape_values;
     shape_gradients = data->cell_face_shape_gradients;
 #elif MEMORY_TYPE == 2
-    if (threadIdx.z % n_q_points_1d == 0)
-      {
-        const unsigned int idx = compute_index<dim, n_q_points_1d>();
+    {
+      const unsigned int idx = compute_index<dim, n_q_points_1d>();
+#  if TENSORCORE == 2
+      const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, 0);
+#  else
+      const unsigned int idx1 = idx;
+#  endif
 
-        shape_values[idx] = get_cell_shape_values<Number>(mf_object_id)[idx];
-        shape_gradients[idx] =
-          get_cell_shape_gradients<Number>(mf_object_id)[idx];
-      }
+      shape_values[idx1] = get_cell_shape_values<Number>(mf_object_id)[idx];
+      shape_gradients[idx1] =
+        get_cell_shape_gradients<Number>(mf_object_id)[idx];
+    }
 #endif
   }
 
@@ -588,11 +594,21 @@ namespace PSMF
   {
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
-    const unsigned int idx = compute_index<dim, n_q_points_1d>();
 
     const dealii::types::global_dof_index src_idx = local_to_global[0];
-    // Use the read-only data cache.
-    values[idx] = __ldg(&src[src_idx + idx]);
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int idx = compute_index<dim, n_q_points_1d>() +
+                                 i * n_q_points_1d * n_q_points_1d;
+#if TENSORCORE == 2
+        const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, i);
+#else
+        const unsigned int idx1 = idx;
+#endif
+        // Use the read-only data cache.
+        values[idx1] = __ldg(&src[src_idx + idx]);
+      }
 
     __syncthreads();
   }
@@ -611,14 +627,22 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    const unsigned int idx = compute_index<dim, n_q_points_1d>();
-
     const dealii::types::global_dof_index destination_idx = local_to_global[0];
 
-    if (use_coloring)
-      dst[destination_idx + idx] += values[idx];
-    else
-      atomicAdd(&dst[destination_idx + idx], values[idx]);
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int idx = compute_index<dim, n_q_points_1d>() +
+                                 i * n_q_points_1d * n_q_points_1d;
+#if TENSORCORE == 2
+        const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, i);
+#else
+        const unsigned int idx1 = idx;
+#endif
+        if (use_coloring)
+          dst[destination_idx + idx] += values[idx1];
+        else
+          atomicAdd(&dst[destination_idx + idx], values[idx1]);
+      }
   }
 
 
@@ -746,8 +770,15 @@ namespace PSMF
   FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     get_value() const
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    return values[q_point];
+    value_type val;
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+        val[i] = values[q_point];
+      }
+    return val;
   }
 
 
@@ -765,8 +796,15 @@ namespace PSMF
   FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     get_dof_value() const
   {
-    const unsigned int dof = compute_index<dim, fe_degree + 1>();
-    return values[dof];
+    value_type val;
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int dof = i * n_q_points_1d * n_q_points_1d +
+                                 compute_index<dim, n_q_points_1d>();
+        val[i] = values[dof];
+      }
+    return val;
   }
 
 
@@ -780,8 +818,19 @@ namespace PSMF
   FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_value(const value_type &val_in)
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    values[q_point]            = val_in * JxW[q_point];
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+#if TENSORCORE == 2
+        const unsigned int q_point1 =
+          q_point ^ get_base<n_q_points_1d>(threadIdx.y, i);
+#else
+        const unsigned int q_point1 = q_point;
+#endif
+        values[q_point] = val_in[i] * JxW[q_point1];
+      }
+
     __syncthreads();
   }
 
@@ -796,8 +845,12 @@ namespace PSMF
   FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_dof_value(const value_type &val_in)
   {
-    const unsigned int dof = compute_index<dim, fe_degree + 1>();
-    values[dof]            = val_in;
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int dof = i * n_q_points_1d * n_q_points_1d +
+                                 compute_index<dim, fe_degree + 1>();
+        values[dof] = val_in[i];
+      }
     __syncthreads();
   }
 
@@ -819,20 +872,27 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
 #ifdef UNIFORM_MESH
     const Number *inv_jacobian = &inv_jac[0];
-#else
-    const Number *inv_jacobian = &inv_jac[q_point];
 #endif
     gradient_type grad;
-    for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
       {
-        Number tmp = 0.;
-        for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
-          tmp += inv_jacobian[padding_length * n_cells * (dim * d_2 + d_1)] *
-                 gradients[d_2][q_point];
-        grad[d_1] = tmp;
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+#ifndef UNIFORM_MESH
+        const Number *inv_jacobian = &inv_jac[q_point];
+#endif
+        for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+          {
+            Number tmp = 0.;
+            for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
+              tmp +=
+                inv_jacobian[padding_length * n_cells * (dim * d_2 + d_1)] *
+                gradients[d_2][q_point];
+            grad[d_1][i] = tmp;
+          }
       }
 
     return grad;
@@ -878,20 +938,33 @@ namespace PSMF
   FEEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_gradient(const gradient_type &grad_in)
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
 #ifdef UNIFORM_MESH
     const Number *inv_jacobian = &inv_jac[0];
-#else
-    const Number *inv_jacobian = &inv_jac[q_point];
 #endif
-    for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
       {
-        Number tmp = 0.;
-        for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
-          tmp += inv_jacobian[n_cells * padding_length * (dim * d_1 + d_2)] *
-                 grad_in[d_2];
-        gradients[d_1][q_point] = tmp * JxW[q_point];
+        const unsigned int q_point = (i * n_q_points_1d * n_q_points_1d +
+                                      compute_index<dim, n_q_points_1d>());
+#if TENSORCORE == 2
+        const unsigned int q_point1 =
+          q_point ^ get_base<n_q_points_1d>(threadIdx.y, i);
+#else
+        const unsigned int q_point1 = q_point;
+#endif
+#ifndef UNIFORM_MESH
+        const Number *inv_jacobian = &inv_jac[q_point];
+#endif
+        for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+          {
+            Number tmp = 0.;
+            for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
+              tmp +=
+                inv_jacobian[n_cells * padding_length * (dim * d_1 + d_2)] *
+                grad_in[d_2][i];
+            gradients[d_1][q_point] = tmp * JxW[q_point1];
+          }
       }
+
     __syncthreads();
   }
 
@@ -985,25 +1058,29 @@ namespace PSMF
     shape_values    = data->cell_face_shape_values;
     shape_gradients = data->cell_face_shape_gradients;
 #elif MEMORY_TYPE == 2
-    if (threadIdx.z % n_q_points_1d == 0)
-      {
-        const unsigned int idx = compute_index<dim, n_q_points_1d>();
+    {
+      const unsigned int idx = compute_index<dim, n_q_points_1d>();
+#  if TENSORCORE == 2
+      const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, 0);
+#  else
+      const unsigned int idx1 = idx;
+#  endif
 
-        shape_values[idx] = get_cell_shape_values<Number>(mf_object_id)[idx];
-        shape_values[idx + n_q_points_1d * n_q_points_1d] =
-          get_face_shape_values<Number>(mf_object_id)[idx];
-        shape_values[idx + n_q_points_1d * n_q_points_1d * 2] =
-          get_face_shape_values<Number>(
-            mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
+      shape_values[idx1] = get_cell_shape_values<Number>(mf_object_id)[idx];
+      shape_values[idx1 + n_q_points_1d * n_q_points_1d] =
+        get_face_shape_values<Number>(mf_object_id)[idx];
+      shape_values[idx1 + n_q_points_1d * n_q_points_1d * 2] =
+        get_face_shape_values<Number>(
+          mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
 
-        shape_gradients[idx] =
-          get_cell_shape_gradients<Number>(mf_object_id)[idx];
-        shape_gradients[idx + n_q_points_1d * n_q_points_1d] =
-          get_face_shape_gradients<Number>(mf_object_id)[idx];
-        shape_gradients[idx + n_q_points_1d * n_q_points_1d * 2] =
-          get_face_shape_gradients<Number>(
-            mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
-      }
+      shape_gradients[idx1] =
+        get_cell_shape_gradients<Number>(mf_object_id)[idx];
+      shape_gradients[idx1 + n_q_points_1d * n_q_points_1d] =
+        get_face_shape_gradients<Number>(mf_object_id)[idx];
+      shape_gradients[idx1 + n_q_points_1d * n_q_points_1d * 2] =
+        get_face_shape_gradients<Number>(
+          mf_object_id)[idx + n_q_points_1d * n_q_points_1d];
+    }
 #endif
   }
 
@@ -1018,14 +1095,23 @@ namespace PSMF
   {
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
-    const unsigned int idx = compute_index<dim, n_q_points_1d>();
-
     const dealii::types::global_dof_index src_idx = local_to_global[0];
-    // Use the read-only data cache.
-    if (ignore_read)
-      values[idx] = 0;
-    else
-      values[idx] = __ldg(&src[src_idx + idx]);
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int idx = compute_index<dim, n_q_points_1d>() +
+                                 i * n_q_points_1d * n_q_points_1d;
+#if TENSORCORE == 2
+        const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, i);
+#else
+        const unsigned int idx1 = idx;
+#endif
+        // Use the read-only data cache.
+        if (ignore_read)
+          values[idx1] = 0;
+        else
+          values[idx1] = __ldg(&src[src_idx + idx]);
+      }
 
     __syncthreads();
   }
@@ -1044,19 +1130,27 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    const unsigned int idx = compute_index<dim, n_q_points_1d>();
-
     const dealii::types::global_dof_index destination_idx = l_to_g_coarse[0];
 
-    if (use_coloring)
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
       {
-        if (!ignore_write)
-          dst[destination_idx + idx] += values[idx];
-      }
-    else
-      {
-        if (!ignore_write)
-          atomicAdd(&dst[destination_idx + idx], values[idx]);
+        const unsigned int idx = compute_index<dim, n_q_points_1d>() +
+                                 i * n_q_points_1d * n_q_points_1d;
+#if TENSORCORE == 2
+        const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, i);
+#else
+        const unsigned int idx1 = idx;
+#endif
+        if (use_coloring)
+          {
+            if (!ignore_write)
+              dst[destination_idx + idx] += values[idx1];
+          }
+        else
+          {
+            if (!ignore_write)
+              atomicAdd(&dst[destination_idx + idx], values[idx1]);
+          }
       }
   }
 
@@ -1198,8 +1292,15 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     get_value() const
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    return values[q_point];
+    value_type val;
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+        val[i] = values[q_point];
+      }
+    return val;
   }
 
 
@@ -1216,8 +1317,15 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     get_dof_value() const
   {
-    const unsigned int dof = compute_index<dim, fe_degree + 1>();
-    return values[dof];
+    value_type val;
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int dof = i * n_q_points_1d * n_q_points_1d +
+                                 compute_index<dim, fe_degree + 1>();
+        val[i] = values[dof];
+      }
+    return val;
   }
 
 
@@ -1230,11 +1338,22 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_value(const value_type &val_in)
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    const unsigned int q_point_face =
-      compute_face_index<dim, n_q_points_1d>(face_number / 2);
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+        const unsigned int q_point_face =
+          compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
+#if TENSORCORE == 2
+        const unsigned int q_point_face1 =
+          q_point_face ^
+          get_face_base<n_q_points_1d>(face_number / 2, threadIdx.y, i);
+#else
+        const unsigned int q_point_face1 = q_point_face;
+#endif
 
-    values[q_point] = val_in * JxW[q_point_face];
+        values[q_point] = val_in[i] * JxW[q_point_face1];
+      }
 
     __syncthreads();
   }
@@ -1250,8 +1369,12 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_dof_value(const value_type &val_in)
   {
-    const unsigned int dof = compute_index<dim, fe_degree + 1>();
-    values[dof]            = val_in;
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int dof = i * n_q_points_1d * n_q_points_1d +
+                                 compute_index<dim, fe_degree + 1>();
+        values[dof] = val_in[i];
+      }
 
     __syncthreads();
   }
@@ -1274,23 +1397,29 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    const unsigned int q_point_face =
-      compute_face_index<dim, n_q_points_1d>(face_number / 2);
 #ifdef UNIFORM_MESH
     const Number *inv_jacobian = &inv_jac[0];
-#else
-    const Number *inv_jacobian = &inv_jac[q_point_face];
 #endif
     gradient_type grad;
-    for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
       {
-        Number tmp = 0.;
-        for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
-          tmp +=
-            inv_jacobian[n_cells * face_padding_length * (dim * d_2 + d_1)] *
-            gradients[d_2][q_point];
-        grad[d_1] = tmp;
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+#ifndef UNIFORM_MESH
+        const unsigned int q_point_face =
+          compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
+        const Number *inv_jacobian = &inv_jac[q_point_face];
+#endif
+        for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+          {
+            Number tmp = 0.;
+            for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
+              tmp += inv_jacobian[n_cells * face_padding_length *
+                                  (dim * d_2 + d_1)] *
+                     gradients[d_2][q_point];
+            grad[d_1][i] = tmp;
+          }
       }
 
     return grad;
@@ -1307,22 +1436,35 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_gradient(const gradient_type &grad_in)
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    const unsigned int q_point_face =
-      compute_face_index<dim, n_q_points_1d>(face_number / 2);
 #ifdef UNIFORM_MESH
     const Number *inv_jacobian = &inv_jac[0];
-#else
-    const Number *inv_jacobian = &inv_jac[q_point_face];
 #endif
-    for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
       {
-        Number tmp = 0.;
-        for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
-          tmp +=
-            inv_jacobian[n_cells * face_padding_length * (dim * d_1 + d_2)] *
-            grad_in[d_2];
-        gradients[d_1][q_point] = tmp * JxW[q_point_face];
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+        const unsigned int q_point_face =
+          compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
+#if TENSORCORE == 2
+        const unsigned int q_point_face1 =
+          q_point_face ^
+          get_face_base<n_q_points_1d>(face_number / 2, threadIdx.y, i);
+#else
+        const unsigned int q_point_face1 = q_point_face;
+#endif
+#ifndef UNIFORM_MESH
+        const Number *inv_jacobian = &inv_jac[q_point_face];
+#endif
+        for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+          {
+            Number tmp = 0.;
+            for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
+              tmp += inv_jacobian[n_cells * face_padding_length *
+                                  (dim * d_1 + d_2)] *
+                     grad_in[d_2][i];
+            gradients[d_1][q_point] = tmp * JxW[q_point_face1];
+          }
       }
 
     __syncthreads();
@@ -1346,22 +1488,28 @@ namespace PSMF
     static_assert(n_components_ == 1, "This function only supports FE with one \
                   components");
 
-    const unsigned int q_point_face =
-      compute_face_index<dim, n_q_points_1d>(face_number / 2);
 #ifdef UNIFORM_MESH
     const Number *normal_vector = &normal_vec[0];
-#else
-    const Number *normal_vector = &normal_vec[q_point_face];
 #endif
 
+    const Number coe = is_interior_face ? 1.0 : -1.0;
+
     gradient_type grad              = get_gradient();
-    value_type    normal_derivative = 0.;
+    value_type    normal_derivative = {};
 
-    for (unsigned int d = 0; d < dim; ++d)
-      normal_derivative +=
-        grad[d] * normal_vector[n_cells * face_padding_length * d];
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+#ifndef UNIFORM_MESH
+        const unsigned int q_point_face =
+          compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
+        const Number *normal_vector = &normal_vec[q_point_face];
+#endif
+        for (unsigned int d = 0; d < dim; ++d)
+          normal_derivative[i] +=
+            grad[d][i] * normal_vector[n_cells * face_padding_length * d] * coe;
+      }
 
-    return is_interior_face ? normal_derivative : -normal_derivative;
+    return normal_derivative;
   }
 
 
@@ -1375,33 +1523,46 @@ namespace PSMF
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     submit_normal_derivative(const value_type &grad_in)
   {
-    const unsigned int q_point = compute_index<dim, n_q_points_1d>();
-    const unsigned int q_point_face =
-      compute_face_index<dim, n_q_points_1d>(face_number / 2);
 #ifdef UNIFORM_MESH
     const Number *normal_vector = &normal_vec[0];
     const Number *inv_jacobian  = &inv_jac[0];
-#else
-    const Number *normal_vector = &normal_vec[q_point_face];
-    const Number *inv_jacobian  = &inv_jac[q_point_face];
 #endif
 
     const Number coe = is_interior_face ? 1. : -1.;
 
     gradient_type normal_x_jacobian;
-    for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
-      {
-        Number tmp = 0.;
-        for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
-          tmp +=
-            inv_jacobian[n_cells * face_padding_length * (dim * d_1 + d_2)] *
-            normal_vector[n_cells * face_padding_length * d_2];
-        normal_x_jacobian[d_1] = coe * tmp;
-      }
 
-    for (unsigned int d = 0; d < dim; ++d)
-      gradients[d][q_point] =
-        grad_in * normal_x_jacobian[d] * JxW[q_point_face];
+    for (unsigned int i = 0; i < n_dofs_z; ++i)
+      {
+        const unsigned int q_point = i * n_q_points_1d * n_q_points_1d +
+                                     compute_index<dim, n_q_points_1d>();
+        const unsigned int q_point_face =
+          compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
+#if TENSORCORE == 2
+        const unsigned int q_point_face1 =
+          q_point_face ^
+          get_face_base<n_q_points_1d>(face_number / 2, threadIdx.y, i);
+#else
+        const unsigned int q_point_face1 = q_point_face;
+#endif
+#ifndef UNIFORM_MESH
+        const Number *normal_vector = &normal_vec[q_point_face];
+        const Number *inv_jacobian  = &inv_jac[q_point_face];
+#endif
+        for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
+          {
+            Number tmp = 0.;
+            for (unsigned int d_2 = 0; d_2 < dim; ++d_2)
+              tmp += inv_jacobian[n_cells * face_padding_length *
+                                  (dim * d_1 + d_2)] *
+                     normal_vector[n_cells * face_padding_length * d_2];
+            normal_x_jacobian[d_1][i] = coe * tmp;
+          }
+
+        for (unsigned int d = 0; d < dim; ++d)
+          gradients[d][q_point] =
+            grad_in[i] * normal_x_jacobian[d][i] * JxW[q_point_face1];
+      }
 
     __syncthreads();
   }
@@ -1413,11 +1574,7 @@ namespace PSMF
             int n_q_points_1d,
             int n_components_,
             typename Number>
-  __device__ typename FEFaceEvaluation<dim,
-                                       fe_degree,
-                                       n_q_points_1d,
-                                       n_components_,
-                                       Number>::value_type
+  __device__ Number
   FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components_, Number>::
     inverse_length_normal_to_face()
   {

@@ -24,11 +24,20 @@
 
 #include <deal.II/base/utilities.h>
 
+#include <mma.h>
+
+#include <type_traits>
+
 #include "cuda_matrix_free.cuh"
 
+using namespace nvcuda;
 
 #define CONFLICTFREE
 
+#define TENSORCORE 0
+// 0: CUDA Core
+// 1: WMMA API
+// 2: PTX MMA
 
 namespace PSMF
 {
@@ -61,6 +70,63 @@ namespace PSMF
     return multiple;
   }
 #endif
+
+  template <int n_dofs_1d, typename Number = double>
+  __host__ __device__ inline unsigned int
+  get_base(const unsigned int row, const unsigned int z = 0)
+  {
+    printf("Should never be called!\n");
+    return 0;
+  }
+
+  template <>
+  __host__ __device__ inline unsigned int
+  get_base<8, double>(const unsigned int row, const unsigned int z)
+  {
+#ifdef CONFLICTFREE
+    auto base1 = (row & 3) < 2 ? 0 : 4;
+    auto base2 = (z & 1) << 3;
+    auto base3 = (z & 3) < 2 ? 0 : 4;
+
+    return base1 ^ base2 ^ base3;
+#else
+    return 0;
+#endif
+  }
+
+  template <int n_dofs_1d, typename Number = double>
+  __host__ __device__ inline unsigned int
+  get_face_base(const unsigned int face_number,
+                const unsigned int row,
+                const unsigned int z = 0)
+  {
+    printf("Should never be called!\n");
+    return 0;
+  }
+
+  template <>
+  __host__ __device__ inline unsigned int
+  get_face_base<8, double>(const unsigned int face_number,
+                           const unsigned int row,
+                           const unsigned int z)
+  {
+#ifdef CONFLICTFREE
+
+    // return get_base<8, double>(row, z);
+
+    if (face_number == 0)
+      return (z & 1);
+    else if (face_number == 1)
+      return ((row & 3) < 2 ? 0 : 4) ^ ((z & 3) < 2 ? 0 : 4);
+    else
+      return get_base<8, double>(row, z);
+
+#else
+    return 0;
+#endif
+  }
+
+
 
   /**
    * For face integral, compute the offset for a given subface.
@@ -153,6 +219,8 @@ namespace PSMF
       dealii::Utilities::pow(fe_degree + 1, dim);
     static constexpr unsigned int n_q_points =
       dealii::Utilities::pow(n_q_points_1d, dim);
+
+    static constexpr unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
 
     __device__
     EvaluatorTensorProduct(int mf_object_id);
@@ -306,77 +374,632 @@ namespace PSMF
                                         Number       *out) const
   {
 #ifdef CONFLICTFREE
+#  if TENSORCORE == 2
+    if (direction == 0)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int b_idx = dof_to_quad ?
+                                ((col + cycle * 4) * n_q_points_1d + row) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (col + cycle * 4 + n_q_points_1d * row) ^
+                                  get_base<n_q_points_1d>(row, 0);
+
+            auto b0 = shape_data[b_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int a_idx = (row * n_q_points_1d + col + cycle * 4 +
+                                   (z * 2 + warpId) * offset) ^
+                                  get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+                auto a0 = in_place ? out[a_idx] : in[a_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else if (direction == 1)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((col + cycle * 4) * n_q_points_1d + row +
+                   (z * 2 + warpId) * offset) ^
+                  get_base<n_q_points_1d>(col + cycle * 4, z * 2 + warpId);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((z * 2 + warpId) * n_q_points_1d + row +
+                   (col + cycle * 4) * offset) ^
+                  get_base<n_q_points_1d>(z * 2 + warpId, col + cycle * 4);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+#  else
     constexpr unsigned int multiple = calculate_multiple<n_q_points_1d, 16>();
 
-    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
-    const unsigned int row =
-      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+    const unsigned int row = threadIdx.y % n_q_points_1d;
     const unsigned int col = threadIdx.x;
 
-    Number t = 0;
-    for (unsigned int k = 0; k < n_q_points_1d; ++k)
+    Number t[n_dofs_z];
+
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
       {
-        const unsigned int shape_idx =
-          dof_to_quad ?
-            ((direction == 0) ?
-               (col + ((k + col / multiple) % n_q_points_1d) * n_q_points_1d) :
-             (direction == 1) ? (row + k * n_q_points_1d) :
-                                (z + k * n_q_points_1d)) :
-            ((direction == 0) ?
-               ((k + col / multiple) % n_q_points_1d + col * n_q_points_1d) :
-             (direction == 1) ? (k + row * n_q_points_1d) :
-                                (k + z * n_q_points_1d));
-        const unsigned int source_idx =
-          (direction == 0) ? ((k + col / multiple) % n_q_points_1d +
-                              n_q_points_1d * (row + n_q_points_1d * z)) :
-          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
-                             (col + n_q_points_1d * (row + n_q_points_1d * k));
-        t +=
-          shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
+        t[z] = 0;
+        for (unsigned int k = 0; k < n_q_points_1d; ++k)
+          {
+            const unsigned int shape_idx =
+              dof_to_quad ?
+                ((direction == 0) ?
+                   (col +
+                    ((k + col / multiple) % n_q_points_1d) * n_q_points_1d) :
+                 (direction == 1) ? (row + k * n_q_points_1d) :
+                                    (z + k * n_q_points_1d)) :
+                ((direction == 0) ? ((k + col / multiple) % n_q_points_1d +
+                                     col * n_q_points_1d) :
+                 (direction == 1) ? (k + row * n_q_points_1d) :
+                                    (k + z * n_q_points_1d));
+            const unsigned int source_idx =
+              (direction == 0) ?
+                ((k + col / multiple) % n_q_points_1d +
+                 n_q_points_1d * (row + n_q_points_1d * z)) :
+              (direction == 1) ?
+                (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                (col + n_q_points_1d * (row + n_q_points_1d * k));
+            t[z] += shape_data[shape_idx] *
+                    (in_place ? out[source_idx] : in[source_idx]);
+          }
       }
 
     if (in_place)
       __syncthreads();
 
-    const unsigned int destination_idx =
-      col + n_q_points_1d * (row + n_q_points_1d * z);
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
+      {
+        const unsigned int destination_idx =
+          col + n_q_points_1d * (row + n_q_points_1d * z);
 
-    if (add)
-      out[destination_idx] += t;
-    else
-      out[destination_idx] = t;
-
+        if (add)
+          out[destination_idx] += t[z];
+        else
+          out[destination_idx] = t[z];
+      }
+#  endif
 #else
-    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
-    const unsigned int row =
-      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+#  if TENSORCORE == 1
+    if (direction == 0)
+      {
+        const int warpId = (threadIdx.x + threadIdx.y * n_q_points_1d) / 32;
+
+        wmma::fragment<
+          wmma::matrix_a,
+          8,
+          8,
+          4,
+          double,
+          std::conditional_t<dof_to_quad, wmma::col_major, wmma::row_major>>
+                                                                         a_frag;
+        wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major> b_frag;
+        wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+          c_frag[n_q_points_1d / 2];
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          if (add)
+            wmma::load_matrix_sync(c_frag[z],
+                                   &out[(z * 2 + warpId) * 8 * 8],
+                                   8,
+                                   wmma::mem_col_major);
+          else
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+        if (add)
+          __syncthreads();
+
+        auto vec = in_place ? out : in;
+        for (int i = 0; i < 2; ++i)
+          {
+            if (dof_to_quad)
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4 * 8], 8);
+            else
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4], 8);
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                wmma::load_matrix_sync(b_frag,
+                                       &vec[(z * 2 + warpId) * 8 * 8 + i * 4],
+                                       8);
+
+                wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          wmma::store_matrix_sync(&out[(z * 2 + warpId) * 8 * 8],
+                                  c_frag[z],
+                                  8,
+                                  wmma::mem_col_major);
+      }
+    else if (direction == 1)
+      {
+        const int warpId = (threadIdx.x + threadIdx.y * n_q_points_1d) / 32;
+
+        wmma::fragment<
+          wmma::matrix_a,
+          8,
+          8,
+          4,
+          double,
+          std::conditional_t<dof_to_quad, wmma::col_major, wmma::row_major>>
+                                                                         a_frag;
+        wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major> b_frag;
+        wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+          c_frag[n_q_points_1d / 2];
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          if (add)
+            wmma::load_matrix_sync(c_frag[z],
+                                   &out[(z * 2 + warpId) * 8 * 8],
+                                   8,
+                                   wmma::mem_row_major);
+          else
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+        if (add)
+          __syncthreads();
+
+        auto vec = in_place ? out : in;
+        for (int i = 0; i < 2; ++i)
+          {
+            if (dof_to_quad)
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4 * 8], 8);
+            else
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4], 8);
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                wmma::load_matrix_sync(
+                  b_frag, &vec[(z * 2 + warpId) * 8 * 8 + i * 4 * 8], 8);
+
+                wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          wmma::store_matrix_sync(&out[(z * 2 + warpId) * 8 * 8],
+                                  c_frag[z],
+                                  8,
+                                  wmma::mem_row_major);
+      }
+    else
+      {
+        const unsigned int row = threadIdx.y % n_q_points_1d;
+        const unsigned int col = threadIdx.x;
+
+        Number t[n_dofs_z];
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            t[z] = 0;
+            for (unsigned int k = 0; k < n_q_points_1d; ++k)
+              {
+                const unsigned int shape_idx = dof_to_quad ?
+                                                 (row + k * n_q_points_1d) :
+                                                 (k + row * n_q_points_1d);
+                const unsigned int source_idx =
+                  (direction == 0) ?
+                    (k + n_q_points_1d * (col + n_q_points_1d * z)) :
+                  (direction == 1) ?
+                    (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                    (col + n_q_points_1d * (z + n_q_points_1d * k));
+                t[z] += shape_data[shape_idx] *
+                        (in_place ? out[source_idx] : in[source_idx]);
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int destination_idx =
+              (direction == 0) ?
+                (row + n_q_points_1d * (col + n_q_points_1d * z)) :
+              (direction == 1) ?
+                (col + n_q_points_1d * (row + n_q_points_1d * z)) :
+                (col + n_q_points_1d * (z + n_q_points_1d * row));
+
+            if (add)
+              out[destination_idx] += t[z];
+            else
+              out[destination_idx] = t[z];
+          }
+      }
+#  elif TENSORCORE == 2
+    if (direction == 0)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int b_idx = dof_to_quad ?
+                                ((col + cycle * 4) * n_q_points_1d + row) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (col + cycle * 4 + n_q_points_1d * row) ^
+                                  get_base<n_q_points_1d>(row, 0);
+
+            auto b0 = shape_data[b_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int a_idx = (row * n_q_points_1d + col + cycle * 4 +
+                                   (z * 2 + warpId) * offset) ^
+                                  get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+                auto a0 = in_place ? out[a_idx] : in[a_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else if (direction == 1)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((col + cycle * 4) * n_q_points_1d + row +
+                   (z * 2 + warpId) * offset) ^
+                  get_base<n_q_points_1d>(col + cycle * 4, z * 2 + warpId);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((z * 2 + warpId) * n_q_points_1d + row +
+                   (col + cycle * 4) * offset) ^
+                  get_base<n_q_points_1d>(z * 2 + warpId, col + cycle * 4);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+#  else
+    const unsigned int row = threadIdx.y % n_q_points_1d;
     const unsigned int col = threadIdx.x;
 
-    Number t = 0;
-    for (unsigned int k = 0; k < n_q_points_1d; ++k)
+    Number t[n_dofs_z];
+
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
       {
-        const unsigned int shape_idx =
-          dof_to_quad ? (row + k * n_q_points_1d) : (k + row * n_q_points_1d);
-        const unsigned int source_idx =
-          (direction == 0) ? (k + n_q_points_1d * (col + n_q_points_1d * z)) :
-          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
-                             (col + n_q_points_1d * (z + n_q_points_1d * k));
-        t +=
-          shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
+        t[z] = 0;
+        for (unsigned int k = 0; k < n_q_points_1d; ++k)
+          {
+            const unsigned int shape_idx = dof_to_quad ?
+                                             (row + k * n_q_points_1d) :
+                                             (k + row * n_q_points_1d);
+            const unsigned int source_idx =
+              (direction == 0) ?
+                (k + n_q_points_1d * (col + n_q_points_1d * z)) :
+              (direction == 1) ?
+                (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                (col + n_q_points_1d * (z + n_q_points_1d * k));
+            t[z] += shape_data[shape_idx] *
+                    (in_place ? out[source_idx] : in[source_idx]);
+          }
       }
 
     if (in_place)
       __syncthreads();
 
-    const unsigned int destination_idx =
-      (direction == 0) ? (row + n_q_points_1d * (col + n_q_points_1d * z)) :
-      (direction == 1) ? (col + n_q_points_1d * (row + n_q_points_1d * z)) :
-                         (col + n_q_points_1d * (z + n_q_points_1d * row));
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
+      {
+        const unsigned int destination_idx =
+          (direction == 0) ? (row + n_q_points_1d * (col + n_q_points_1d * z)) :
+          (direction == 1) ? (col + n_q_points_1d * (row + n_q_points_1d * z)) :
+                             (col + n_q_points_1d * (z + n_q_points_1d * row));
 
-    if (add)
-      out[destination_idx] += t;
-    else
-      out[destination_idx] = t;
+        if (add)
+          out[destination_idx] += t[z];
+        else
+          out[destination_idx] = t[z];
+      }
+#  endif
 #endif
   }
 
@@ -394,31 +1017,25 @@ namespace PSMF
       {
         case 1:
           {
-            values<0, true, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<0, true, false, true>(shape_values, u, u);
 
             break;
           }
         case 2:
           {
-            values<0, true, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<0, true, false, true>(shape_values, u, u);
             __syncthreads();
-            values<1, true, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<1, true, false, true>(shape_values, u, u);
 
             break;
           }
         case 3:
           {
-            values<0, true, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<0, true, false, true>(shape_values, u, u);
             __syncthreads();
-            values<1, true, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<1, true, false, true>(shape_values, u, u);
             __syncthreads();
-            values<2, true, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<2, true, false, true>(shape_values, u, u);
 
             break;
           }
@@ -446,31 +1063,25 @@ namespace PSMF
       {
         case 1:
           {
-            values<0, false, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<0, false, false, true>(shape_values, u, u);
 
             break;
           }
         case 2:
           {
-            values<0, false, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<0, false, false, true>(shape_values, u, u);
             __syncthreads();
-            values<1, false, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<1, false, false, true>(shape_values, u, u);
 
             break;
           }
         case 3:
           {
-            values<0, false, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<0, false, false, true>(shape_values, u, u);
             __syncthreads();
-            values<1, false, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<1, false, false, true>(shape_values, u, u);
             __syncthreads();
-            values<2, false, false, true>(
-              get_cell_shape_values<Number>(mf_object_id), u, u);
+            values<2, false, false, true>(shape_values, u, u);
 
             break;
           }
@@ -738,10 +1349,7 @@ namespace PSMF
             gradients<0, false, false, true>(shape_gradients,
                                              grad_u[0],
                                              grad_u[0]);
-            values<0, false, false, true>(get_cell_shape_values<Number>(
-                                            mf_object_id),
-                                          grad_u[1],
-                                          grad_u[1]);
+            values<0, false, false, true>(shape_values, grad_u[1], grad_u[1]);
 
             __syncthreads();
 
@@ -881,6 +1489,8 @@ namespace PSMF
     static constexpr unsigned int dofs_per_cell =
       dealii::Utilities::pow(fe_degree + 1, dim);
 
+    static constexpr unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
     __device__
     EvaluatorTensorProduct(int mf_object_id,
                            int face_number,
@@ -1019,77 +1629,632 @@ namespace PSMF
     apply(Number shape_data[], const Number *in, Number *out) const
   {
 #ifdef CONFLICTFREE
+#  if TENSORCORE == 2
+    if (direction == 0)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int b_idx = dof_to_quad ?
+                                ((col + cycle * 4) * n_q_points_1d + row) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (col + cycle * 4 + n_q_points_1d * row) ^
+                                  get_base<n_q_points_1d>(row, 0);
+
+            auto b0 = shape_data[b_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int a_idx = (row * n_q_points_1d + col + cycle * 4 +
+                                   (z * 2 + warpId) * offset) ^
+                                  get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+                auto a0 = in_place ? out[a_idx] : in[a_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else if (direction == 1)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((col + cycle * 4) * n_q_points_1d + row +
+                   (z * 2 + warpId) * offset) ^
+                  get_base<n_q_points_1d>(col + cycle * 4, z * 2 + warpId);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((z * 2 + warpId) * n_q_points_1d + row +
+                   (col + cycle * 4) * offset) ^
+                  get_base<n_q_points_1d>(z * 2 + warpId, col + cycle * 4);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+#  else
     constexpr unsigned int multiple = calculate_multiple<n_q_points_1d, 16>();
 
-    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
-    const unsigned int row =
-      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+    const unsigned int row = threadIdx.y % n_q_points_1d;
     const unsigned int col = threadIdx.x;
 
-    Number t = 0;
-    for (unsigned int k = 0; k < n_q_points_1d; ++k)
+    Number t[n_dofs_z];
+
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
       {
-        const unsigned int shape_idx =
-          dof_to_quad ?
-            ((direction == 0) ?
-               (col + ((k + col / multiple) % n_q_points_1d) * n_q_points_1d) :
-             (direction == 1) ? (row + k * n_q_points_1d) :
-                                (z + k * n_q_points_1d)) :
-            ((direction == 0) ?
-               ((k + col / multiple) % n_q_points_1d + col * n_q_points_1d) :
-             (direction == 1) ? (k + row * n_q_points_1d) :
-                                (k + z * n_q_points_1d));
-        const unsigned int source_idx =
-          (direction == 0) ? ((k + col / multiple) % n_q_points_1d +
-                              n_q_points_1d * (row + n_q_points_1d * z)) :
-          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
-                             (col + n_q_points_1d * (row + n_q_points_1d * k));
-        t +=
-          shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
+        t[z] = 0;
+        for (unsigned int k = 0; k < n_q_points_1d; ++k)
+          {
+            const unsigned int shape_idx =
+              dof_to_quad ?
+                ((direction == 0) ?
+                   (col +
+                    ((k + col / multiple) % n_q_points_1d) * n_q_points_1d) :
+                 (direction == 1) ? (row + k * n_q_points_1d) :
+                                    (z + k * n_q_points_1d)) :
+                ((direction == 0) ? ((k + col / multiple) % n_q_points_1d +
+                                     col * n_q_points_1d) :
+                 (direction == 1) ? (k + row * n_q_points_1d) :
+                                    (k + z * n_q_points_1d));
+            const unsigned int source_idx =
+              (direction == 0) ?
+                ((k + col / multiple) % n_q_points_1d +
+                 n_q_points_1d * (row + n_q_points_1d * z)) :
+              (direction == 1) ?
+                (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                (col + n_q_points_1d * (row + n_q_points_1d * k));
+            t[z] += shape_data[shape_idx] *
+                    (in_place ? out[source_idx] : in[source_idx]);
+          }
       }
 
     if (in_place)
       __syncthreads();
 
-    const unsigned int destination_idx =
-      col + n_q_points_1d * (row + n_q_points_1d * z);
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
+      {
+        const unsigned int destination_idx =
+          col + n_q_points_1d * (row + n_q_points_1d * z);
 
-    if (add)
-      out[destination_idx] += t;
-    else
-      out[destination_idx] = t;
-
+        if (add)
+          out[destination_idx] += t[z];
+        else
+          out[destination_idx] = t[z];
+      }
+#  endif
 #else
-    const unsigned int z = dim == 3 ? threadIdx.z % n_q_points_1d : threadIdx.z;
-    const unsigned int row =
-      dim == 2 ? threadIdx.y % n_q_points_1d : threadIdx.y;
+#  if TENSORCORE == 1
+    if (direction == 0)
+      {
+        const int warpId = (threadIdx.x + threadIdx.y * n_q_points_1d) / 32;
+
+        wmma::fragment<
+          wmma::matrix_a,
+          8,
+          8,
+          4,
+          double,
+          std::conditional_t<dof_to_quad, wmma::col_major, wmma::row_major>>
+                                                                         a_frag;
+        wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::col_major> b_frag;
+        wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+          c_frag[n_q_points_1d / 2];
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          if (add)
+            wmma::load_matrix_sync(c_frag[z],
+                                   &out[(z * 2 + warpId) * 8 * 8],
+                                   8,
+                                   wmma::mem_col_major);
+          else
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+        if (add)
+          __syncthreads();
+
+        auto vec = in_place ? out : in;
+        for (int i = 0; i < 2; ++i)
+          {
+            if (dof_to_quad)
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4 * 8], 8);
+            else
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4], 8);
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                wmma::load_matrix_sync(b_frag,
+                                       &vec[(z * 2 + warpId) * 8 * 8 + i * 4],
+                                       8);
+
+                wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          wmma::store_matrix_sync(&out[(z * 2 + warpId) * 8 * 8],
+                                  c_frag[z],
+                                  8,
+                                  wmma::mem_col_major);
+      }
+    else if (direction == 1)
+      {
+        const int warpId = (threadIdx.x + threadIdx.y * n_q_points_1d) / 32;
+
+        wmma::fragment<
+          wmma::matrix_a,
+          8,
+          8,
+          4,
+          double,
+          std::conditional_t<dof_to_quad, wmma::col_major, wmma::row_major>>
+                                                                         a_frag;
+        wmma::fragment<wmma::matrix_b, 8, 8, 4, double, wmma::row_major> b_frag;
+        wmma::fragment<wmma::accumulator, 8, 8, 4, double>
+          c_frag[n_q_points_1d / 2];
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          if (add)
+            wmma::load_matrix_sync(c_frag[z],
+                                   &out[(z * 2 + warpId) * 8 * 8],
+                                   8,
+                                   wmma::mem_row_major);
+          else
+            wmma::fill_fragment(c_frag[z], 0.0f);
+
+        if (add)
+          __syncthreads();
+
+        auto vec = in_place ? out : in;
+        for (int i = 0; i < 2; ++i)
+          {
+            if (dof_to_quad)
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4 * 8], 8);
+            else
+              wmma::load_matrix_sync(a_frag, &shape_data[i * 4], 8);
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                wmma::load_matrix_sync(
+                  b_frag, &vec[(z * 2 + warpId) * 8 * 8 + i * 4 * 8], 8);
+
+                wmma::mma_sync(c_frag[z], a_frag, b_frag, c_frag[z]);
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          wmma::store_matrix_sync(&out[(z * 2 + warpId) * 8 * 8],
+                                  c_frag[z],
+                                  8,
+                                  wmma::mem_row_major);
+      }
+    else
+      {
+        const unsigned int row = threadIdx.y % n_q_points_1d;
+        const unsigned int col = threadIdx.x;
+
+        Number t[n_dofs_z];
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            t[z] = 0;
+            for (unsigned int k = 0; k < n_q_points_1d; ++k)
+              {
+                const unsigned int shape_idx = dof_to_quad ?
+                                                 (row + k * n_q_points_1d) :
+                                                 (k + row * n_q_points_1d);
+                const unsigned int source_idx =
+                  (direction == 0) ?
+                    (k + n_q_points_1d * (col + n_q_points_1d * z)) :
+                  (direction == 1) ?
+                    (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                    (col + n_q_points_1d * (z + n_q_points_1d * k));
+                t[z] += shape_data[shape_idx] *
+                        (in_place ? out[source_idx] : in[source_idx]);
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int destination_idx =
+              (direction == 0) ?
+                (row + n_q_points_1d * (col + n_q_points_1d * z)) :
+              (direction == 1) ?
+                (col + n_q_points_1d * (row + n_q_points_1d * z)) :
+                (col + n_q_points_1d * (z + n_q_points_1d * row));
+
+            if (add)
+              out[destination_idx] += t[z];
+            else
+              out[destination_idx] = t[z];
+          }
+      }
+#  elif TENSORCORE == 2
+    if (direction == 0)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int b_idx = dof_to_quad ?
+                                ((col + cycle * 4) * n_q_points_1d + row) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (col + cycle * 4 + n_q_points_1d * row) ^
+                                  get_base<n_q_points_1d>(row, 0);
+
+            auto b0 = shape_data[b_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int a_idx = (row * n_q_points_1d + col + cycle * 4 +
+                                   (z * 2 + warpId) * offset) ^
+                                  get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+                auto a0 = in_place ? out[a_idx] : in[a_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else if (direction == 1)
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((col + cycle * 4) * n_q_points_1d + row +
+                   (z * 2 + warpId) * offset) ^
+                  get_base<n_q_points_1d>(col + cycle * 4, z * 2 + warpId);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              (row * n_q_points_1d + 2 * col + (z * 2 + warpId) * offset) ^
+              get_base<n_q_points_1d>(row, z * 2 + warpId);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+    else
+      {
+        const int tid    = (threadIdx.y * 8 + threadIdx.x) & 31;
+        const int warpId = threadIdx.y / 4;
+
+        const int row = tid / 4;
+        const int col = tid & 3;
+
+        constexpr int offset = n_q_points_1d * n_q_points_1d;
+
+        double2 c[n_q_points_1d / 2];
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            if constexpr (add)
+              c[z] = *((double2 *)(out + c_idx));
+            else
+              c[z] = {0, 0};
+          }
+
+        if (add)
+          __syncthreads();
+
+        for (int cycle = 0; cycle < 2; ++cycle)
+          {
+            const int a_idx = dof_to_quad ?
+                                (row + n_q_points_1d * (col + cycle * 4)) ^
+                                  get_base<n_q_points_1d>(col + cycle * 4, 0) :
+                                (row * n_q_points_1d + col + cycle * 4) ^
+                                  get_base<n_q_points_1d>(row, 0);
+            auto      a0    = shape_data[a_idx];
+
+            for (int z = 0; z < n_q_points_1d / 2; ++z)
+              {
+                const int b_idx =
+                  ((z * 2 + warpId) * n_q_points_1d + row +
+                   (col + cycle * 4) * offset) ^
+                  get_base<n_q_points_1d>(z * 2 + warpId, col + cycle * 4);
+
+                auto b0 = in_place ? out[b_idx] : in[b_idx];
+
+                asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+                             "{%0,%1}, {%2}, {%3}, {%4,%5};\n"
+                             : "=d"(c[z].x), "=d"(c[z].y)
+                             : "d"(a0), "d"(b0), "d"(c[z].x), "d"(c[z].y));
+              }
+          }
+
+        if (in_place)
+          __syncthreads();
+
+        for (int z = 0; z < n_q_points_1d / 2; ++z)
+          {
+            const int c_idx =
+              ((z * 2 + warpId) * n_q_points_1d + 2 * col + row * offset) ^
+              get_base<n_q_points_1d>(z * 2 + warpId, row);
+
+            *((double2 *)(out + c_idx)) = c[z];
+          }
+      }
+#  else
+    const unsigned int row = threadIdx.y % n_q_points_1d;
     const unsigned int col = threadIdx.x;
 
-    Number t = 0;
-    for (unsigned int k = 0; k < n_q_points_1d; ++k)
+    Number t[n_dofs_z];
+
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
       {
-        const unsigned int shape_idx =
-          dof_to_quad ? (row + k * n_q_points_1d) : (k + row * n_q_points_1d);
-        const unsigned int source_idx =
-          (direction == 0) ? (k + n_q_points_1d * (col + n_q_points_1d * z)) :
-          (direction == 1) ? (col + n_q_points_1d * (k + n_q_points_1d * z)) :
-                             (col + n_q_points_1d * (z + n_q_points_1d * k));
-        t +=
-          shape_data[shape_idx] * (in_place ? out[source_idx] : in[source_idx]);
+        t[z] = 0;
+        for (unsigned int k = 0; k < n_q_points_1d; ++k)
+          {
+            const unsigned int shape_idx = dof_to_quad ?
+                                             (row + k * n_q_points_1d) :
+                                             (k + row * n_q_points_1d);
+            const unsigned int source_idx =
+              (direction == 0) ?
+                (k + n_q_points_1d * (col + n_q_points_1d * z)) :
+              (direction == 1) ?
+                (col + n_q_points_1d * (k + n_q_points_1d * z)) :
+                (col + n_q_points_1d * (z + n_q_points_1d * k));
+            t[z] += shape_data[shape_idx] *
+                    (in_place ? out[source_idx] : in[source_idx]);
+          }
       }
 
     if (in_place)
       __syncthreads();
 
-    const unsigned int destination_idx =
-      (direction == 0) ? (row + n_q_points_1d * (col + n_q_points_1d * z)) :
-      (direction == 1) ? (col + n_q_points_1d * (row + n_q_points_1d * z)) :
-                         (col + n_q_points_1d * (z + n_q_points_1d * row));
+    for (unsigned int z = 0; z < n_dofs_z; ++z)
+      {
+        const unsigned int destination_idx =
+          (direction == 0) ? (row + n_q_points_1d * (col + n_q_points_1d * z)) :
+          (direction == 1) ? (col + n_q_points_1d * (row + n_q_points_1d * z)) :
+                             (col + n_q_points_1d * (z + n_q_points_1d * row));
 
-    if (add)
-      out[destination_idx] += t;
-    else
-      out[destination_idx] = t;
+        if (add)
+          out[destination_idx] += t[z];
+        else
+          out[destination_idx] = t[z];
+      }
+#  endif
 #endif
   }
 

@@ -17,6 +17,7 @@
 #include "cuda_fe_evaluation.cuh"
 #include "cuda_matrix_free.cuh"
 #include "patch_base.cuh"
+#include <cuda/std/array>
 
 using namespace dealii;
 
@@ -485,6 +486,9 @@ namespace PSMF
     static const unsigned int cells_per_block =
       PSMF::cells_per_block_shmem(dim, fe_degree);
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalLaplaceOperator()
     {}
@@ -499,18 +503,23 @@ namespace PSMF
       PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
         cell, gpu_data, shared_data);
 
-      Number my_diagonal = 0.0;
+      value_type my_diagonal = {};
 
       const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int i = 0; i < n_local_dofs; ++i)
-        {
-          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
-          fe_eval.evaluate(false, true);
-          fe_eval.submit_gradient(fe_eval.get_gradient());
-          fe_eval.integrate(false, true);
-          if (tid == i)
-            my_diagonal = fe_eval.get_value();
-        }
+      for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z; ++i)
+          {
+            value_type diag = {};
+            diag[z]         = i == tid ? 1.0 : 0.0;
+            fe_eval.submit_dof_value(diag);
+            fe_eval.evaluate(false, true);
+            fe_eval.submit_gradient(fe_eval.get_gradient());
+            fe_eval.integrate(false, true);
+            auto out = fe_eval.get_value();
+            if (tid == i)
+              my_diagonal[z] = out[z];
+          }
+
       fe_eval.submit_dof_value(my_diagonal);
       fe_eval.distribute_local_to_global(dst);
     }
@@ -540,20 +549,21 @@ namespace PSMF
                const Number                                       *src,
                Number                                             *dst) const
     {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-      fe_eval.read_dof_values(src);
-      fe_eval.evaluate_hessian();
-
-      auto trace = fe_eval.get_trace_hessian();
-      auto h_k   = fe_eval.inv_jac[0];
-      auto t     = h_k * trace;
-
-      fe_eval.submit_value(t * t * 2);
-
-      auto val = fe_eval.get_value();
-
-      atomicAdd(&dst[cell], val);
+      printf("Laplace Estimator Not Implemented.\n");
+      // PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
+      //   cell, gpu_data, shared_data);
+      // fe_eval.read_dof_values(src);
+      // fe_eval.evaluate_hessian();
+      //
+      // auto trace = fe_eval.get_trace_hessian();
+      // auto h_k   = fe_eval.inv_jac[0];
+      // auto t     = h_k * trace;
+      //
+      // fe_eval.submit_value(t * t * 2);
+      //
+      // auto val = fe_eval.get_value();
+      //
+      // atomicAdd(&dst[cell], val);
     }
   };
 
@@ -569,6 +579,9 @@ namespace PSMF
 
     static const unsigned int cells_per_block = 1;
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalLaplaceBDOperator()
     {}
@@ -596,10 +609,17 @@ namespace PSMF
 
       auto u_inner                 = fe_eval.get_value();
       auto normal_derivative_inner = fe_eval.get_normal_derivative();
-      auto test_by_value = 2 * u_inner * sigma - normal_derivative_inner;
+
+      value_type test_by_value;
+      for (unsigned int i = 0; i < n_dofs_z; ++i)
+        {
+          test_by_value[i] =
+            2 * u_inner[i] * sigma - normal_derivative_inner[i];
+          u_inner[i] = -u_inner[i];
+        }
 
       fe_eval.submit_value(test_by_value);
-      fe_eval.submit_normal_derivative(-u_inner);
+      fe_eval.submit_normal_derivative(u_inner);
 
       fe_eval.integrate(true, true);
       fe_eval.distribute_local_to_global(dst);
@@ -618,6 +638,9 @@ namespace PSMF
 
     static const unsigned int cells_per_block = 1;
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalLaplaceBDOperator()
     {}
@@ -638,29 +661,41 @@ namespace PSMF
       PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
         face, gpu_data, shared_data, true);
 
-      Number my_diagonal = 0.0;
+      value_type my_diagonal;
 
       const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int i = 0; i < n_local_dofs; ++i)
-        {
-          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
-          fe_eval.evaluate(true, true);
+      for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z; ++i)
+          {
+            value_type diag = {};
+            diag[z]         = i == tid ? 1.0 : 0.0;
 
-          auto hi    = fabs(fe_eval.inverse_length_normal_to_face());
-          auto sigma = hi * get_penalty_factor();
+            fe_eval.submit_dof_value(diag);
+            fe_eval.evaluate(true, true);
 
-          auto u_inner                 = fe_eval.get_value();
-          auto normal_derivative_inner = fe_eval.get_normal_derivative();
-          auto test_by_value = 2 * u_inner * sigma - normal_derivative_inner;
+            auto hi    = fabs(fe_eval.inverse_length_normal_to_face());
+            auto sigma = hi * get_penalty_factor();
 
-          fe_eval.submit_value(test_by_value);
-          fe_eval.submit_normal_derivative(-u_inner);
+            auto u_inner                 = fe_eval.get_value();
+            auto normal_derivative_inner = fe_eval.get_normal_derivative();
 
-          fe_eval.integrate(true, true);
+            value_type test_by_value;
+            for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
+              {
+                test_by_value[ii] =
+                  2 * u_inner[ii] * sigma - normal_derivative_inner[ii];
+                u_inner[ii] = -u_inner[ii];
+              }
 
-          if (tid == i)
-            my_diagonal = fe_eval.get_value();
-        }
+            fe_eval.submit_value(test_by_value);
+            fe_eval.submit_normal_derivative(u_inner);
+
+            fe_eval.integrate(true, true);
+
+            auto out = fe_eval.get_value();
+            if (tid == i)
+              my_diagonal[z] = out[z];
+          }
       fe_eval.submit_dof_value(my_diagonal);
       fe_eval.distribute_local_to_global(dst);
     }
@@ -680,6 +715,9 @@ namespace PSMF
 
     static const unsigned int cells_per_block = 1;
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalLaplaceFaceOperator()
     {}
@@ -712,18 +750,30 @@ namespace PSMF
                        fabs(phi_outer.inverse_length_normal_to_face()));
       auto sigma = hi * get_penalty_factor();
 
-      auto solution_jump = phi_inner.get_value() - phi_outer.get_value();
-      auto average_normal_derivative =
-        0.5 *
-        (phi_inner.get_normal_derivative() + phi_outer.get_normal_derivative());
-      auto test_by_value = solution_jump * sigma - average_normal_derivative;
+      value_type solution_jump;
+      value_type test_by_value;
+      value_type test_by_value1;
 
+      auto u_inner = phi_inner.get_value();
+      auto u_outer = phi_outer.get_value();
+      auto n_inner = phi_inner.get_normal_derivative();
+      auto n_outer = phi_outer.get_normal_derivative();
+
+      for (unsigned int i = 0; i < n_dofs_z; ++i)
+        {
+          solution_jump[i]               = u_inner[i] - u_outer[i];
+          auto average_normal_derivative = 0.5 * (n_inner[i] + n_outer[i]);
+          test_by_value[i] =
+            solution_jump[i] * sigma - average_normal_derivative;
+          test_by_value1[i] = -test_by_value[i];
+          solution_jump[i]  = -solution_jump[i] * 0.5;
+        }
 
       phi_inner.submit_value(test_by_value);
-      phi_outer.submit_value(-test_by_value);
+      phi_outer.submit_value(test_by_value1);
 
-      phi_inner.submit_normal_derivative(-solution_jump * 0.5);
-      phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+      phi_inner.submit_normal_derivative(solution_jump);
+      phi_outer.submit_normal_derivative(solution_jump);
 
       phi_inner.integrate(true, true);
       phi_inner.distribute_local_to_global(dst);
@@ -747,6 +797,9 @@ namespace PSMF
 
     static const unsigned int cells_per_block = 1;
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalLaplaceFaceOperator()
     {}
@@ -773,51 +826,71 @@ namespace PSMF
                        fabs(phi_outer.inverse_length_normal_to_face()));
       auto sigma = hi * get_penalty_factor();
 
-      Number my_diagonal = 0.0;
+      value_type my_diagonal;
 
       const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-        {
-          phi_inner.submit_dof_value(i == tid ? 1.0 : 0.0);
-          phi_inner.evaluate(true, true);
+      for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+          {
+            value_type diag = {};
+            diag[z]         = i == tid ? 1.0 : 0.0;
 
-          auto solution_jump = phi_inner.get_value();
-          auto average_normal_derivative =
-            0.5 * phi_inner.get_normal_derivative();
-          auto test_by_value =
-            solution_jump * sigma - average_normal_derivative;
+            phi_inner.submit_dof_value(diag);
+            phi_inner.evaluate(true, true);
 
-          phi_inner.submit_value(test_by_value);
-          phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+            auto solution_jump             = phi_inner.get_value();
+            auto average_normal_derivative = phi_inner.get_normal_derivative();
 
-          phi_inner.integrate(true, true);
+            value_type test_by_value;
+            for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
+              {
+                test_by_value[ii] = solution_jump[ii] * sigma -
+                                    0.5 * average_normal_derivative[ii];
+                solution_jump[ii] = -solution_jump[ii] * 0.5;
+              }
 
-          if (tid == i)
-            my_diagonal = phi_inner.get_value();
-        }
+            phi_inner.submit_value(test_by_value);
+            phi_inner.submit_normal_derivative(solution_jump);
+
+            phi_inner.integrate(true, true);
+
+            auto out = phi_inner.get_value();
+            if (tid == i)
+              my_diagonal[z] = out[z];
+          }
 
       phi_inner.submit_dof_value(my_diagonal);
       phi_inner.distribute_local_to_global(dst);
 
-      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-        {
-          phi_outer.submit_dof_value(i == tid ? 1.0 : 0.0);
-          phi_outer.evaluate(true, true);
+      for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+          {
+            value_type diag = {};
+            diag[z]         = i == tid ? 1.0 : 0.0;
 
-          auto solution_jump = -phi_outer.get_value();
-          auto average_normal_derivative =
-            0.5 * phi_outer.get_normal_derivative();
-          auto test_by_value =
-            solution_jump * sigma - average_normal_derivative;
+            phi_outer.submit_dof_value(diag);
+            phi_outer.evaluate(true, true);
 
-          phi_outer.submit_value(-test_by_value);
-          phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+            auto solution_jump             = phi_outer.get_value();
+            auto average_normal_derivative = phi_outer.get_normal_derivative();
 
-          phi_outer.integrate(true, true);
+            value_type test_by_value;
+            for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
+              {
+                test_by_value[ii] = solution_jump[ii] * sigma +
+                                    0.5 * average_normal_derivative[ii];
+                solution_jump[ii] = solution_jump[ii] * 0.5;
+              }
 
-          if (tid == i)
-            my_diagonal = phi_outer.get_value();
-        }
+            phi_outer.submit_value(test_by_value);
+            phi_outer.submit_normal_derivative(solution_jump);
+
+            phi_outer.integrate(true, true);
+
+            auto out = phi_outer.get_value();
+            if (tid == i)
+              my_diagonal[z] = out[z];
+          }
 
       phi_outer.submit_dof_value(my_diagonal);
       phi_outer.distribute_local_to_global(dst);
@@ -839,6 +912,9 @@ namespace PSMF
     static const unsigned int cells_per_block =
       PSMF::cells_per_block_shmem(dim, fe_degree);
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalCellFaceOperator()
     {}
@@ -860,13 +936,13 @@ namespace PSMF
         cell, gpu_data, shared_data);
 
       fe_eval.read_dof_values(src);
-      Number dof_value_in = fe_eval.get_dof_value();
+      value_type dof_value_in = fe_eval.get_dof_value();
 
       fe_eval.evaluate(false, true);
       fe_eval.submit_gradient(fe_eval.get_gradient());
       fe_eval.integrate(false, true);
 
-      Number dof_value_out = fe_eval.get_dof_value();
+      value_type dof_value_out = fe_eval.get_dof_value();
 
       gpu_data->n_cells = gpu_data->n_faces;
       // face loop
@@ -896,19 +972,30 @@ namespace PSMF
                            fabs(phi_outer.inverse_length_normal_to_face()));
           auto sigma = hi * get_penalty_factor();
 
-          auto solution_jump =
-            phi_inner.get_value() - phi_outer.get_value() * coe;
-          auto average_normal_derivative =
-            0.5 * (phi_inner.get_normal_derivative() +
-                   phi_outer.get_normal_derivative() * coe);
-          auto test_by_value =
-            solution_jump * sigma - average_normal_derivative;
+          value_type solution_jump;
+          value_type test_by_value;
+
+          auto u_inner = phi_inner.get_value();
+          auto u_outer = phi_outer.get_value();
+          auto n_inner = phi_inner.get_normal_derivative();
+          auto n_outer = phi_outer.get_normal_derivative();
+          for (unsigned int i = 0; i < n_dofs_z; ++i)
+            {
+              solution_jump[i] = u_inner[i] - u_outer[i] * coe;
+              auto average_normal_derivative =
+                0.5 * (n_inner[i] + n_outer[i] * coe);
+              test_by_value[i] =
+                solution_jump[i] * sigma - average_normal_derivative;
+              solution_jump[i] = -solution_jump[i] * 0.5;
+            }
 
           phi_inner.submit_value(test_by_value);
-          phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+          phi_inner.submit_normal_derivative(solution_jump);
 
           phi_inner.integrate(true, true);
-          dof_value_out += phi_inner.get_dof_value();
+          auto out = phi_inner.get_dof_value();
+          for (unsigned int i = 0; i < n_dofs_z; ++i)
+            dof_value_out[i] += out[i];
         }
 
       fe_eval.submit_dof_value(dof_value_out);
@@ -931,6 +1018,9 @@ namespace PSMF
     static const unsigned int cells_per_block =
       PSMF::cells_per_block_shmem(dim, fe_degree);
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalCellFaceOperator()
     {}
@@ -951,18 +1041,22 @@ namespace PSMF
       PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
         cell, gpu_data, shared_data);
 
-      Number my_diagonal = 0.0;
+      value_type my_diagonal;
 
       const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-        {
-          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
-          fe_eval.evaluate(false, true);
-          fe_eval.submit_gradient(fe_eval.get_gradient());
-          fe_eval.integrate(false, true);
-          if (tid == i)
-            my_diagonal = fe_eval.get_value();
-        }
+      for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+          {
+            value_type diag = {};
+            diag[z]         = i == tid ? 1.0 : 0.0;
+            fe_eval.submit_dof_value(diag);
+            fe_eval.evaluate(false, true);
+            fe_eval.submit_gradient(fe_eval.get_gradient());
+            fe_eval.integrate(false, true);
+            auto out = fe_eval.get_value();
+            if (tid == i)
+              my_diagonal[z] = out[z];
+          }
 
       gpu_data->n_cells = gpu_data->n_faces;
       // face loop
@@ -972,6 +1066,8 @@ namespace PSMF
             gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
           dealii::types::global_dof_index face1 =
             gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
+
+          Number coe = face == face1 ? 2. : 1.;
 
           gpu_data->n_faces = gpu_data->n_inner_faces;
 
@@ -984,25 +1080,37 @@ namespace PSMF
                            fabs(phi_outer.inverse_length_normal_to_face()));
           auto sigma = hi * get_penalty_factor();
 
-          for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-            {
-              phi_inner.submit_dof_value(i == tid ? 1.0 : 0.0);
-              phi_inner.evaluate(true, true);
+          for (unsigned int z = 0; z < n_dofs_z; ++z)
+            for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+              {
+                value_type diag = {};
+                diag[z]         = i == tid ? 1.0 : 0.0;
 
-              auto solution_jump = phi_inner.get_value();
-              auto average_normal_derivative =
-                0.5 * phi_inner.get_normal_derivative();
-              auto test_by_value =
-                solution_jump * sigma - average_normal_derivative;
+                phi_inner.submit_dof_value(diag);
+                phi_inner.evaluate(true, true);
 
-              phi_inner.submit_value(test_by_value);
-              phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+                auto solution_jump = phi_inner.get_value();
+                auto average_normal_derivative =
+                  phi_inner.get_normal_derivative();
 
-              phi_inner.integrate(true, true);
+                value_type test_by_value;
+                for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
+                  {
+                    test_by_value[ii] =
+                      solution_jump[ii] * sigma * coe -
+                      0.5 * average_normal_derivative[ii] * coe;
+                    solution_jump[ii] = -solution_jump[ii] * 0.5 * coe;
+                  }
 
-              if (tid == i)
-                my_diagonal += phi_inner.get_value();
-            }
+                phi_inner.submit_value(test_by_value);
+                phi_inner.submit_normal_derivative(solution_jump);
+
+                phi_inner.integrate(true, true);
+
+                auto out = phi_inner.get_value();
+                if (tid == i)
+                  my_diagonal[z] += out[z];
+              }
         }
 
       fe_eval.submit_dof_value(my_diagonal);
@@ -1023,6 +1131,10 @@ namespace PSMF
       Utilities::pow(fe_degree + 1, dim) * 2;
 
     static const unsigned int cells_per_block = 1;
+
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalCellFacePartialOperator()
     {
@@ -1048,13 +1160,13 @@ namespace PSMF
         cell, gpu_data, shared_data);
 
       fe_eval.read_dof_values(src);
-      Number dof_value_in = fe_eval.get_dof_value();
+      value_type dof_value_in = fe_eval.get_dof_value();
 
       fe_eval.evaluate(false, true);
       fe_eval.submit_gradient(fe_eval.get_gradient());
       fe_eval.integrate(false, true);
 
-      Number dof_value_out = fe_eval.get_dof_value();
+      value_type dof_value_out = fe_eval.get_dof_value();
 
       gpu_data->n_cells = gpu_data->n_faces;
       // face loop
@@ -1087,21 +1199,34 @@ namespace PSMF
                            fabs(phi_outer.inverse_length_normal_to_face()));
           auto sigma = hi * get_penalty_factor();
 
-          auto solution_jump =
-            phi_inner.get_value() - phi_outer.get_value() * coe;
-          auto average_normal_derivative =
-            0.5 * (phi_inner.get_normal_derivative() +
-                   phi_outer.get_normal_derivative() * coe);
-          auto test_by_value =
-            solution_jump * sigma - average_normal_derivative;
+          value_type solution_jump;
+          value_type test_by_value;
+          value_type test_by_value1;
+
+          auto u_inner = phi_inner.get_value();
+          auto u_outer = phi_outer.get_value();
+          auto n_inner = phi_inner.get_normal_derivative();
+          auto n_outer = phi_outer.get_normal_derivative();
+          for (unsigned int i = 0; i < n_dofs_z; ++i)
+            {
+              solution_jump[i] = u_inner[i] - u_outer[i] * coe;
+              auto average_normal_derivative =
+                0.5 * (n_inner[i] + n_outer[i] * coe);
+              test_by_value[i] =
+                solution_jump[i] * sigma - average_normal_derivative;
+              test_by_value1[i] = -test_by_value[i];
+              solution_jump[i]  = -solution_jump[i] * 0.5;
+            }
 
           phi_inner.submit_value(test_by_value);
-          phi_outer.submit_value(-test_by_value);
-          phi_inner.submit_normal_derivative(-solution_jump * 0.5);
-          phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+          phi_outer.submit_value(test_by_value1);
+          phi_inner.submit_normal_derivative(solution_jump);
+          phi_outer.submit_normal_derivative(solution_jump);
 
           phi_inner.integrate(true, true);
-          dof_value_out += phi_inner.get_dof_value();
+          auto out = phi_inner.get_dof_value();
+          for (unsigned int i = 0; i < n_dofs_z; ++i)
+            dof_value_out[i] += out[i];
 
           if (face == face1)
             continue;
@@ -1129,6 +1254,10 @@ namespace PSMF
 
     static const unsigned int cells_per_block = 1;
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
+
     LocalCellFacePartialOperator()
     {
       static_assert(
@@ -1152,24 +1281,28 @@ namespace PSMF
       PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
         cell, gpu_data, shared_data);
 
-      Number my_diagonal = 0.0;
+      value_type my_diagonal;
 
       const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-        {
-          fe_eval.submit_dof_value(i == tid ? 1.0 : 0.0);
-          fe_eval.evaluate(false, true);
-          fe_eval.submit_gradient(fe_eval.get_gradient());
-          fe_eval.integrate(false, true);
-          if (tid == i)
-            my_diagonal = fe_eval.get_value();
-        }
+      for (unsigned int z = 0; z < n_dofs_z; ++z)
+        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+          {
+            value_type diag = {};
+            diag[z]         = i == tid ? 1.0 : 0.0;
+            fe_eval.submit_dof_value(diag);
+            fe_eval.evaluate(false, true);
+            fe_eval.submit_gradient(fe_eval.get_gradient());
+            fe_eval.integrate(false, true);
+            auto out = fe_eval.get_value();
+            if (tid == i)
+              my_diagonal[z] = out[z];
+          }
 
       gpu_data->n_cells = gpu_data->n_faces;
       // face loop
       for (unsigned int f = 0; f < n_faces; ++f)
         {
-          Number my_diagonal1 = 0.0;
+          value_type my_diagonal1;
 
           dealii::types::global_dof_index face =
             gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
@@ -1179,7 +1312,7 @@ namespace PSMF
           if (face + face1 == 0)
             continue;
 
-          Number coe = face == face1 ? -1 : 1;
+          Number coe = face == face1 ? 2 : 1;
 
           gpu_data->n_faces = gpu_data->n_inner_faces;
 
@@ -1192,45 +1325,72 @@ namespace PSMF
                            fabs(phi_outer.inverse_length_normal_to_face()));
           auto sigma = hi * get_penalty_factor();
 
-          for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-            {
-              phi_inner.submit_dof_value(i == tid ? 1.0 : 0.0);
-              phi_inner.evaluate(true, true);
+          for (unsigned int z = 0; z < n_dofs_z; ++z)
+            for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+              {
+                value_type diag = {};
+                diag[z]         = i == tid ? 1.0 : 0.0;
 
-              auto solution_jump = phi_inner.get_value();
-              auto average_normal_derivative =
-                0.5 * phi_inner.get_normal_derivative();
-              auto test_by_value =
-                solution_jump * sigma - average_normal_derivative;
+                phi_inner.submit_dof_value(diag);
+                phi_inner.evaluate(true, true);
 
-              phi_inner.submit_value(test_by_value);
-              phi_inner.submit_normal_derivative(-solution_jump * 0.5);
+                auto solution_jump = phi_inner.get_value();
+                auto average_normal_derivative =
+                  phi_inner.get_normal_derivative();
 
-              phi_inner.integrate(true, true);
+                value_type test_by_value;
+                for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
+                  {
+                    test_by_value[ii] =
+                      solution_jump[ii] * sigma * coe -
+                      0.5 * average_normal_derivative[ii] * coe;
+                    solution_jump[ii] = -solution_jump[ii] * 0.5 * coe;
+                  }
 
-              if (tid == i)
-                my_diagonal += phi_inner.get_value();
-            }
+                phi_inner.submit_value(test_by_value);
+                phi_inner.submit_normal_derivative(solution_jump);
 
-          for (unsigned int i = 0; i < n_local_dofs / 2; ++i)
-            {
-              phi_outer.submit_dof_value(i == tid ? 1.0 : 0.0);
-              phi_outer.evaluate(true, true);
+                phi_inner.integrate(true, true);
 
-              auto solution_jump = -phi_outer.get_value();
-              auto average_normal_derivative =
-                0.5 * phi_outer.get_normal_derivative() * coe;
-              auto test_by_value =
-                solution_jump * sigma - average_normal_derivative;
+                auto out = phi_inner.get_value();
+                if (tid == i)
+                  my_diagonal[z] += out[z];
+              }
 
-              phi_outer.submit_value(-test_by_value);
-              phi_outer.submit_normal_derivative(-solution_jump * 0.5);
+          if (face == face1)
+            continue;
 
-              phi_outer.integrate(true, true);
+          for (unsigned int z = 0; z < n_dofs_z; ++z)
+            for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
+              {
+                value_type diag = {};
+                diag[z]         = i == tid ? 1.0 : 0.0;
 
-              if (tid == i)
-                my_diagonal1 = phi_outer.get_value();
-            }
+                phi_outer.submit_dof_value(diag);
+                phi_outer.evaluate(true, true);
+
+                auto solution_jump = phi_outer.get_value();
+                auto average_normal_derivative =
+                  phi_outer.get_normal_derivative();
+
+                value_type test_by_value;
+                for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
+                  {
+                    test_by_value[ii] =
+                      -(-solution_jump[ii] * sigma * coe -
+                        0.5 * average_normal_derivative[ii] * coe);
+                    solution_jump[ii] = solution_jump[ii] * 0.5 * coe;
+                  }
+
+                phi_outer.submit_value(test_by_value);
+                phi_outer.submit_normal_derivative(solution_jump);
+
+                phi_outer.integrate(true, true);
+
+                auto out = phi_outer.get_value();
+                if (tid == i)
+                  my_diagonal1[z] = out[z];
+              }
 
           phi_outer.submit_dof_value(my_diagonal1);
           phi_outer.distribute_local_to_global(dst);
@@ -1254,6 +1414,9 @@ namespace PSMF
     static const unsigned int cells_per_block =
       PSMF::cells_per_block_shmem(dim, fe_degree);
 
+    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
+
+    using value_type = cuda::std::array<Number, n_dofs_z>;
 
     LocalRHSOperator()
     {}
@@ -1269,28 +1432,38 @@ namespace PSMF
 
       PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
         cell, gpu_data, shared_data);
-      const auto point =
-        get_quadrature_point<dim, Number>(cell, gpu_data, n_dofs_1d);
 
       // Number val = dim * numbers::PI * numbers::PI;
       // for (unsigned int d = 0; d < dim; ++d)
       //   val *= sin(numbers::PI * point[d]);
 
-      Number val = 0;
-      if constexpr (dim == 2)
+      value_type val = {};
+      for (unsigned int i = 0; i < n_dofs_z; ++i)
         {
-          val += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
-                 exp(point[0]);
-          val += 2 * point[0] * (1 - point[0]) * exp(point[0]);
-        }
-      else if (dim == 3)
-        {
-          val += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
-                 point[2] * (1 - point[2]) * exp(point[0]);
-          val += 2 * point[0] * (1 - point[0]) * point[2] * (1 - point[2]) *
-                 exp(point[0]);
-          val += 2 * point[0] * (1 - point[0]) * point[1] * (1 - point[1]) *
-                 exp(point[0]);
+          const auto index =
+#if TENSORCORE == 2
+            (i * n_dofs_1d * n_dofs_1d + q_point_id_in_cell<dim, n_dofs_1d>()) ^
+            PSMF::get_base<n_dofs_1d>(threadIdx.y, i);
+#else
+            (i * n_dofs_1d * n_dofs_1d + q_point_id_in_cell<dim, n_dofs_1d>());
+#endif
+          const auto point =
+            get_quadrature_point<dim, Number, n_dofs_1d>(cell, gpu_data, index);
+          if constexpr (dim == 2)
+            {
+              val[i] += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
+                        exp(point[0]);
+              val[i] += 2 * point[0] * (1 - point[0]) * exp(point[0]);
+            }
+          else if (dim == 3)
+            {
+              val[i] += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
+                        point[2] * (1 - point[2]) * exp(point[0]);
+              val[i] += 2 * point[0] * (1 - point[0]) * point[2] *
+                        (1 - point[2]) * exp(point[0]);
+              val[i] += 2 * point[0] * (1 - point[0]) * point[1] *
+                        (1 - point[1]) * exp(point[0]);
+            }
         }
 
       fe_eval.submit_value(val);

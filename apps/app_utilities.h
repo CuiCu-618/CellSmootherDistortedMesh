@@ -137,12 +137,24 @@ namespace Util
     oss << n_mpi_procs << "prcs_";
     oss << n_coarse << "cell";
     oss << "_" << str_face_int_variant;
-    oss << str_laplace_variant;
-    oss << str_smooth_vmult_variant;
+#ifdef CONFLICTFREE
+    oss << "ConflictFree_";
+#else
+    oss << "Basic_";
+#endif
+    // oss << str_laplace_variant;
+    // oss << str_smooth_vmult_variant;
     oss << str_smooth_inv_variant;
     oss << str_granularity;
     oss << "_" << value_type;
     oss << "_" << CT::SETS_;
+    oss << "_MEM" << MEMORY_TYPE;
+    oss << "_K" << TENSORCORE;
+#ifdef UNIFORM_MESH
+    oss << "_uniform";
+#else
+    oss << "_non";
+#endif
     oss << "_Dis" << std::lround(CT::DISTORT_ * 100);
 
     return oss.str();
@@ -199,12 +211,22 @@ namespace Util
       oss << FaceIntegralToString(CT::FACE_INTEGRAL_TYPE_[k]) << " ";
     oss << std::endl;
     oss << "Laplace Variant:                ";
-    for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
-      oss << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " ";
+#ifdef CONFLICTFREE
+    oss << "ConflictFree" << " ";
+#else
+    oss << "Basic" << " ";
+#endif
+    // for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+    //   oss << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " ";
     oss << std::endl;
     oss << "Smoother Vmult Variant:         ";
-    for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
-      oss << LaplaceToString(CT::SMOOTH_VMULT_[k]) << " ";
+#ifdef CONFLICTFREE
+    oss << "ConflictFree" << " ";
+#else
+    oss << "Basic" << " ";
+#endif
+    // for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
+    //   oss << LaplaceToString(CT::SMOOTH_VMULT_[k]) << " ";
     oss << std::endl;
     oss << "Smoother Inverse Variant:       ";
     for (unsigned int k = 0; k < CT::SMOOTH_INV_.size(); ++k)
@@ -215,6 +237,31 @@ namespace Util
         << "Experiment set:                 " << CT::SETS_ << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
         << "Tolerance:                      " << CT::REDUCE_ << std::endl
+        << "Shape data storage:             " <<
+#if MEMORY_TYPE == 0
+      "Global memory"
+#elif MEMORY_TYPE == 1
+      "Constant memory"
+#else
+      "Shared memory"
+#endif
+        << std::endl
+        << "Kernel type:                    " <<
+#if TENSORCORE == 0
+      "CUDA Core"
+#elif TENSORCORE == 1
+      "WMMA API"
+#else
+      "PTX MMA"
+#endif
+        << std::endl
+        << "Uniform mesh optimization:      " <<
+#ifdef UNIFORM_MESH
+      "On"
+#else
+      "Off"
+#endif
+        << std::endl
         << "Distort factor:                 " << CT::DISTORT_ << std::endl
         << std::endl;
 

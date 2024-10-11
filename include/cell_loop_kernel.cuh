@@ -147,7 +147,7 @@ namespace PSMF
             typename Number,
             SmootherVariant smooth,
             bool            is_ghost = false>
-  __global__ void __launch_bounds__(512, 1) cell_loop_kernel_seperate_inv_cg(
+  __global__ void __launch_bounds__(256, 1) cell_loop_kernel_seperate_inv_cg(
     const Number                                               *src,
     Number                                                     *dst,
     Number                                                     *solution,
@@ -156,14 +156,13 @@ namespace PSMF
   {
     constexpr unsigned int n_dofs_1d = fe_degree + 1;
     constexpr unsigned int local_dim = Util::pow(n_dofs_1d, dim);
+    constexpr unsigned int n_dofs_z  = dim == 2 ? 1 : n_dofs_1d;
 
     const unsigned int cell_per_block = gpu_data.cell_per_block;
     const unsigned int local_cell     = threadIdx.x / n_dofs_1d;
     const unsigned int cell        = local_cell + cell_per_block * blockIdx.x;
     const unsigned int local_tid_x = threadIdx.x % n_dofs_1d;
-
-    const unsigned int tid = threadIdx.z * n_dofs_1d * n_dofs_1d +
-                             threadIdx.y * n_dofs_1d + local_tid_x;
+    const unsigned int tid         = threadIdx.y * n_dofs_1d + local_tid_x;
 
     if (cell < gpu_data.n_cells)
       {
@@ -183,33 +182,36 @@ namespace PSMF
               gpu_data.eigenvalues[cell_type * n_dofs_1d * dim + d * n_dofs_1d +
                                    local_tid_x];
 
-            if (threadIdx.z == 0)
-              shared_data
-                .local_derivative[local_cell * n_dofs_1d * n_dofs_1d * dim +
-                                  d * n_dofs_1d * n_dofs_1d + tid] =
-                gpu_data.eigenvectors[cell_type * n_dofs_1d * n_dofs_1d * dim +
-                                      d * n_dofs_1d * n_dofs_1d + tid];
+            shared_data
+              .local_derivative[local_cell * n_dofs_1d * n_dofs_1d * dim +
+                                d * n_dofs_1d * n_dofs_1d + tid] =
+              gpu_data.eigenvectors[cell_type * n_dofs_1d * n_dofs_1d * dim +
+                                    d * n_dofs_1d * n_dofs_1d + tid];
           }
 
-        {
-          types::global_dof_index global_dof_indices;
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int index = z * n_dofs_1d * n_dofs_1d + tid;
 
-          if constexpr (is_ghost)
-            {
-            }
-          else
-            {
-              const unsigned int global_index = gpu_data.first_dof[cell] + tid;
+            types::global_dof_index global_dof_indices;
 
-              global_dof_indices = gpu_data.global_to_local(global_index);
-            }
+            if constexpr (is_ghost)
+              {
+              }
+            else
+              {
+                const unsigned int global_index =
+                  gpu_data.first_dof[cell] + index;
 
-          shared_data.local_src[local_cell * local_dim + tid] =
-            src[global_dof_indices];
+                global_dof_indices = gpu_data.global_to_local(global_index);
+              }
 
-          shared_data.local_dst[local_cell * local_dim + tid] = 0;
-          // dst[global_dof_indices];
-        }
+            shared_data.local_src[local_cell * local_dim + index] =
+              src[global_dof_indices];
+
+            shared_data.local_dst[local_cell * local_dim + index] = 0;
+            // dst[global_dof_indices];
+          }
 
         if constexpr (smooth == SmootherVariant::MCS_CG)
           evaluate_cell_smooth_inv_cg<dim,
@@ -228,33 +230,37 @@ namespace PSMF
                                                                  &shared_data,
                                                                  &fe_data);
 
-        {
-          types::global_dof_index global_dof_indices;
+        for (unsigned int z = 0; z < n_dofs_z; ++z)
+          {
+            const unsigned int index = z * n_dofs_1d * n_dofs_1d + tid;
 
-          if constexpr (is_ghost)
-            {
-            }
-          else
-            {
-              const unsigned int global_index = gpu_data.first_dof[cell] + tid;
+            types::global_dof_index global_dof_indices;
 
-              global_dof_indices = gpu_data.global_to_local(global_index);
-            }
+            if constexpr (is_ghost)
+              {
+              }
+            else
+              {
+                const unsigned int global_index =
+                  gpu_data.first_dof[cell] + index;
 
-          dst[global_dof_indices] +=
-            shared_data.local_dst[local_cell * local_dim + tid] *
-            gpu_data.relaxation;
+                global_dof_indices = gpu_data.global_to_local(global_index);
+              }
 
-          if (tid == 0)
-            {
-              atomicAdd(&solution[0],
-                        shared_data.local_src[local_cell * local_dim + 0]);
-              atomicAdd(&solution[1],
-                        shared_data.local_src[local_cell * local_dim + 1]);
-              atomicAdd(&solution[2],
-                        shared_data.local_src[local_cell * local_dim + 2]);
-            }
-        }
+            dst[global_dof_indices] +=
+              shared_data.local_dst[local_cell * local_dim + index] *
+              gpu_data.relaxation;
+
+            if (tid == 0)
+              {
+                atomicAdd(&solution[0],
+                          shared_data.local_src[local_cell * local_dim + 0]);
+                atomicAdd(&solution[1],
+                          shared_data.local_src[local_cell * local_dim + 1]);
+                atomicAdd(&solution[2],
+                          shared_data.local_src[local_cell * local_dim + 2]);
+              }
+          }
       }
   }
 
