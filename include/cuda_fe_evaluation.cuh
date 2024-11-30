@@ -30,7 +30,7 @@
 #include "cuda_tensor_product_kernels.cuh"
 #include <cuda/std/array>
 
-// #define UNIFORM_MESH
+#define UNIFORM_MESH
 
 namespace PSMF
 {
@@ -64,6 +64,10 @@ namespace PSMF
                face_number == 1 ? threadIdx.x + n_points_1d * z :
                                   threadIdx.x +
                                     n_points_1d * (threadIdx.y % n_points_1d)));
+
+    // FIX: The following is the correct one with distorted mesh,
+    // but somehow there is a bug in permutation when running with TensorCores.
+    // face_number == 1 ? threadIdx.x * n_points_1d + z :
   }
 
   /**
@@ -541,7 +545,7 @@ namespace PSMF
     FEEvaluation(const unsigned int       cell_id,
                  const data_type         *data,
                  SharedData<dim, Number> *shdata)
-    : n_cells(data -> n_cells)
+    : n_cells(data->n_cells)
     , padding_length(data->padding_length)
     , mf_object_id(data->id)
     , use_coloring(data->use_coloring)
@@ -567,7 +571,7 @@ namespace PSMF
     shape_gradients = data->cell_face_shape_gradients;
 #elif MEMORY_TYPE == 2
     {
-      const unsigned int idx = compute_index<dim, n_q_points_1d>();
+      const unsigned int idx  = compute_index<dim, n_q_points_1d>();
 #  if TENSORCORE == 2
       const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, 0);
 #  else
@@ -997,7 +1001,7 @@ namespace PSMF
                      const data_type         *data,
                      SharedData<dim, Number> *shdata,
                      const bool               is_interior_face)
-    : n_faces(data -> n_faces)
+    : n_faces(data->n_faces)
     , n_cells(data->n_cells)
     , padding_length(data->padding_length)
     , face_padding_length(data->face_padding_length)
@@ -1059,7 +1063,7 @@ namespace PSMF
     shape_gradients = data->cell_face_shape_gradients;
 #elif MEMORY_TYPE == 2
     {
-      const unsigned int idx = compute_index<dim, n_q_points_1d>();
+      const unsigned int idx  = compute_index<dim, n_q_points_1d>();
 #  if TENSORCORE == 2
       const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, 0);
 #  else
@@ -1409,8 +1413,16 @@ namespace PSMF
 #ifndef UNIFORM_MESH
         const unsigned int q_point_face =
           compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
-        const Number *inv_jacobian = &inv_jac[q_point_face];
+#  if TENSORCORE == 2
+        const unsigned int q_point_face1 =
+          q_point_face ^
+          get_face_base<n_q_points_1d>(face_number / 2, threadIdx.y, i);
+#  else
+        const unsigned int q_point_face1 = q_point_face;
+#  endif
+        const Number *inv_jacobian = &inv_jac[q_point_face1];
 #endif
+
         for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
           {
             Number tmp = 0.;
@@ -1454,7 +1466,7 @@ namespace PSMF
         const unsigned int q_point_face1 = q_point_face;
 #endif
 #ifndef UNIFORM_MESH
-        const Number *inv_jacobian = &inv_jac[q_point_face];
+        const Number *inv_jacobian = &inv_jac[q_point_face1];
 #endif
         for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
           {
@@ -1502,7 +1514,14 @@ namespace PSMF
 #ifndef UNIFORM_MESH
         const unsigned int q_point_face =
           compute_face_index<dim, n_q_points_1d>(face_number / 2, i);
-        const Number *normal_vector = &normal_vec[q_point_face];
+#  if TENSORCORE == 2
+        const unsigned int q_point_face1 =
+          q_point_face ^
+          get_face_base<n_q_points_1d>(face_number / 2, threadIdx.y, i);
+#  else
+        const unsigned int q_point_face1 = q_point_face;
+#  endif
+        const Number *normal_vector = &normal_vec[q_point_face1];
 #endif
         for (unsigned int d = 0; d < dim; ++d)
           normal_derivative[i] +=
@@ -1546,8 +1565,8 @@ namespace PSMF
         const unsigned int q_point_face1 = q_point_face;
 #endif
 #ifndef UNIFORM_MESH
-        const Number *normal_vector = &normal_vec[q_point_face];
-        const Number *inv_jacobian  = &inv_jac[q_point_face];
+        const Number *normal_vector = &normal_vec[q_point_face1];
+        const Number *inv_jacobian  = &inv_jac[q_point_face1];
 #endif
         for (unsigned int d_1 = 0; d_1 < dim; ++d_1)
           {

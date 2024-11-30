@@ -966,6 +966,8 @@ namespace PSMF
   __host__ __device__ constexpr unsigned int
   cells_per_block_shmem(int dim, int fe_degree)
   {
+    return 1;
+
     constexpr int warp_size = 32;
 
     return dim==2 ? (fe_degree==1 ? warp_size :    // 128

@@ -735,6 +735,15 @@ namespace Step64
                                                    {CT::N_REPLICATE_, 1, 1},
                                                    triangulation);
 
+          // double n_dofs_1d = 0;
+          // if (dim == 2)
+          //   n_dofs_1d = std::sqrt(CT::MAX_SIZES_);
+          // else if (dim == 3)
+          //   n_dofs_1d = std::cbrt(CT::MAX_SIZES_);
+          // auto n_refinement =
+          //   static_cast<unsigned int>(std::log2(n_dofs_1d / (fe_degree + 1)));
+          // triangulation.refine_global(n_refinement + cycle);
+
           triangulation.refine_global(2 + cycle);
         }
         // else

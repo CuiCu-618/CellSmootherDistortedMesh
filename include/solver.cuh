@@ -378,7 +378,7 @@ namespace PSMF
       std::string comp_name = "";
 
       const unsigned int n_dofs = dof_handler->n_dofs();
-      const unsigned int n_mv   = 10; // n_dofs < 10000000 ? 100 : 20;
+      const unsigned int n_mv   = n_dofs < 10000000 ? 100 : 20;
 
       auto tester = [&](auto kernel) {
         Timer              time;
@@ -455,7 +455,7 @@ namespace PSMF
       solver_control.enable_history_data();
       solver_control.log_history(true);
 
-      SolverFGMRES<VectorType> solver(solver_control);
+      SolverGMRES<VectorType> solver(solver_control);
 
       Timer              time;
       const unsigned int N         = 5;
@@ -563,6 +563,7 @@ namespace PSMF
       matrix_sp[maxlevel].vmult(solution_tmp, rhs_tmp);
       cudaDeviceSynchronize();
 
+      // AssertThrow(false, dealii::ExcMessage("debug."));
       // std::cout << rhs.l2_norm() << " " << solution.l2_norm() << std::endl;
 
       // for (unsigned int i = 0; i < rhs.size(); ++i)
@@ -836,6 +837,13 @@ namespace PSMF
           //   PreconditionMG<dim, VectorType, MGTransferCUDA<dim, Number>>>(
           //   dof_handler, *mg, transfer_dp);
         }
+
+      size_t free_mem, total_mem;
+      AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
+
+      int mem_usage = (total_mem - free_mem) / 1024 / 1024;
+
+      *pcout << "\nGPU Memory Usage [MB]: " << mem_usage << "\n";
     }
 
     std::vector<SolverData>
@@ -848,11 +856,11 @@ namespace PSMF
       std::string comp_name = "";
 
       const unsigned int n_dofs = dof_handler->n_dofs();
-      const unsigned int n_mv   = 1; // n_dofs < 10000000 ? 100 : 20;
+      const unsigned int n_mv   = n_dofs < 10000000 ? 100 : 20;
 
       auto tester = [&](auto kernel) {
         Timer              time;
-        const unsigned int N         = 1;
+        const unsigned int N         = 5;
         double             best_time = 1e10;
         for (unsigned int i = 0; i < N; ++i)
           {
@@ -930,7 +938,7 @@ namespace PSMF
       SolverGMRES<VectorType> solver(solver_control);
 
       Timer              time;
-      const unsigned int N         = 1;
+      const unsigned int N         = 5;
       double             best_time = 1e10;
 
       bool is_converged = true;
