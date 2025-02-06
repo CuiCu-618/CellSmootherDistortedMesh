@@ -14,10 +14,20 @@
 
 #include <deal.II/grid/filtered_iterator.h>
 
+#include "TPSS/kroneckersvd.h"
+#include "TPSS/tensors.h"
+#include "cuda_vector.cuh"
 #include "tensor_product.h"
 #include "utilities.cuh"
 
 using namespace dealii;
+
+#define SCHWARZTYPE 0
+// 0: MVS
+// 1: AVS colored
+// 2: AVS atomic
+
+// #define TENSORCORE
 
 /**
  * Namespace for the Patch Smoother Matrix-Free
@@ -54,7 +64,13 @@ namespace PSMF
     /**
      * Using the Matrix Multiply and Accumulate ISA with inline PTX.
      */
-    TensorCoreMMA
+    TensorCoreMMA,
+
+    /**
+     * Using the Matrix Multiply and Accumulate ISA with inline PTX.
+     * Conflict Free
+     */
+    TensorCoreMMACF
   };
 
 
@@ -71,49 +87,32 @@ namespace PSMF
     GLOBAL,
 
     /**
+     * Compute the residual globally, i.e.
+     * r = b - Ax, where A is the system matrix.
+     * additive smoother with coloring
+     */
+    AVS_colored,
+
+    /**
+     * Compute the residual globally, i.e.
+     * r = b - Ax, where A is the system matrix.
+     * additive smoother without coloring, atomic ops instead
+     */
+    AVS_atomic,
+
+    /**
      * Same as above, but with linear thread indicex instead of tmasking
      * boundary threads for local solver.
      */
-    FUSED_L,
-
-    /**
-     * A conflict-free implementation by restructuring shared memory access.
-     */
     ConflictFree,
+  };
 
-    /**
-     * Using the Warp Matrix Multiply and Accumulate (WMMA) API introduced in
-     * CUDA 11.0.
-     */
-    TensorCore,
-
-    /**
-     * Compute the residual b - Ax exactly with FE_DGQHermite element.
-     */
-    ExactRes,
-
-    /**
-     * Chebyshev Smoother
-     */
-    Chebyshev,
-
-    /**
-     * Multiplicative Cell Smoother
-     * fast diagnolization as local solver
-     */
-    MCS,
-
-    /**
-     * Multiplicative Cell Smoother
-     * CG as local solver
-     */
-    MCS_CG,
-
-    /**
-     * Multiplicative Cell Smoother
-     * PCG as local solver, preconditioned by FD
-     */
-    MCS_PCG,
+  enum class LocalSolverVariant
+  {
+    Exact,
+    Bila,
+    KSVD,
+    NN
   };
 
 
@@ -169,8 +168,6 @@ namespace PSMF
       typename std::vector<std::vector<CellIterator>>::const_iterator;
 
     static constexpr unsigned int regular_vpatch_size = 1 << dim;
-    static constexpr unsigned int n_patch_dofs =
-      Util::pow(2 * fe_degree + 2, dim);
 
     /**
      * Standardized data struct to pipe additional data to LevelVertexPatch.
@@ -220,45 +217,19 @@ namespace PSMF
     struct Data
     {
       /**
+       * Number of dofs per dim.
+       */
+      unsigned int n_dofs_per_dim;
+
+      /**
        * Number of patches for each color.
        */
-      types::global_dof_index n_patches;
+      unsigned int n_patches;
 
       /**
        * Number of patches per thread block.
        */
       unsigned int patch_per_block;
-
-      /**
-       * Number of ghost indices
-       */
-      types::global_dof_index n_ghost_indices;
-
-      /**
-       * The range of the vector that is stored locally.
-       */
-      types::global_dof_index local_range_start;
-      types::global_dof_index local_range_end;
-
-      /**
-       * The set of indices to which we need to have read access but that are
-       * not locally owned.
-       */
-      types::global_dof_index *ghost_indices;
-
-      /**
-       * Return the local index corresponding to the given global index.
-       */
-      __device__ types::global_dof_index
-      global_to_local(const types::global_dof_index global_index) const;
-
-      __device__ unsigned int
-      binary_search(const unsigned int local_index,
-                    const unsigned int l,
-                    const unsigned int r) const;
-
-      __device__ bool
-      is_ghost(const unsigned int global_index) const;
 
       /**
        * Relaxation parameter.
@@ -271,13 +242,12 @@ namespace PSMF
        * @note For DG case, the first degree of freedom index of
        *       four cells in a patch is stored consecutively.
        */
-      types::global_dof_index *first_dof;
-      types::global_dof_index *patch_dofs;
+      unsigned int *first_dof;
 
       /**
        * Pointer to the patch cell ordering type.
        */
-      types::global_dof_index *patch_id;
+      unsigned int *patch_id;
 
       /**
        * Pointer to the patch type. left, middle, right
@@ -287,22 +257,27 @@ namespace PSMF
       /**
        * Pointer to mapping from l to h
        */
-      types::global_dof_index *l_to_h;
+      unsigned int *l_to_h;
 
       /**
        * Pointer to mapping from l to h
        */
-      types::global_dof_index *h_to_l;
+      unsigned int *h_to_l;
 
       /**
-       * Pointer to 1D mass matrix for lapalace operator.
+       * Pointer to 1D mass matrix for bilapalace operator.
        */
       Number *laplace_mass_1d;
 
       /**
-       * Pointer to 1D stiffness matrix for lapalace operator.
+       * Pointer to 1D stiffness matrix for bilapalace operator.
        */
       Number *laplace_stiff_1d;
+
+      /**
+       * Pointer to 1D stiffness matrix for bilapalace operator.
+       */
+      Number *bilaplace_stiff_1d;
 
       /**
        * Pointer to 1D mass matrix for smoothing operator.
@@ -315,6 +290,11 @@ namespace PSMF
       Number *smooth_stiff_1d;
 
       /**
+       * Pointer to 1D bilaplace stiffness matrix for smoothing operator.
+       */
+      Number *smooth_bilaplace_1d;
+
+      /**
        * Pointer to 1D eigenvalues for smoothing operator.
        */
       Number *eigenvalues;
@@ -323,19 +303,6 @@ namespace PSMF
        * Pointer to 1D eigenvectors for smoothing operator.
        */
       Number *eigenvectors;
-    };
-
-    struct GhostPatch
-    {
-      GhostPatch(const unsigned int proc, const CellId &cell_id);
-
-      void
-      submit_id(const unsigned int proc, const CellId &cell_id);
-
-      std::string
-      str() const;
-
-      std::map<unsigned, std::vector<CellId>> proc_to_cell_ids;
     };
 
     /**
@@ -354,25 +321,20 @@ namespace PSMF
     Data
     get_laplace_data(unsigned int color) const;
 
-    Data
-    get_laplace_data_ghost(unsigned int color) const;
-
     /**
      * Return the Data structure associated with @p color for smoothing operator.
      */
-    Data
+    std::array<Data, 4>
     get_smooth_data(unsigned int color) const;
-
-    Data
-    get_smooth_data_ghost(unsigned int color) const;
 
     /**
      * Extracts the information needed to perform loops over cells.
      */
     void
-    reinit(const DoFHandler<dim> &dof_handler,
-           const unsigned int     mg_level,
-           const AdditionalData  &additional_data = AdditionalData());
+    reinit(const DoFHandler<dim>   &dof_handler,
+           const MGConstrainedDoFs &mg_constrained_dofs,
+           const unsigned int       mg_level,
+           const AdditionalData    &additional_data = AdditionalData());
 
     /**
      * @brief This method runs the loop over all patches and apply the local operation on
@@ -414,6 +376,14 @@ namespace PSMF
     reinit_tensor_product_laplace() const;
 
     /**
+     * Copy the values of the constrained entries from src to dst. This is used
+     * to impose zero Dirichlet boundary condition.
+     */
+    template <typename VectorType>
+    void
+    copy_constrained_values(const VectorType &src, VectorType &dst) const;
+
+    /**
      * Free all the memory allocated.
      */
     void
@@ -425,6 +395,24 @@ namespace PSMF
      */
     std::size_t
     memory_consumption() const;
+
+    /**
+     * Helper function. Assemble 1d mass matrices.
+     */
+    std::array<Table<2, VectorizedArray<Number>>, 3>
+    assemble_mass_tensor() const;
+
+    /**
+     * Helper function. Assemble 1d laplace matrices.
+     */
+    std::array<Table<2, VectorizedArray<Number>>, 3>
+    assemble_laplace_tensor() const;
+
+    /**
+     * Helper function. Assemble 1d bilaplace matrices.
+     */
+    std::array<Table<2, VectorizedArray<Number>>, 6>
+    assemble_bilaplace_tensor() const;
 
   private:
     /**
@@ -443,9 +431,7 @@ namespace PSMF
      * Helper function. Get tensor product data for each patch.
      */
     void
-    get_patch_data(const PatchIterator          &patch,
-                   const types::global_dof_index patch_id,
-                   const bool                    is_ghost = false);
+    get_patch_data(const PatchIterator &patch, const unsigned int patch_id);
 
     /**
      * Gathering the locally owned and ghost cells attached to a common
@@ -468,7 +454,7 @@ namespace PSMF
      */
     template <typename Number1>
     void
-    alloc_arrays(Number1 **array_device, const types::global_dof_index n);
+    alloc_arrays(Number1 **array_device, const unsigned int n);
 
     /**
      * Number of global refinments.
@@ -492,11 +478,6 @@ namespace PSMF
      */
     bool use_coloring;
 
-    /**
-     * Number of coarse cells
-     */
-    unsigned int n_replicate;
-
 
     GranularityScheme granularity_scheme;
 
@@ -506,9 +487,6 @@ namespace PSMF
      */
     std::vector<dim3> grid_dim_lapalce;
     std::vector<dim3> grid_dim_smooth;
-
-    std::vector<dim3> grid_dim_lapalce_ghost;
-    std::vector<dim3> grid_dim_smooth_ghost;
 
     /**
      * Block dimensions associated to the different colors. The block
@@ -531,22 +509,17 @@ namespace PSMF
      * Raw graphed of locally owned active patches.
      */
     std::vector<std::vector<PatchIterator>> graph_ptr_raw;
-    std::vector<std::vector<PatchIterator>> graph_ptr_raw_ghost;
 
     /**
      * Colored graphed of locally owned active patches.
      */
     std::vector<std::vector<PatchIterator>> graph_ptr_colored;
-    std::vector<std::vector<PatchIterator>> graph_ptr_colored_ghost;
 
     /**
      * Number of patches in each color.
      */
     std::vector<unsigned int> n_patches_laplace;
     std::vector<unsigned int> n_patches_smooth;
-
-    std::vector<unsigned int> n_patches_laplace_ghost;
-    std::vector<unsigned int> n_patches_smooth_ghost;
 
     /**
      * Pointer to the DoFHandler associated with the object.
@@ -560,25 +533,21 @@ namespace PSMF
      * @note For DG case, the first degree of freedom index of
      *       four cells in a patch is stored consecutively.
      */
-    std::vector<types::global_dof_index *> first_dof_laplace;
-    std::vector<types::global_dof_index *> first_dof_smooth;
-
-    std::vector<types::global_dof_index *> patch_dofs_laplace;
-    std::vector<types::global_dof_index *> patch_dofs_smooth;
+    std::vector<unsigned int *> first_dof_laplace;
+    std::vector<unsigned int *> first_dof_smooth;
 
     /**
      * Vector of the the first degree of freedom
      * in each patch of a single color.
      * Initialize on host and copy to device later.
      */
-    std::vector<types::global_dof_index> first_dof_host;
-    std::vector<types::global_dof_index> patch_dofs_host;
+    std::vector<unsigned int> first_dof_host;
 
     /**
      * Vector of pointer to patch type: left, middle, right.
      */
     std::vector<unsigned int *> patch_type;
-    std::vector<unsigned int *> patch_type_ghost;
+    std::vector<unsigned int *> patch_type_smooth;
 
     /**
      * Vector of patch type: left, middle, right.
@@ -589,13 +558,13 @@ namespace PSMF
     /**
      * Vector of pointer to the local cell ordering type for each patch.
      */
-    std::vector<types::global_dof_index *> patch_id;
+    std::vector<unsigned int *> patch_id;
 
     /**
      * Vector of patch cell ordering type.
      * Initialize on host and copy to device later.
      */
-    std::vector<types::global_dof_index> patch_id_host;
+    std::vector<unsigned int> patch_id_host;
 
     /**
      * Mapping from cell ordering to type id.
@@ -615,26 +584,38 @@ namespace PSMF
     /**
      * Pointer to mapping from l to h
      */
-    types::global_dof_index *l_to_h;
+    unsigned int *l_to_h;
 
     std::vector<unsigned int> l_to_h_host;
 
     /**
      * Pointer to mapping from l to h
      */
-    types::global_dof_index *h_to_l;
+    unsigned int *h_to_l;
 
-    std::vector<types::global_dof_index> h_to_l_host;
+    std::vector<unsigned int> h_to_l_host;
 
     /**
-     * Pointer to 1D mass matrix for lapalace operator.
+     * A variable storing the local indices of Dirichlet boundary conditions
+     * on cells for all levels (outer index), the cells within the levels
+     * (second index), and the indices on the cell (inner index).
+     */
+    CudaVector<unsigned int> dirichlet_indices;
+
+    /**
+     * Pointer to 1D mass matrix for bilapalace operator.
      */
     Number *laplace_mass_1d;
 
     /**
-     * Pointer to 1D stiffness matrix for lapalace operator.
+     * Pointer to 1D stiffness matrix for bilapalace operator.
      */
     Number *laplace_stiff_1d;
+
+    /**
+     * Pointer to 1D stiffness matrix for bilapalace operator.
+     */
+    Number *bilaplace_stiff_1d;
 
     /**
      * Pointer to 1D mass matrix for smoothing operator.
@@ -647,78 +628,24 @@ namespace PSMF
     Number *smooth_stiff_1d;
 
     /**
+     * Pointer to 1D bilaplace stiffness matrix for smoothing operator.
+     */
+    Number *smooth_bilaplace_1d;
+
+    /**
      * Pointer to 1D eigenvalues for smoothing operator.
      */
-    Number *eigenvalues;
+    std::array<Number *, 4> eigenvalues;
 
     /**
      * Pointer to 1D eigenvectors for smoothing operator.
      */
-    Number *eigenvectors;
-
-    /**
-     * Number of ghost indices
-     */
-    types::global_dof_index n_ghost_indices;
-
-    /**
-     * The range of the vector that is stored locally.
-     */
-    types::global_dof_index local_range_start;
-    types::global_dof_index local_range_end;
-
-    /**
-     * The set of indices to which we need to have read access but that are
-     * not locally owned.
-     */
-    types::global_dof_index *ghost_indices_dev;
-
-    /**
-     * Shared pointer to store the parallel partitioning information. This
-     * information can be shared between several vectors that have the same
-     * partitioning.
-     */
-    std::shared_ptr<const Utilities::MPI::Partitioner> partitioner;
-
-    mutable std::shared_ptr<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
-      solution_ghosted;
-
-    cudaStream_t stream;
-    cudaStream_t stream_g;
+    std::array<Number *, 4> eigenvectors;
   };
 
-  /**
-   * Structure to pass the shared memory into a general user function.
-   * TODO: specialize for cell loop and patch loop
-   */
-  template <int dim, typename Number, bool is_laplace>
-  struct SharedMemData
+  template <typename Number>
+  struct SharedDataBase
   {
-    /**
-     * Constructor.
-     */
-    __device__
-    SharedMemData(Number      *data,
-                  unsigned int n_buff,
-                  unsigned int n_dofs_1d,
-                  unsigned int local_dim,
-                  unsigned int n_dofs_1d_padding = 0)
-    {
-      constexpr unsigned int n = is_laplace ? 3 : 1;
-      n_dofs_1d_padding =
-        n_dofs_1d_padding == 0 ? n_dofs_1d : n_dofs_1d_padding;
-
-      local_src = data;
-      local_dst = local_src + n_buff * local_dim;
-
-      local_mass = local_dst + n_buff * local_dim;
-      local_derivative =
-        local_mass + n_buff * n_dofs_1d * n_dofs_1d_padding * n;
-      tmp = local_derivative + n_buff * n_dofs_1d * n_dofs_1d_padding * n;
-    }
-
-
     /**
      * Shared memory for local and interior src.
      */
@@ -742,7 +669,12 @@ namespace PSMF
     /**
      * Shared memory for computed 1D Laplace matrix.
      */
-    Number *local_derivative;
+    Number *local_laplace;
+
+    /**
+     * Shared memory for computed 1D biLaplace matrix.
+     */
+    Number *local_bilaplace;
 
     /**
      * Shared memory for computed 1D eigenvalues.
@@ -761,6 +693,121 @@ namespace PSMF
   };
 
   /**
+   * Structure to pass the shared memory into a general user function.
+   * Used for Bilaplace operator.
+   */
+  template <int dim, typename Number>
+  struct SharedDataOp : SharedDataBase<Number>
+  {
+    using SharedDataBase<Number>::local_src;
+    using SharedDataBase<Number>::local_dst;
+    using SharedDataBase<Number>::local_mass;
+    using SharedDataBase<Number>::local_laplace;
+    using SharedDataBase<Number>::local_bilaplace;
+    using SharedDataBase<Number>::tmp;
+
+    __device__
+    SharedDataOp(Number      *data,
+                 unsigned int n_buff,
+                 unsigned int n_dofs_1d,
+                 unsigned int local_dim)
+    {
+      local_src = data;
+      local_dst = local_src + n_buff * local_dim;
+
+      local_mass      = local_dst + n_buff * local_dim;
+      local_laplace   = local_mass + n_buff * n_dofs_1d * n_dofs_1d * dim;
+      local_bilaplace = local_laplace + n_buff * n_dofs_1d * n_dofs_1d * dim;
+
+      tmp = local_bilaplace + n_buff * n_dofs_1d * n_dofs_1d * dim;
+    }
+  };
+
+  /**
+   * Structure to pass the shared memory into a general user function.
+   * Used for local smoothing operator.
+   */
+  template <int dim,
+            typename Number,
+            SmootherVariant    smoother,
+            LocalSolverVariant local_solver>
+  struct SharedDataSmoother;
+
+  /**
+   * Exact local solver. TODO:
+   */
+  template <int dim, typename Number, SmootherVariant smoother>
+  struct SharedDataSmoother<dim, Number, smoother, LocalSolverVariant::Exact>
+    : SharedDataBase<Number>
+  {
+    using SharedDataBase<Number>::local_src;
+    using SharedDataBase<Number>::local_dst;
+    using SharedDataBase<Number>::local_mass;
+    using SharedDataBase<Number>::local_laplace;
+    using SharedDataBase<Number>::local_bilaplace;
+    using SharedDataBase<Number>::tmp;
+
+    __device__
+    SharedDataSmoother(Number      *data,
+                       unsigned int n_buff,
+                       unsigned int n_dofs_1d,
+                       unsigned int local_dim)
+    {
+      local_src = data;
+      local_dst = local_src + n_buff * local_dim;
+
+      local_mass      = local_dst + n_buff * local_dim;
+      local_laplace   = local_mass + n_buff * n_dofs_1d * n_dofs_1d;
+      local_bilaplace = local_laplace + n_buff * n_dofs_1d * n_dofs_1d;
+
+      tmp = local_bilaplace + n_buff * n_dofs_1d * n_dofs_1d * dim;
+    }
+  };
+
+  /**
+   * Bila or KSVD12 local solver.
+   */
+  template <int dim,
+            typename Number,
+            SmootherVariant    smoother,
+            LocalSolverVariant local_solver>
+  struct SharedDataSmoother : SharedDataBase<Number>
+  {
+    using SharedDataBase<Number>::local_src;
+    using SharedDataBase<Number>::local_dst;
+    using SharedDataBase<Number>::local_mass;
+    using SharedDataBase<Number>::local_laplace;
+    using SharedDataBase<Number>::local_bilaplace;
+    using SharedDataBase<Number>::tmp;
+
+    __device__
+    SharedDataSmoother(Number      *data,
+                       unsigned int n_buff,
+                       unsigned int n_dofs_1d,
+                       unsigned int local_dim)
+    {
+      local_src = data;
+      local_dst = local_src + n_buff * local_dim;
+
+      if constexpr (smoother == SmootherVariant::GLOBAL)
+        {
+          local_mass    = local_dst + n_buff * local_dim;
+          local_laplace = local_mass + n_buff * n_dofs_1d * dim;
+          tmp           = local_laplace + n_buff * n_dofs_1d * n_dofs_1d * dim;
+        }
+      else
+        {
+          local_mass      = local_dst + n_buff * local_dim;
+          local_laplace   = local_mass + n_buff * n_dofs_1d * n_dofs_1d;
+          local_bilaplace = local_laplace + n_buff * n_dofs_1d * n_dofs_1d;
+          // TODO: should be able to use less shared memory
+          tmp = local_bilaplace + n_buff * n_dofs_1d * n_dofs_1d * dim;
+        }
+    }
+  };
+
+
+  /**
    * This function determines number of patches per block at compile time.
    */
   template <int dim, int fe_degree>
@@ -777,12 +824,6 @@ namespace PSMF
                                         1) :
                       1;
   }
-
-  /**
-   * Renumbering indices for vectors of tensor-dimension 2 so that wmma can be
-   * applied.
-   */
-  __constant__ unsigned int numbering2[8 * 8 * 8];
 
 } // namespace PSMF
 

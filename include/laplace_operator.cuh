@@ -12,12 +12,9 @@
 #ifndef LAPLACE_OPERATOR_CUH
 #define LAPLACE_OPERATOR_CUH
 
-#include <deal.II/lac/diagonal_matrix.h>
+#include <deal.II/fe/fe_interface_values.h>
 
-#include "cuda_fe_evaluation.cuh"
-#include "cuda_matrix_free.cuh"
 #include "patch_base.cuh"
-#include <cuda/std/array>
 
 using namespace dealii;
 
@@ -27,220 +24,54 @@ namespace PSMF
   template <int dim, int fe_degree, typename Number, LaplaceVariant kernel>
   struct LocalLaplace
   {
+#ifdef TENSORCORE
     static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
+#else
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 1;
+#endif
 
     mutable std::size_t shared_mem;
 
     LocalLaplace()
       : shared_mem(0){};
 
-    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
       constexpr unsigned int n =
-        kernel == LaplaceVariant::ConflictFree ? 2 : (dim - 1);
+        kernel == LaplaceVariant::Basic ? (dim - 1) : 2;
 
       shared_mem = 0;
 
       const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
       // local_src, local_dst
       shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_mass, local_derivative
+      // local_mass, local_derivative, local_bilaplace
       shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
+        3 * patch_per_block * n_dofs_1d * n_dofs_1d * dim * sizeof(Number);
       // temp
       shared_mem += n * patch_per_block * local_dim * sizeof(Number);
 
       AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_basic<dim, fe_degree, Number, kernel, is_ghost>,
+        laplace_kernel_basic<dim, fe_degree, Number, kernel>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_mem));
     }
 
-    template <typename VectorType, typename DataType, bool is_ghost>
+    template <typename VectorType, typename DataType>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
+                const dim3       &block_dim) const
     {
-      laplace_kernel_basic<dim, fe_degree, Number, kernel, is_ghost>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      gpu_data);
+      laplace_kernel_basic<dim, fe_degree, Number, kernel>
+        <<<grid_dim, block_dim, shared_mem>>>(src.get_values(),
+                                              dst.get_values(),
+                                              gpu_data);
     }
   };
-
-  template <int dim, int fe_degree, typename Number>
-  struct LocalLaplace<dim, fe_degree, Number, LaplaceVariant::BasicCell>
-  {
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
-
-    LocalLaplace()
-      : shared_mem(0){};
-
-    template <bool is_ghost>
-    void
-    setup_kernel(const unsigned int patch_per_block) const
-    {
-      constexpr unsigned int n = dim - 1;
-
-      shared_mem = 0;
-
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst
-      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_mass, local_derivative
-      shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 3 * sizeof(Number);
-      // temp
-      shared_mem += n * patch_per_block * local_dim * sizeof(Number);
-
-      AssertCuda(
-        cudaFuncSetAttribute(laplace_kernel_basic_cell<dim,
-                                                       fe_degree,
-                                                       Number,
-                                                       LaplaceVariant::Basic>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             shared_mem));
-    }
-
-    template <typename VectorType, typename DataType, bool is_ghost>
-    void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
-    {
-      laplace_kernel_basic_cell<dim, fe_degree, Number, LaplaceVariant::Basic>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      gpu_data);
-    }
-  };
-
-  template <int dim, int fe_degree, typename Number>
-  struct LocalLaplace<dim, fe_degree, Number, LaplaceVariant::TensorCore>
-  {
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
-
-    LocalLaplace()
-      : shared_mem(0){};
-
-    template <bool is_ghost>
-    void
-    setup_kernel(const unsigned int patch_per_block) const
-    {
-      shared_mem = 0;
-
-      constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
-      constexpr unsigned int local_dim_padding =
-        Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
-
-      // local_src, local_dst
-      shared_mem += 2 * patch_per_block * local_dim_padding * sizeof(Number);
-      // local_mass, local_derivative
-      shared_mem += 2 * patch_per_block * n_dofs_1d * n_dofs_1d_padding * 3 *
-                    sizeof(Number);
-      // temp
-      shared_mem +=
-        (dim - 1) * patch_per_block * local_dim_padding * sizeof(Number);
-
-      AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_tensorcore<dim,
-                                  fe_degree,
-                                  Number,
-                                  LaplaceVariant::TensorCore>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        shared_mem));
-    }
-
-    template <typename VectorType, typename DataType, bool is_ghost>
-    void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
-    {
-      laplace_kernel_tensorcore<dim,
-                                fe_degree,
-                                Number,
-                                LaplaceVariant::TensorCore>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      gpu_data);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  struct LocalLaplace<dim, fe_degree, Number, LaplaceVariant::TensorCoreMMA>
-  {
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
-
-    LocalLaplace()
-      : shared_mem(0){};
-
-    template <bool is_ghost>
-    void
-    setup_kernel(const unsigned int patch_per_block) const
-    {
-      shared_mem = 0;
-
-      constexpr unsigned int n_dofs_1d_padding = n_dofs_1d + Util::padding;
-      constexpr unsigned int local_dim_padding =
-        Util::pow(n_dofs_1d, dim - 1) * n_dofs_1d_padding;
-
-      // local_src, local_dst
-      shared_mem += 2 * patch_per_block * local_dim_padding * sizeof(Number);
-      // local_mass, local_derivative
-      shared_mem += 2 * patch_per_block * n_dofs_1d * n_dofs_1d_padding * 3 *
-                    sizeof(Number);
-      // temp
-      shared_mem +=
-        (dim - 1) * patch_per_block * local_dim_padding * sizeof(Number);
-
-      AssertCuda(cudaFuncSetAttribute(
-        laplace_kernel_tensorcore_mma<dim,
-                                      fe_degree,
-                                      Number,
-                                      LaplaceVariant::TensorCoreMMA>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        shared_mem));
-    }
-
-    template <typename VectorType, typename DataType, bool is_ghost>
-    void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
-    {
-      laplace_kernel_tensorcore_mma<dim,
-                                    fe_degree,
-                                    Number,
-                                    LaplaceVariant::TensorCoreMMA>
-        <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                      dst.get_values(),
-                                                      gpu_data);
-    }
-  };
-
 
 
   template <int dim, int fe_degree, typename Number, LaplaceVariant kernel>
@@ -273,6 +104,8 @@ namespace PSMF
       LocalLaplace<dim, fe_degree, Number, kernel> local_laplace;
 
       data->cell_loop(local_laplace, src, dst);
+
+      data->copy_constrained_values(src, dst);
     }
 
     void
@@ -287,11 +120,8 @@ namespace PSMF
     initialize_dof_vector(
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &vec) const
     {
-      auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(mg_level);
-      auto locally_relevant_dofs =
-        DoFTools::extract_locally_relevant_level_dofs(*dof_handler, mg_level);
-
-      vec.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
+      const unsigned int n_dofs = dof_handler->n_dofs(mg_level);
+      vec.reinit(n_dofs);
     }
 
     void
@@ -300,33 +130,12 @@ namespace PSMF
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src,
       const Function<dim, Number> &rhs_function,
       const Function<dim, Number> &exact_solution,
-      const unsigned int) const
+      const unsigned int           mg_level) const
     {
-      const MappingQGeneric<dim> mapping(fe_degree);
-      AffineConstraints<Number>  dummy;
-      dummy.close();
-
-      typename dealii::MatrixFree<dim, Number>::AdditionalData additional_data;
-      additional_data.tasks_parallel_scheme =
-        dealii::MatrixFree<dim, Number>::AdditionalData::none;
-      additional_data.mapping_update_flags =
-        (update_gradients | update_JxW_values | update_quadrature_points);
-      additional_data.mapping_update_flags_inner_faces =
-        (update_gradients | update_JxW_values | update_normal_vectors);
-      additional_data.mapping_update_flags_boundary_faces =
-        (update_gradients | update_JxW_values | update_normal_vectors |
-         update_quadrature_points);
-
-      dealii::MatrixFree<dim, Number> data;
-      data.reinit(mapping,
-                  *dof_handler,
-                  dummy,
-                  QGauss<1>(fe_degree + 1),
-                  additional_data);
-
       dst = 0.;
+      // src.update_ghost_values();
 
-      const auto n_dofs = src.locally_owned_size();
+      const unsigned int n_dofs = src.size();
 
       LinearAlgebra::distributed::Vector<Number, MemorySpace::Host>
         system_rhs_host(n_dofs);
@@ -335,81 +144,135 @@ namespace PSMF
 
       LinearAlgebra::ReadWriteVector<Number> rw_vector(n_dofs);
 
+      AffineConstraints<Number> constraints;
+      constraints.clear();
+      VectorTools::interpolate_boundary_values(*dof_handler,
+                                               0,
+                                               exact_solution,
+                                               constraints);
+      constraints.close();
 
-      dealii::FEEvaluation<dim, fe_degree> phi(data);
+      const QGauss<dim>      quadrature_formula(fe_degree + 1);
+      FEValues<dim>          fe_values(dof_handler->get_fe(),
+                              quadrature_formula,
+                              update_values | update_quadrature_points |
+                                update_JxW_values);
+      FEInterfaceValues<dim> fe_interface_values(
+        dof_handler->get_fe(),
+        QGauss<dim - 1>(fe_degree + 1),
+        update_values | update_gradients | update_quadrature_points |
+          update_hessians | update_JxW_values | update_normal_vectors);
 
-      for (unsigned int cell = 0; cell < data.n_cell_batches(); ++cell)
-        {
-          phi.reinit(cell);
-          for (const unsigned int q : phi.quadrature_point_indices())
-            {
-              VectorizedArray<Number> rhs_val = VectorizedArray<Number>();
-              Point<dim, VectorizedArray<Number>> point_batch =
-                phi.quadrature_point(q);
-              for (unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v)
+      const unsigned int dofs_per_cell =
+        dof_handler->get_fe().n_dofs_per_cell();
+
+      const unsigned int        n_q_points = quadrature_formula.size();
+      Vector<Number>            cell_rhs(dofs_per_cell);
+      std::vector<unsigned int> local_dof_indices(dofs_per_cell);
+      std::vector<Number>       rhs_values(n_q_points);
+
+      auto begin = dof_handler->begin_mg(mg_level);
+      auto end   = dof_handler->end_mg(mg_level);
+
+      for (auto cell = begin; cell != end; ++cell)
+        if (cell->is_locally_owned_on_level())
+          {
+            cell_rhs = 0;
+            fe_values.reinit(cell);
+            rhs_function.value_list(fe_values.get_quadrature_points(),
+                                    rhs_values);
+
+            for (unsigned int q_index = 0; q_index < n_q_points; ++q_index)
+              {
+                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                  cell_rhs(i) += (fe_values.shape_value(i, q_index) *
+                                  rhs_values[q_index] * fe_values.JxW(q_index));
+              }
+
+            cell->get_mg_dof_indices(local_dof_indices);
+            constraints.distribute_local_to_global(cell_rhs,
+                                                   local_dof_indices,
+                                                   system_rhs_host);
+          }
+
+      for (auto cell = begin; cell != end; ++cell)
+        if (cell->is_locally_owned_on_level())
+          {
+            for (const unsigned int face_no : cell->face_indices())
+              if (cell->at_boundary(face_no))
                 {
-                  Point<dim> single_point;
-                  for (unsigned int d = 0; d < dim; ++d)
-                    single_point[d] = point_batch[d][v];
-                  rhs_val[v] = rhs_function.value(single_point);
-                }
-              phi.submit_value(rhs_val, q);
-            }
-          phi.integrate_scatter(EvaluationFlags::values, system_rhs_host);
-        }
+                  fe_interface_values.reinit(cell, face_no);
 
-      dealii::FEFaceEvaluation<dim, fe_degree> phi_face(data, true);
-      for (unsigned int face = data.n_inner_face_batches();
-           face < data.n_inner_face_batches() + data.n_boundary_face_batches();
-           ++face)
-        {
-          phi_face.reinit(face);
+                  const unsigned int n_interface_dofs =
+                    fe_interface_values.n_current_interface_dofs();
+                  Vector<Number> cell_rhs_face(n_interface_dofs);
+                  cell_rhs_face = 0;
 
-          const VectorizedArray<double> h_inner =
-            1. / std::abs((phi_face.get_normal_vector(0) *
-                           phi_face.inverse_jacobian(0))[dim - 1]);
-          const auto one_over_h = (0.5 / h_inner) + (0.5 / h_inner);
-          const auto gamma =
-            fe_degree == 0 ? 1 : 1.0 * fe_degree * (fe_degree + 1);
-          const VectorizedArray<double> sigma = 2.0 * gamma * one_over_h;
+                  const auto &q_points =
+                    fe_interface_values.get_quadrature_points();
+                  const std::vector<double> &JxW =
+                    fe_interface_values.get_JxW_values();
+                  const std::vector<Tensor<1, dim>> &normals =
+                    fe_interface_values.get_normal_vectors();
 
-          for (const unsigned int q : phi_face.quadrature_point_indices())
-            {
-              VectorizedArray<Number> test_value = VectorizedArray<Number>(),
-                                      test_normal_derivative =
-                                        VectorizedArray<Number>();
-              Point<dim, VectorizedArray<Number>> point_batch =
-                phi_face.quadrature_point(q);
+                  std::vector<Tensor<1, dim>> exact_gradients(q_points.size());
+                  exact_solution.gradient_list(q_points, exact_gradients);
 
-              for (unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v)
-                {
-                  Point<dim> single_point;
-                  for (unsigned int d = 0; d < dim; ++d)
-                    single_point[d] = point_batch[d][v];
+                  const unsigned int p = fe_degree;
+                  const auto         h = cell->extent_in_direction(
+                    GeometryInfo<dim>::unit_normal_direction[face_no]);
+                  const auto   one_over_h   = (0.5 / h) + (0.5 / h);
+                  const auto   gamma        = p == 0 ? 1 : p * (p + 1);
+                  const double gamma_over_h = 2.0 * gamma * one_over_h;
 
-                  if (data.get_boundary_id(face) == 0)
-                    test_value[v] = 1.0 * exact_solution.value(single_point);
-                  else
+                  for (unsigned int qpoint = 0; qpoint < q_points.size();
+                       ++qpoint)
                     {
-                      Tensor<1, dim> normal;
-                      for (unsigned int d = 0; d < dim; ++d)
-                        normal[d] = phi_face.get_normal_vector(q)[d][v];
-                      test_normal_derivative[v] =
-                        -normal * exact_solution.gradient(single_point);
+                      const auto &n = normals[qpoint];
+
+                      for (unsigned int i = 0; i < n_interface_dofs; ++i)
+                        {
+                          const double av_hessian_i_dot_n_dot_n =
+                            (fe_interface_values.average_of_shape_hessians(
+                               i, qpoint) *
+                             n * n);
+                          const double jump_grad_i_dot_n =
+                            (fe_interface_values.jump_in_shape_gradients(
+                               i, qpoint) *
+                             n);
+                          cell_rhs_face(i) +=
+                            (-av_hessian_i_dot_n_dot_n * // - {grad^2 v n n }
+                               (exact_gradients[qpoint] *
+                                n)                 //   (grad u_exact . n)
+                             +                     // +
+                             gamma_over_h          //  gamma/h
+                               * jump_grad_i_dot_n // [grad v n]
+                               * (exact_gradients[qpoint] *
+                                  n) // (grad u_exact . n)
+                             ) *
+                            JxW[qpoint]; // dx
+                        }
                     }
+
+                  auto dof_indices =
+                    fe_interface_values.get_interface_dof_indices();
+                  constraints.distribute_local_to_global(cell_rhs_face,
+                                                         dof_indices,
+                                                         system_rhs_host);
                 }
-              phi_face.submit_value(test_value * sigma - test_normal_derivative,
-                                    q);
-              phi_face.submit_normal_derivative(-1.0 * test_value, q);
-            }
-          phi_face.integrate_scatter(EvaluationFlags::values |
-                                       EvaluationFlags::gradients,
-                                     system_rhs_host);
-        }
+          }
 
       system_rhs_host.compress(VectorOperation::add);
       rw_vector.import(system_rhs_host, VectorOperation::insert);
       system_rhs_dev.import(rw_vector, VectorOperation::insert);
+
+      // system_rhs_host = 0.;
+      // system_rhs_host[10] = 1.;
+      // rw_vector.import(system_rhs_host, VectorOperation::insert);
+      // system_rhs_dev.import(rw_vector, VectorOperation::insert);
+
+      // vmult(dst, system_rhs_dev);
+      // dst.print(std::cout);
 
       vmult(dst, src);
       dst.sadd(-1., system_rhs_dev);
@@ -438,1437 +301,6 @@ namespace PSMF
     std::shared_ptr<const LevelVertexPatch<dim, fe_degree, Number>> data;
     const DoFHandler<dim>                                          *dof_handler;
     unsigned int                                                    mg_level;
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number, bool diag = false>
-  class LocalLaplaceOperator
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
-
-    LocalLaplaceOperator()
-    {}
-
-    __device__ void
-    operator()(const unsigned int                                  cell,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-      fe_eval.read_dof_values(src);
-      fe_eval.evaluate(false, true);
-      fe_eval.submit_gradient(fe_eval.get_gradient());
-      fe_eval.integrate(false, true);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalLaplaceOperator<dim, fe_degree, Number, true>
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalLaplaceOperator()
-    {}
-
-    __device__ void
-    operator()(const unsigned int                                  cell,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number *,
-               Number *dst) const
-    {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-
-      value_type my_diagonal = {};
-
-      const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int z = 0; z < n_dofs_z; ++z)
-        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z; ++i)
-          {
-            value_type diag = {};
-            diag[z]         = i == tid ? 1.0 : 0.0;
-            fe_eval.submit_dof_value(diag);
-            fe_eval.evaluate(false, true);
-            fe_eval.submit_gradient(fe_eval.get_gradient());
-            fe_eval.integrate(false, true);
-            auto out = fe_eval.get_value();
-            if (tid == i)
-              my_diagonal[z] = out[z];
-          }
-
-      fe_eval.submit_dof_value(my_diagonal);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number, bool diag = false>
-  class LocalLaplaceEstimator
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
-
-    LocalLaplaceEstimator()
-    {}
-
-    __device__ void
-    operator()(const unsigned int                                  cell,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      printf("Laplace Estimator Not Implemented.\n");
-      // PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-      //   cell, gpu_data, shared_data);
-      // fe_eval.read_dof_values(src);
-      // fe_eval.evaluate_hessian();
-      //
-      // auto trace = fe_eval.get_trace_hessian();
-      // auto h_k   = fe_eval.inv_jac[0];
-      // auto t     = h_k * trace;
-      //
-      // fe_eval.submit_value(t * t * 2);
-      //
-      // auto val = fe_eval.get_value();
-      //
-      // atomicAdd(&dst[cell], val);
-    }
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number, bool diag = false>
-  class LocalLaplaceBDOperator
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    static const unsigned int cells_per_block = 1;
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalLaplaceBDOperator()
-    {}
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                                  face,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        face, gpu_data, shared_data, true);
-      fe_eval.read_dof_values(src);
-      fe_eval.evaluate(true, true);
-
-      auto hi    = fabs(fe_eval.inverse_length_normal_to_face());
-      auto sigma = hi * get_penalty_factor();
-
-      auto u_inner                 = fe_eval.get_value();
-      auto normal_derivative_inner = fe_eval.get_normal_derivative();
-
-      value_type test_by_value;
-      for (unsigned int i = 0; i < n_dofs_z; ++i)
-        {
-          test_by_value[i] =
-            2 * u_inner[i] * sigma - normal_derivative_inner[i];
-          u_inner[i] = -u_inner[i];
-        }
-
-      fe_eval.submit_value(test_by_value);
-      fe_eval.submit_normal_derivative(u_inner);
-
-      fe_eval.integrate(true, true);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalLaplaceBDOperator<dim, fe_degree, Number, true>
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    static const unsigned int cells_per_block = 1;
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalLaplaceBDOperator()
-    {}
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                                  face,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        face, gpu_data, shared_data, true);
-
-      value_type my_diagonal;
-
-      const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int z = 0; z < n_dofs_z; ++z)
-        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z; ++i)
-          {
-            value_type diag = {};
-            diag[z]         = i == tid ? 1.0 : 0.0;
-
-            fe_eval.submit_dof_value(diag);
-            fe_eval.evaluate(true, true);
-
-            auto hi    = fabs(fe_eval.inverse_length_normal_to_face());
-            auto sigma = hi * get_penalty_factor();
-
-            auto u_inner                 = fe_eval.get_value();
-            auto normal_derivative_inner = fe_eval.get_normal_derivative();
-
-            value_type test_by_value;
-            for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
-              {
-                test_by_value[ii] =
-                  2 * u_inner[ii] * sigma - normal_derivative_inner[ii];
-                u_inner[ii] = -u_inner[ii];
-              }
-
-            fe_eval.submit_value(test_by_value);
-            fe_eval.submit_normal_derivative(u_inner);
-
-            fe_eval.integrate(true, true);
-
-            auto out = fe_eval.get_value();
-            if (tid == i)
-              my_diagonal[z] = out[z];
-          }
-      fe_eval.submit_dof_value(my_diagonal);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number, bool diag = false>
-  class LocalLaplaceFaceOperator
-  {
-  public:
-    static const unsigned int n_dofs_1d = fe_degree + 1;
-    static const unsigned int n_local_dofs =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-    static const unsigned int n_q_points =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-
-    static const unsigned int cells_per_block = 1;
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalLaplaceFaceOperator()
-    {}
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                                  face,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-        phi_inner(face, gpu_data, shared_data, true);
-      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-        phi_outer(face + gpu_data->n_faces, gpu_data, shared_data, false);
-
-      phi_inner.read_dof_values(src);
-      phi_inner.evaluate(true, true);
-
-      phi_outer.read_dof_values(src);
-      phi_outer.evaluate(true, true);
-
-      auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
-                       fabs(phi_outer.inverse_length_normal_to_face()));
-      auto sigma = hi * get_penalty_factor();
-
-      value_type solution_jump;
-      value_type test_by_value;
-      value_type test_by_value1;
-
-      auto u_inner = phi_inner.get_value();
-      auto u_outer = phi_outer.get_value();
-      auto n_inner = phi_inner.get_normal_derivative();
-      auto n_outer = phi_outer.get_normal_derivative();
-
-      for (unsigned int i = 0; i < n_dofs_z; ++i)
-        {
-          solution_jump[i]               = u_inner[i] - u_outer[i];
-          auto average_normal_derivative = 0.5 * (n_inner[i] + n_outer[i]);
-          test_by_value[i] =
-            solution_jump[i] * sigma - average_normal_derivative;
-          test_by_value1[i] = -test_by_value[i];
-          solution_jump[i]  = -solution_jump[i] * 0.5;
-        }
-
-      phi_inner.submit_value(test_by_value);
-      phi_outer.submit_value(test_by_value1);
-
-      phi_inner.submit_normal_derivative(solution_jump);
-      phi_outer.submit_normal_derivative(solution_jump);
-
-      phi_inner.integrate(true, true);
-      phi_inner.distribute_local_to_global(dst);
-
-      phi_outer.integrate(true, true);
-      phi_outer.distribute_local_to_global(dst);
-    }
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
-  {
-  public:
-    static const unsigned int n_dofs_1d = fe_degree + 1;
-    static const unsigned int n_local_dofs =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-    static const unsigned int n_q_points =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-
-    static const unsigned int cells_per_block = 1;
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalLaplaceFaceOperator()
-    {}
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                                  face,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-        phi_inner(face, gpu_data, shared_data, true);
-      PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-        phi_outer(face + gpu_data->n_faces, gpu_data, shared_data, false);
-
-      auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
-                       fabs(phi_outer.inverse_length_normal_to_face()));
-      auto sigma = hi * get_penalty_factor();
-
-      value_type my_diagonal;
-
-      const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int z = 0; z < n_dofs_z; ++z)
-        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-          {
-            value_type diag = {};
-            diag[z]         = i == tid ? 1.0 : 0.0;
-
-            phi_inner.submit_dof_value(diag);
-            phi_inner.evaluate(true, true);
-
-            auto solution_jump             = phi_inner.get_value();
-            auto average_normal_derivative = phi_inner.get_normal_derivative();
-
-            value_type test_by_value;
-            for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
-              {
-                test_by_value[ii] = solution_jump[ii] * sigma -
-                                    0.5 * average_normal_derivative[ii];
-                solution_jump[ii] = -solution_jump[ii] * 0.5;
-              }
-
-            phi_inner.submit_value(test_by_value);
-            phi_inner.submit_normal_derivative(solution_jump);
-
-            phi_inner.integrate(true, true);
-
-            auto out = phi_inner.get_value();
-            if (tid == i)
-              my_diagonal[z] = out[z];
-          }
-
-      phi_inner.submit_dof_value(my_diagonal);
-      phi_inner.distribute_local_to_global(dst);
-
-      for (unsigned int z = 0; z < n_dofs_z; ++z)
-        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-          {
-            value_type diag = {};
-            diag[z]         = i == tid ? 1.0 : 0.0;
-
-            phi_outer.submit_dof_value(diag);
-            phi_outer.evaluate(true, true);
-
-            auto solution_jump             = phi_outer.get_value();
-            auto average_normal_derivative = phi_outer.get_normal_derivative();
-
-            value_type test_by_value;
-            for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
-              {
-                test_by_value[ii] = solution_jump[ii] * sigma +
-                                    0.5 * average_normal_derivative[ii];
-                solution_jump[ii] = solution_jump[ii] * 0.5;
-              }
-
-            phi_outer.submit_value(test_by_value);
-            phi_outer.submit_normal_derivative(solution_jump);
-
-            phi_outer.integrate(true, true);
-
-            auto out = phi_outer.get_value();
-            if (tid == i)
-              my_diagonal[z] = out[z];
-          }
-
-      phi_outer.submit_dof_value(my_diagonal);
-      phi_outer.distribute_local_to_global(dst);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number, bool diag = false>
-  class LocalCellFaceOperator
-  {
-  public:
-    static const unsigned int n_faces   = dim * 2;
-    static const unsigned int n_dofs_1d = fe_degree + 1;
-    static const unsigned int n_local_dofs =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-    static const unsigned int n_q_points =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalCellFaceOperator()
-    {}
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                            cell,
-               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                *shared_data,
-               const Number                                 *src,
-               Number                                       *dst) const
-    {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-
-      fe_eval.read_dof_values(src);
-      value_type dof_value_in = fe_eval.get_dof_value();
-
-      fe_eval.evaluate(false, true);
-      fe_eval.submit_gradient(fe_eval.get_gradient());
-      fe_eval.integrate(false, true);
-
-      value_type dof_value_out = fe_eval.get_dof_value();
-
-      gpu_data->n_cells = gpu_data->n_faces;
-      // face loop
-      for (unsigned int f = 0; f < n_faces; ++f)
-        {
-          dealii::types::global_dof_index face =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
-          dealii::types::global_dof_index face1 =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
-
-          Number coe = face == face1 ? -1 : 1;
-
-          gpu_data->n_faces = gpu_data->n_inner_faces;
-
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_inner(face, gpu_data, shared_data, true);
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_outer(face1, gpu_data, shared_data, false);
-
-          phi_inner.submit_dof_value(dof_value_in);
-          phi_inner.evaluate(true, true);
-
-          phi_outer.read_dof_values(src);
-          phi_outer.evaluate(true, true);
-
-          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
-                           fabs(phi_outer.inverse_length_normal_to_face()));
-          auto sigma = hi * get_penalty_factor();
-
-          value_type solution_jump;
-          value_type test_by_value;
-
-          auto u_inner = phi_inner.get_value();
-          auto u_outer = phi_outer.get_value();
-          auto n_inner = phi_inner.get_normal_derivative();
-          auto n_outer = phi_outer.get_normal_derivative();
-          for (unsigned int i = 0; i < n_dofs_z; ++i)
-            {
-              solution_jump[i] = u_inner[i] - u_outer[i] * coe;
-              auto average_normal_derivative =
-                0.5 * (n_inner[i] + n_outer[i] * coe);
-              test_by_value[i] =
-                solution_jump[i] * sigma - average_normal_derivative;
-              solution_jump[i] = -solution_jump[i] * 0.5;
-            }
-
-          phi_inner.submit_value(test_by_value);
-          phi_inner.submit_normal_derivative(solution_jump);
-
-          phi_inner.integrate(true, true);
-          auto out = phi_inner.get_dof_value();
-          for (unsigned int i = 0; i < n_dofs_z; ++i)
-            dof_value_out[i] += out[i];
-        }
-
-      fe_eval.submit_dof_value(dof_value_out);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalCellFaceOperator<dim, fe_degree, Number, true>
-  {
-  public:
-    static const unsigned int n_faces   = dim * 2;
-    static const unsigned int n_dofs_1d = fe_degree + 1;
-    static const unsigned int n_local_dofs =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-    static const unsigned int n_q_points =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalCellFaceOperator()
-    {}
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                            cell,
-               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                *shared_data,
-               const Number *,
-               Number *dst) const
-    {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-
-      value_type my_diagonal;
-
-      const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int z = 0; z < n_dofs_z; ++z)
-        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-          {
-            value_type diag = {};
-            diag[z]         = i == tid ? 1.0 : 0.0;
-            fe_eval.submit_dof_value(diag);
-            fe_eval.evaluate(false, true);
-            fe_eval.submit_gradient(fe_eval.get_gradient());
-            fe_eval.integrate(false, true);
-            auto out = fe_eval.get_value();
-            if (tid == i)
-              my_diagonal[z] = out[z];
-          }
-
-      gpu_data->n_cells = gpu_data->n_faces;
-      // face loop
-      for (unsigned int f = 0; f < n_faces; ++f)
-        {
-          dealii::types::global_dof_index face =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
-          dealii::types::global_dof_index face1 =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
-
-          Number coe = face == face1 ? 2. : 1.;
-
-          gpu_data->n_faces = gpu_data->n_inner_faces;
-
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_inner(face, gpu_data, shared_data, true);
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_outer(face1, gpu_data, shared_data, false);
-
-          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
-                           fabs(phi_outer.inverse_length_normal_to_face()));
-          auto sigma = hi * get_penalty_factor();
-
-          for (unsigned int z = 0; z < n_dofs_z; ++z)
-            for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-              {
-                value_type diag = {};
-                diag[z]         = i == tid ? 1.0 : 0.0;
-
-                phi_inner.submit_dof_value(diag);
-                phi_inner.evaluate(true, true);
-
-                auto solution_jump = phi_inner.get_value();
-                auto average_normal_derivative =
-                  phi_inner.get_normal_derivative();
-
-                value_type test_by_value;
-                for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
-                  {
-                    test_by_value[ii] =
-                      solution_jump[ii] * sigma * coe -
-                      0.5 * average_normal_derivative[ii] * coe;
-                    solution_jump[ii] = -solution_jump[ii] * 0.5 * coe;
-                  }
-
-                phi_inner.submit_value(test_by_value);
-                phi_inner.submit_normal_derivative(solution_jump);
-
-                phi_inner.integrate(true, true);
-
-                auto out = phi_inner.get_value();
-                if (tid == i)
-                  my_diagonal[z] += out[z];
-              }
-        }
-
-      fe_eval.submit_dof_value(my_diagonal);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number, bool diag = false>
-  class LocalCellFacePartialOperator
-  {
-  public:
-    static const unsigned int n_faces   = dim * 2;
-    static const unsigned int n_dofs_1d = fe_degree + 1;
-    static const unsigned int n_local_dofs =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-    static const unsigned int n_q_points =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-
-    static const unsigned int cells_per_block = 1;
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalCellFacePartialOperator()
-    {
-      static_assert(
-        cells_per_block == 1,
-        "This function only supports one cell per block now. TODO: multiple cells per block.");
-    }
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                            cell,
-               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                *shared_data,
-               const Number                                 *src,
-               Number                                       *dst) const
-    {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-
-      fe_eval.read_dof_values(src);
-      value_type dof_value_in = fe_eval.get_dof_value();
-
-      fe_eval.evaluate(false, true);
-      fe_eval.submit_gradient(fe_eval.get_gradient());
-      fe_eval.integrate(false, true);
-
-      value_type dof_value_out = fe_eval.get_dof_value();
-
-      gpu_data->n_cells = gpu_data->n_faces;
-      // face loop
-      for (unsigned int f = 0; f < n_faces; ++f)
-        {
-          dealii::types::global_dof_index face =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
-          dealii::types::global_dof_index face1 =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
-
-          if (face + face1 == 0)
-            continue;
-
-          Number coe = face == face1 ? -1 : 1;
-
-          gpu_data->n_faces = gpu_data->n_inner_faces;
-
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_inner(face, gpu_data, shared_data, true);
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_outer(face1, gpu_data, shared_data, false);
-
-          phi_inner.submit_dof_value(dof_value_in);
-          phi_inner.evaluate(true, true);
-
-          phi_outer.read_dof_values(src);
-          phi_outer.evaluate(true, true);
-
-          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
-                           fabs(phi_outer.inverse_length_normal_to_face()));
-          auto sigma = hi * get_penalty_factor();
-
-          value_type solution_jump;
-          value_type test_by_value;
-          value_type test_by_value1;
-
-          auto u_inner = phi_inner.get_value();
-          auto u_outer = phi_outer.get_value();
-          auto n_inner = phi_inner.get_normal_derivative();
-          auto n_outer = phi_outer.get_normal_derivative();
-          for (unsigned int i = 0; i < n_dofs_z; ++i)
-            {
-              solution_jump[i] = u_inner[i] - u_outer[i] * coe;
-              auto average_normal_derivative =
-                0.5 * (n_inner[i] + n_outer[i] * coe);
-              test_by_value[i] =
-                solution_jump[i] * sigma - average_normal_derivative;
-              test_by_value1[i] = -test_by_value[i];
-              solution_jump[i]  = -solution_jump[i] * 0.5;
-            }
-
-          phi_inner.submit_value(test_by_value);
-          phi_outer.submit_value(test_by_value1);
-          phi_inner.submit_normal_derivative(solution_jump);
-          phi_outer.submit_normal_derivative(solution_jump);
-
-          phi_inner.integrate(true, true);
-          auto out = phi_inner.get_dof_value();
-          for (unsigned int i = 0; i < n_dofs_z; ++i)
-            dof_value_out[i] += out[i];
-
-          if (face == face1)
-            continue;
-
-          phi_outer.integrate(true, true);
-          phi_outer.distribute_local_to_global(dst);
-        }
-
-      fe_eval.submit_dof_value(dof_value_out);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalCellFacePartialOperator<dim, fe_degree, Number, true>
-  {
-  public:
-    static const unsigned int n_faces   = dim * 2;
-    static const unsigned int n_dofs_1d = fe_degree + 1;
-    static const unsigned int n_local_dofs =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-    static const unsigned int n_q_points =
-      Utilities::pow(fe_degree + 1, dim) * 2;
-
-    static const unsigned int cells_per_block = 1;
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalCellFacePartialOperator()
-    {
-      static_assert(
-        cells_per_block == 1,
-        "This function only supports one cell per block now. TODO: multiple cells per block.");
-    }
-
-    __device__ Number
-    get_penalty_factor() const
-    {
-      return 1.0 * fe_degree * (fe_degree + 1);
-    }
-
-    __device__ void
-    operator()(const unsigned int                            cell,
-               typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                *shared_data,
-               const Number                                 *src,
-               Number                                       *dst) const
-    {
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-
-      value_type my_diagonal;
-
-      const unsigned int tid = compute_index<dim, n_dofs_1d>();
-      for (unsigned int z = 0; z < n_dofs_z; ++z)
-        for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-          {
-            value_type diag = {};
-            diag[z]         = i == tid ? 1.0 : 0.0;
-            fe_eval.submit_dof_value(diag);
-            fe_eval.evaluate(false, true);
-            fe_eval.submit_gradient(fe_eval.get_gradient());
-            fe_eval.integrate(false, true);
-            auto out = fe_eval.get_value();
-            if (tid == i)
-              my_diagonal[z] = out[z];
-          }
-
-      gpu_data->n_cells = gpu_data->n_faces;
-      // face loop
-      for (unsigned int f = 0; f < n_faces; ++f)
-        {
-          value_type my_diagonal1;
-
-          dealii::types::global_dof_index face =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f];
-          dealii::types::global_dof_index face1 =
-            gpu_data->cell2face_id[cell * n_faces * 2 + 2 * f + 1];
-
-          if (face + face1 == 0)
-            continue;
-
-          Number coe = face == face1 ? 2 : 1;
-
-          gpu_data->n_faces = gpu_data->n_inner_faces;
-
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_inner(face, gpu_data, shared_data, true);
-          PSMF::FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number>
-            phi_outer(face1, gpu_data, shared_data, false);
-
-          auto hi    = 0.5 * (fabs(phi_inner.inverse_length_normal_to_face()) +
-                           fabs(phi_outer.inverse_length_normal_to_face()));
-          auto sigma = hi * get_penalty_factor();
-
-          for (unsigned int z = 0; z < n_dofs_z; ++z)
-            for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-              {
-                value_type diag = {};
-                diag[z]         = i == tid ? 1.0 : 0.0;
-
-                phi_inner.submit_dof_value(diag);
-                phi_inner.evaluate(true, true);
-
-                auto solution_jump = phi_inner.get_value();
-                auto average_normal_derivative =
-                  phi_inner.get_normal_derivative();
-
-                value_type test_by_value;
-                for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
-                  {
-                    test_by_value[ii] =
-                      solution_jump[ii] * sigma * coe -
-                      0.5 * average_normal_derivative[ii] * coe;
-                    solution_jump[ii] = -solution_jump[ii] * 0.5 * coe;
-                  }
-
-                phi_inner.submit_value(test_by_value);
-                phi_inner.submit_normal_derivative(solution_jump);
-
-                phi_inner.integrate(true, true);
-
-                auto out = phi_inner.get_value();
-                if (tid == i)
-                  my_diagonal[z] += out[z];
-              }
-
-          if (face == face1)
-            continue;
-
-          for (unsigned int z = 0; z < n_dofs_z; ++z)
-            for (unsigned int i = 0; i < n_local_dofs / n_dofs_z / 2; ++i)
-              {
-                value_type diag = {};
-                diag[z]         = i == tid ? 1.0 : 0.0;
-
-                phi_outer.submit_dof_value(diag);
-                phi_outer.evaluate(true, true);
-
-                auto solution_jump = phi_outer.get_value();
-                auto average_normal_derivative =
-                  phi_outer.get_normal_derivative();
-
-                value_type test_by_value;
-                for (unsigned int ii = 0; ii < n_dofs_z; ++ii)
-                  {
-                    test_by_value[ii] =
-                      -(-solution_jump[ii] * sigma * coe -
-                        0.5 * average_normal_derivative[ii] * coe);
-                    solution_jump[ii] = solution_jump[ii] * 0.5 * coe;
-                  }
-
-                phi_outer.submit_value(test_by_value);
-                phi_outer.submit_normal_derivative(solution_jump);
-
-                phi_outer.integrate(true, true);
-
-                auto out = phi_outer.get_value();
-                if (tid == i)
-                  my_diagonal1[z] = out[z];
-              }
-
-          phi_outer.submit_dof_value(my_diagonal1);
-          phi_outer.distribute_local_to_global(dst);
-        }
-
-      fe_eval.submit_dof_value(my_diagonal);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LocalRHSOperator
-  {
-  public:
-    static const unsigned int n_dofs_1d    = fe_degree + 1;
-    static const unsigned int n_local_dofs = Utilities::pow(fe_degree + 1, dim);
-    static const unsigned int n_q_points   = Utilities::pow(fe_degree + 1, dim);
-
-    static const unsigned int cells_per_block =
-      PSMF::cells_per_block_shmem(dim, fe_degree);
-
-    static const unsigned int n_dofs_z = dim == 3 ? fe_degree + 1 : 1;
-
-    using value_type = cuda::std::array<Number, n_dofs_z>;
-
-    LocalRHSOperator()
-    {}
-
-    __device__ void
-    operator()(const unsigned int                                  cell,
-               const typename PSMF::MatrixFree<dim, Number>::Data *gpu_data,
-               PSMF::SharedData<dim, Number>                      *shared_data,
-               const Number                                       *src,
-               Number                                             *dst) const
-    {
-      (void)src;
-
-      PSMF::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> fe_eval(
-        cell, gpu_data, shared_data);
-
-      // Number val = dim * numbers::PI * numbers::PI;
-      // for (unsigned int d = 0; d < dim; ++d)
-      //   val *= sin(numbers::PI * point[d]);
-
-      value_type val = {};
-      for (unsigned int i = 0; i < n_dofs_z; ++i)
-        {
-          const auto index =
-#if TENSORCORE == 2
-            (i * n_dofs_1d * n_dofs_1d + q_point_id_in_cell<dim, n_dofs_1d>()) ^
-            PSMF::get_base<n_dofs_1d>(threadIdx.y, i);
-#else
-            (i * n_dofs_1d * n_dofs_1d + q_point_id_in_cell<dim, n_dofs_1d>());
-#endif
-          const auto point =
-            get_quadrature_point<dim, Number, n_dofs_1d>(cell, gpu_data, index);
-          if constexpr (dim == 2)
-            {
-              val[i] += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
-                        exp(point[0]);
-              val[i] += 2 * point[0] * (1 - point[0]) * exp(point[0]);
-            }
-          else if (dim == 3)
-            {
-              val[i] += point[0] * (point[0] + 3) * point[1] * (1 - point[1]) *
-                        point[2] * (1 - point[2]) * exp(point[0]);
-              val[i] += 2 * point[0] * (1 - point[0]) * point[2] *
-                        (1 - point[2]) * exp(point[0]);
-              val[i] += 2 * point[0] * (1 - point[0]) * point[1] *
-                        (1 - point[1]) * exp(point[0]);
-            }
-        }
-
-      fe_eval.submit_value(val);
-      fe_eval.integrate(true, false);
-      fe_eval.distribute_local_to_global(dst);
-    }
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LaplaceDGOperator : public Subscriptor
-  {
-  public:
-    using value_type = Number;
-
-    LaplaceDGOperator()
-    {
-      inverse_diagonal_matrix = std::make_shared<DiagonalMatrix<
-        LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>>();
-    }
-
-    void
-    initialize(std::shared_ptr<const MatrixFree<dim, Number>> data_,
-               const DoFHandler<dim>                         &mg_dof,
-               const unsigned int level = numbers::invalid_unsigned_int)
-    {
-      data        = data_;
-      dof_handler = &mg_dof;
-      mg_level    = level;
-
-      if (mg_level == numbers::invalid_unsigned_int)
-        n_dofs = dof_handler->n_locally_owned_dofs();
-      else
-        n_dofs = dof_handler->n_dofs(mg_level);
-    }
-
-    void
-    vmult(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
-          const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-            &src) const
-    {
-      dst = 0.;
-
-      if (data->face_integral_type == FaceIntegralType::compact)
-        {
-          LocalLaplaceOperator<dim, fe_degree, Number> laplace_operator;
-          data->cell_loop(laplace_operator, src, dst);
-
-          LocalLaplaceBDOperator<dim, fe_degree, Number> laplace_bd_operator;
-          data->boundary_face_loop(laplace_bd_operator, src, dst);
-
-          LocalLaplaceFaceOperator<dim, fe_degree, Number>
-            laplace_face_operator;
-          data->inner_face_loop(laplace_face_operator, src, dst);
-        }
-      else if (data->face_integral_type == FaceIntegralType::element_wise)
-        {
-          LocalCellFaceOperator<dim, fe_degree, Number> laplace_operator;
-          data->cell_face_loop(laplace_operator, src, dst);
-        }
-      else if (data->face_integral_type ==
-               FaceIntegralType::element_wise_partial)
-        {
-          LocalCellFacePartialOperator<dim, fe_degree, Number> laplace_operator;
-          data->cell_face_loop(laplace_operator, src, dst);
-        }
-      else
-        AssertThrow(false, dealii::ExcMessage("Invalid FaceIntegralType."));
-    }
-
-    void
-    estimate(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
-             const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-               &src) const
-    {
-      dst = 0.;
-      LocalLaplaceEstimator<dim, fe_degree, Number> laplace_operator;
-      data->cell_loop(laplace_operator, src, dst);
-    }
-
-    void
-    Tvmult(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
-           const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-             &src) const
-    {
-      vmult(dst, src);
-    }
-
-    void
-    initialize_dof_vector(
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &vec) const
-    {
-      if (mg_level == numbers::invalid_unsigned_int)
-        {
-          auto locally_owned_dofs = dof_handler->locally_owned_dofs();
-          auto locally_relevant_dofs =
-            DoFTools::extract_locally_relevant_dofs(*dof_handler);
-          vec.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
-        }
-      else
-        {
-          auto locally_owned_dofs =
-            dof_handler->locally_owned_mg_dofs(mg_level);
-          auto locally_relevant_dofs =
-            DoFTools::extract_locally_relevant_level_dofs(*dof_handler,
-                                                          mg_level);
-          vec.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
-        }
-    }
-
-    unsigned int
-    m() const
-    {
-      return n_dofs;
-    }
-
-    // we cannot access matrix elements of a matrix free operator directly.
-    Number
-    el(const unsigned int, const unsigned int) const
-    {
-      ExcNotImplemented();
-      return -1000000000000000000;
-    }
-
-
-    unsigned int
-    get_mg_level() const
-    {
-      return mg_level;
-    }
-
-    const DoFHandler<dim> *
-    get_dof_handler() const
-    {
-      return dof_handler;
-    }
-
-    std::shared_ptr<const MatrixFree<dim, Number>>
-    get_mf_data() const
-    {
-      return data;
-    }
-
-    void
-    compute_rhs(
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>       &dst,
-      const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
-      const
-    {
-      dst = 0.;
-      LocalRHSOperator<dim, fe_degree, Number> laplace_operator;
-      data->cell_loop(laplace_operator, src, dst);
-      // TODO: face terms
-    }
-
-    void
-    compute_residual(
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src,
-      const Function<dim, Number> &rhs_function,
-      const Function<dim, Number> &exact_solution,
-      const unsigned int) const
-    {
-      const MappingQGeneric<dim> mapping(fe_degree);
-      AffineConstraints<Number>  dummy;
-      dummy.close();
-
-      typename dealii::MatrixFree<dim, Number>::AdditionalData additional_data;
-      additional_data.tasks_parallel_scheme =
-        dealii::MatrixFree<dim, Number>::AdditionalData::none;
-      additional_data.mapping_update_flags =
-        (update_gradients | update_JxW_values | update_quadrature_points);
-      additional_data.mapping_update_flags_inner_faces =
-        (update_gradients | update_JxW_values | update_normal_vectors);
-      additional_data.mapping_update_flags_boundary_faces =
-        (update_gradients | update_JxW_values | update_normal_vectors |
-         update_quadrature_points);
-
-      dealii::MatrixFree<dim, Number> data;
-      data.reinit(mapping,
-                  *dof_handler,
-                  dummy,
-                  QGauss<1>(fe_degree + 1),
-                  additional_data);
-
-      dst = 0.;
-
-      const unsigned int n_dofs = src.locally_owned_size();
-
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::Host>
-        system_rhs_host(n_dofs);
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-        system_rhs_dev(n_dofs);
-
-      LinearAlgebra::ReadWriteVector<Number> rw_vector(n_dofs);
-
-
-      dealii::FEEvaluation<dim, fe_degree> phi(data);
-
-      for (unsigned int cell = 0; cell < data.n_cell_batches(); ++cell)
-        {
-          phi.reinit(cell);
-          for (const unsigned int q : phi.quadrature_point_indices())
-            {
-              VectorizedArray<Number> rhs_val = VectorizedArray<Number>();
-              Point<dim, VectorizedArray<Number>> point_batch =
-                phi.quadrature_point(q);
-              for (unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v)
-                {
-                  Point<dim> single_point;
-                  for (unsigned int d = 0; d < dim; ++d)
-                    single_point[d] = point_batch[d][v];
-                  rhs_val[v] = rhs_function.value(single_point);
-                }
-              phi.submit_value(rhs_val, q);
-            }
-          phi.integrate_scatter(EvaluationFlags::values, system_rhs_host);
-        }
-
-      dealii::FEFaceEvaluation<dim, fe_degree> phi_face(data, true);
-      for (unsigned int face = data.n_inner_face_batches();
-           face < data.n_inner_face_batches() + data.n_boundary_face_batches();
-           ++face)
-        {
-          phi_face.reinit(face);
-
-          const VectorizedArray<double> h_inner =
-            1. / std::abs((phi_face.get_normal_vector(0) *
-                           phi_face.inverse_jacobian(0))[dim - 1]);
-          const auto one_over_h = (0.5 / h_inner) + (0.5 / h_inner);
-          const auto gamma =
-            fe_degree == 0 ? 1 : 1.0 * fe_degree * (fe_degree + 1);
-          const VectorizedArray<double> sigma = 2.0 * gamma * one_over_h;
-
-          for (const unsigned int q : phi_face.quadrature_point_indices())
-            {
-              VectorizedArray<Number> test_value = VectorizedArray<Number>(),
-                                      test_normal_derivative =
-                                        VectorizedArray<Number>();
-              Point<dim, VectorizedArray<Number>> point_batch =
-                phi_face.quadrature_point(q);
-
-              for (unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v)
-                {
-                  Point<dim> single_point;
-                  for (unsigned int d = 0; d < dim; ++d)
-                    single_point[d] = point_batch[d][v];
-
-                  if (data.get_boundary_id(face) == 0)
-                    test_value[v] = 1.0 * exact_solution.value(single_point);
-                  else
-                    {
-                      Tensor<1, dim> normal;
-                      for (unsigned int d = 0; d < dim; ++d)
-                        normal[d] = phi_face.get_normal_vector(q)[d][v];
-                      test_normal_derivative[v] =
-                        -normal * exact_solution.gradient(single_point);
-                    }
-                }
-              phi_face.submit_value(test_value * sigma - test_normal_derivative,
-                                    q);
-              phi_face.submit_normal_derivative(-1.0 * test_value, q);
-            }
-          phi_face.integrate_scatter(EvaluationFlags::values |
-                                       EvaluationFlags::gradients,
-                                     system_rhs_host);
-        }
-
-      system_rhs_host.compress(VectorOperation::add);
-      rw_vector.import(system_rhs_host, VectorOperation::insert);
-      system_rhs_dev.import(rw_vector, VectorOperation::insert);
-
-      // vmult(dst, src);
-      dst.sadd(-1., system_rhs_dev);
-    }
-
-
-    void
-    compute_diagonal()
-    {
-      auto &inv_diag = inverse_diagonal_matrix->get_vector();
-
-      initialize_dof_vector(inv_diag);
-      auto zero_vec = inv_diag;
-
-      if (data->face_integral_type == FaceIntegralType::compact)
-        {
-          LocalLaplaceOperator<dim, fe_degree, Number, true> laplace_operator;
-          data->cell_loop(laplace_operator, zero_vec, inv_diag);
-
-          LocalLaplaceBDOperator<dim, fe_degree, Number, true>
-            laplace_bd_operator;
-          data->boundary_face_loop(laplace_bd_operator, zero_vec, inv_diag);
-
-          LocalLaplaceFaceOperator<dim, fe_degree, Number, true>
-            laplace_face_operator;
-          data->inner_face_loop(laplace_face_operator, zero_vec, inv_diag);
-        }
-      else if (data->face_integral_type == FaceIntegralType::element_wise)
-        {
-          LocalCellFaceOperator<dim, fe_degree, Number, true> laplace_operator;
-          data->cell_face_loop(laplace_operator, zero_vec, inv_diag);
-        }
-      else if (data->face_integral_type ==
-               FaceIntegralType::element_wise_partial)
-        {
-          LocalCellFacePartialOperator<dim, fe_degree, Number, true>
-            laplace_operator;
-          data->cell_face_loop(laplace_operator, zero_vec, inv_diag);
-        }
-      else
-        AssertThrow(false, dealii::ExcMessage("Invalid FaceIntegralType."));
-
-      vector_invert(inv_diag);
-
-      diagonal_is_available = true;
-    }
-
-    const std::shared_ptr<DiagonalMatrix<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>>
-    get_diagonal_inverse() const
-    {
-      Assert(diagonal_is_available == true, ExcNotInitialized());
-      return inverse_diagonal_matrix;
-    }
-
-
-  private:
-    std::shared_ptr<const MatrixFree<dim, Number>> data;
-    const DoFHandler<dim>                         *dof_handler;
-    unsigned int                                   mg_level;
-    unsigned int                                   n_dofs;
-
-    std::shared_ptr<DiagonalMatrix<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>>
-         inverse_diagonal_matrix;
-    bool diagonal_is_available;
-  };
-
-
-  template <int dim, int fe_degree, typename Number>
-  class LaplaceDGEdgeOperator : public Subscriptor
-  {
-  public:
-    using value_type = Number;
-
-    LaplaceDGEdgeOperator()
-    {}
-
-    void
-    initialize(std::shared_ptr<const MatrixFree<dim, Number>> data_,
-               const DoFHandler<dim>                         &mg_dof,
-               const unsigned int                             level)
-    {
-      data        = data_;
-      dof_handler = &mg_dof;
-      mg_level    = level;
-    }
-
-    void
-    vmult(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
-          const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-            &src) const
-    {
-      dst = 0.;
-
-      LocalLaplaceFaceOperator<dim, fe_degree, Number> laplace_face_operator;
-      data->inner_face_loop(laplace_face_operator, src, dst);
-    }
-
-    void
-    Tvmult(LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst,
-           const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-             &src) const
-    {
-      vmult(dst, src);
-    }
-
-    void
-    initialize_dof_vector(
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &vec) const
-    {
-      auto locally_owned_dofs = dof_handler->locally_owned_mg_dofs(mg_level);
-      auto locally_relevant_dofs =
-        DoFTools::extract_locally_relevant_level_dofs(*dof_handler, mg_level);
-
-      vec.reinit(locally_owned_dofs, locally_relevant_dofs, MPI_COMM_WORLD);
-    }
-
-    unsigned int
-    get_mg_level() const
-    {
-      return mg_level;
-    }
-
-    const DoFHandler<dim> *
-    get_dof_handler() const
-    {
-      return dof_handler;
-    }
-
-  private:
-    std::shared_ptr<const MatrixFree<dim, Number>> data;
-    const DoFHandler<dim>                         *dof_handler;
-    unsigned int                                   mg_level;
   };
 } // namespace PSMF
 

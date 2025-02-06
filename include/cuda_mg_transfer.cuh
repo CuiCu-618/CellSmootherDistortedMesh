@@ -38,8 +38,8 @@ namespace PSMF
 
   struct IndexMapping
   {
-    CudaVector<types::global_dof_index> global_indices;
-    CudaVector<types::global_dof_index> level_indices;
+    CudaVector<unsigned int> global_indices;
+    CudaVector<unsigned int> level_indices;
 
     std::size_t
     memory_consumption() const
@@ -48,6 +48,7 @@ namespace PSMF
              level_indices.memory_consumption();
     }
   };
+
 
   /**
    * Implementation of the MGTransferBase interface for which the transfer
@@ -58,10 +59,9 @@ namespace PSMF
    */
   template <int dim, typename Number>
   class MGTransferCUDA
-    : public MGTransferBase<
-        LinearAlgebra::distributed::Vector<Number,
-                                           MemorySpace::CUDA>> // public
-                                                               // Subscriptor
+    : public MGTransferBase<LinearAlgebra::distributed::Vector<
+        Number,
+        MemorySpace::CUDA>> // public Subscriptor
   {
   public:
     /**
@@ -254,13 +254,13 @@ namespace PSMF
      * cells necessary for the transfer to the next level.
      *
      */
-    std::vector<CudaVector<types::global_dof_index>> level_dof_indices;
+    std::vector<CudaVector<unsigned int>> level_dof_indices;
 
     /**
      * A variable storing the connectivity from parent to child cell numbers
      * for each level.
      */
-    std::vector<CudaVector<types::global_dof_index>> child_offset_in_parent;
+    std::vector<CudaVector<unsigned int>> child_offset_in_parent;
 
     /**
      * A variable storing the number of cells owned on a given process (sets
@@ -299,21 +299,6 @@ namespace PSMF
     std::vector<IndexMapping> copy_indices;
 
     /**
-     * Additional degrees of freedom for the copy_to_mg() function. These are
-     * the ones where the global degree of freedom is locally owned and the
-     * level degree of freedom is not.
-     */
-    std::vector<IndexMapping>           copy_indices_global_mine;
-    std::vector<Table<2, unsigned int>> copy_indices_global_mine_host;
-
-    /**
-     * Additional degrees of freedom for the copy_from_mg() function. These
-     * are the ones where the level degree of freedom is locally owned and the
-     * global degree of freedom is not.
-     */
-    std::vector<IndexMapping> copy_indices_level_mine;
-
-    /**
      * This variable stores whether the copy operation from the global to the
      * level vector is actually a plain copy to the finest level. This means
      * that the grid has no adaptive refinement and the numbering on the
@@ -322,19 +307,11 @@ namespace PSMF
     bool perform_plain_copy;
 
     /**
-     * This variable stores whether the copy operation from the global to the
-     * level vector is actually a plain copy to the finest level except for a
-     * renumbering within the finest level of the degrees of freedom. This
-     * means that the grid has no adaptive refinement.
-     */
-    bool perform_renumbered_plain_copy;
-
-    /**
      * A variable storing the local indices of Dirichlet boundary conditions
      * on cells for all levels (outer index), the cells within the levels
      * (second index), and the indices on the cell (inner index).
      */
-    std::vector<CudaVector<types::global_dof_index>> dirichlet_indices;
+    std::vector<CudaVector<unsigned int>> dirichlet_indices;
 
     /**
      * A vector that holds shared pointers to the partitioners of the
@@ -350,35 +327,6 @@ namespace PSMF
      */
     SmartPointer<const MGConstrainedDoFs, MGTransferCUDA<dim, Number>>
       mg_constrained_dofs;
-
-    /**
-     * In the function copy_to_mg, we need to access ghosted entries of the
-     * global vector for inserting into the level vectors. This vector is
-     * populated with those entries.
-     */
-    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-      ghosted_global_vector;
-
-    /**
-     * Same as above but used when working with solution vectors.
-     */
-    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-      solution_ghosted_global_vector;
-
-    /**
-     * In the function copy_from_mg, we access all level vectors with certain
-     * ghost entries for inserting the result into a global vector.
-     */
-    mutable MGLevelObject<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
-      ghosted_level_vector;
-
-    /**
-     * Same as above but used when working with solution vectors.
-     */
-    mutable MGLevelObject<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
-      solution_ghosted_level_vector;
 
     /**
      * Internal function to fill copy_indice.
@@ -411,42 +359,38 @@ namespace PSMF
       Number                                                         val) const;
   };
 
-  template <typename Number, typename Number2, bool add>
+  template <typename Number, typename Number2>
   __global__ void
-  copy_with_indices_kernel(Number                        *dst,
-                           Number2                       *src,
-                           const types::global_dof_index *dst_indices,
-                           const types::global_dof_index *src_indices,
-                           int                            n)
+  copy_with_indices_kernel(Number             *dst,
+                           Number2            *src,
+                           const unsigned int *dst_indices,
+                           const unsigned int *src_indices,
+                           int                 n)
   {
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < n)
       {
-        if (add)
-          dst[dst_indices[i]] += src[src_indices[i]];
-        else
-          dst[dst_indices[i]] = src[src_indices[i]];
+        dst[dst_indices[i]] = src[src_indices[i]];
       }
   }
 
-  template <typename Number, typename Number2, bool add = false>
+  template <typename Number, typename Number2>
   void
   copy_with_indices(
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>        &dst,
     const LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &src,
-    const CudaVector<types::global_dof_index> &dst_indices,
-    const CudaVector<types::global_dof_index> &src_indices)
+    const CudaVector<unsigned int> &dst_indices,
+    const CudaVector<unsigned int> &src_indices)
   {
     const int  n         = dst_indices.size();
     const int  blocksize = 256;
     const dim3 block_dim = dim3(blocksize);
     const dim3 grid_dim  = dim3(1 + (n - 1) / blocksize);
-    copy_with_indices_kernel<Number, Number2, add>
-      <<<grid_dim, block_dim>>>(dst.get_values(),
-                                src.get_values(),
-                                dst_indices.get_values(),
-                                src_indices.get_values(),
-                                n);
+    copy_with_indices_kernel<<<grid_dim, block_dim>>>(dst.get_values(),
+                                                      src.get_values(),
+                                                      dst_indices.get_values(),
+                                                      src_indices.get_values(),
+                                                      n);
     AssertCudaKernel();
   }
 

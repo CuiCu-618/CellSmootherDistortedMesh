@@ -20,51 +20,27 @@ namespace PSMF
             int dim,
             int fe_degree,
             typename Number,
-            LaplaceVariant  lapalace,
-            SmootherVariant smooth>
-  struct LocalSmoother
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
-
-    LocalSmoother() = default;
-
-    LocalSmoother(const SmartPointer<const MatrixType>)
-    {}
-
-    template <bool is_ghost>
-    void
-    setup_kernel(const unsigned int) const
-    {}
-
-    template <typename VectorType, typename DataType, bool is_ghost>
-    void
-    loop_kernel(const VectorType &,
-                VectorType &,
-                VectorType &,
-                const DataType &,
-                const dim3 &,
-                const dim3 &,
-                cudaStream_t) const
-    {}
-  };
+            LocalSolverVariant solver,
+            LaplaceVariant     lapalace,
+            SmootherVariant    smooth>
+  struct LocalSmoother;
 
 
   template <typename MatrixType,
             int dim,
             int fe_degree,
             typename Number,
-            LaplaceVariant lapalace>
+            LocalSolverVariant solver,
+            LaplaceVariant     lapalace>
   struct LocalSmoother<MatrixType,
                        dim,
                        fe_degree,
                        Number,
+                       solver,
                        lapalace,
                        SmootherVariant::GLOBAL>
   {
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree;
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree - 1;
 
     LocalSmoother() = default;
 
@@ -74,7 +50,6 @@ namespace PSMF
       A->initialize_dof_vector(tmp);
     }
 
-    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
@@ -85,42 +60,35 @@ namespace PSMF
       shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
       // local_eigenvectors, local_eigenvalues
       shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * dim * sizeof(Number);
+      // tmp
       shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
 
-      AssertCuda(cudaFuncSetAttribute(
-        loop_kernel_seperate_inv<dim, fe_degree, Number, is_ghost>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        shared_mem));
+      AssertCuda(
+        cudaFuncSetAttribute(loop_kernel_global<dim, fe_degree, Number, solver>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_mem));
 
       block_dim = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
     }
 
-    template <typename VectorType, typename DataType, bool is_ghost>
+    template <typename VectorType, typename DataType>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
-                VectorType       &solution,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
                 const dim3 &,
-                cudaStream_t stream) const
+                const unsigned int) const
     {
-      {
-        A->vmult(tmp, dst);
-        tmp.sadd(-1., src);
+      A->vmult(tmp, dst);
+      tmp.sadd(-1., src);
 
-        dst.update_ghost_values();
-        tmp.update_ghost_values();
-      }
-
-      if (grid_dim.x > 0)
-        loop_kernel_seperate_inv<dim, fe_degree, Number, is_ghost>
-          <<<grid_dim, block_dim, shared_mem, stream>>>(tmp.get_values(),
-                                                        dst.get_values(),
-                                                        solution.get_values(),
-                                                        gpu_data);
+      loop_kernel_global<dim, fe_degree, Number, solver>
+        <<<grid_dim, block_dim, shared_mem>>>(
+          tmp.get_values(),
+          dst.get_values(),
+          gpu_data[static_cast<int>(solver)]);
     }
     mutable std::size_t                  shared_mem;
     mutable dim3                         block_dim;
@@ -133,62 +101,73 @@ namespace PSMF
             int dim,
             int fe_degree,
             typename Number,
-            LaplaceVariant lapalace>
+            LocalSolverVariant solver,
+            LaplaceVariant     lapalace>
   struct LocalSmoother<MatrixType,
                        dim,
                        fe_degree,
                        Number,
+                       solver,
                        lapalace,
-                       SmootherVariant::FUSED_L>
+                       SmootherVariant::AVS_colored>
   {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree - 1;
 
     LocalSmoother() = default;
 
-    LocalSmoother(const SmartPointer<const MatrixType>)
-    {}
+    LocalSmoother(const SmartPointer<const MatrixType> A)
+      : A(A)
+    {
+      A->initialize_dof_vector(tmp);
+    }
 
-    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
       shared_mem = 0;
 
       const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst
+      // local_src, local_dst, local_residual
       shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
       // local_eigenvectors, local_eigenvalues
       shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * dim * sizeof(Number);
+      // tmp
       shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
 
-      AssertCuda(cudaFuncSetAttribute(
-        loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        shared_mem));
+      AssertCuda(
+        cudaFuncSetAttribute(loop_kernel_global<dim, fe_degree, Number, solver>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_mem));
+
+      block_dim = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
     }
 
-    template <typename VectorType, typename DataType, bool is_ghost>
+    template <typename VectorType, typename DataType>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
-                VectorType       &solution,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
+                const dim3 &,
+                const unsigned int color) const
     {
-      if (grid_dim.x > 0)
-        loop_kernel_fused_l<dim, fe_degree, Number, lapalace, is_ghost>
-          <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                        dst.get_values(),
-                                                        solution.get_values(),
-                                                        gpu_data);
+      if (color == 0)
+        {
+          A->vmult(tmp, dst);
+          tmp.sadd(-1., src);
+        }
+
+      loop_kernel_global<dim, fe_degree, Number, solver>
+        <<<grid_dim, block_dim, shared_mem>>>(
+          tmp.get_values(),
+          dst.get_values(),
+          gpu_data[static_cast<int>(solver)]);
     }
+    mutable std::size_t                  shared_mem;
+    mutable dim3                         block_dim;
+    const SmartPointer<const MatrixType> A;
+    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> tmp;
   };
 
 
@@ -196,143 +175,95 @@ namespace PSMF
             int dim,
             int fe_degree,
             typename Number,
-            LaplaceVariant lapalace>
+            LocalSolverVariant solver,
+            LaplaceVariant     lapalace>
   struct LocalSmoother<MatrixType,
                        dim,
                        fe_degree,
                        Number,
+                       solver,
                        lapalace,
-                       SmootherVariant::ConflictFree>
+                       SmootherVariant::AVS_atomic>
   {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
+    static constexpr unsigned int n_dofs_1d = 2 * fe_degree - 1;
 
     LocalSmoother() = default;
 
-    LocalSmoother(const SmartPointer<const MatrixType>)
-    {}
+    LocalSmoother(const SmartPointer<const MatrixType> A)
+      : A(A)
+    {
+      A->initialize_dof_vector(tmp);
+    }
 
-    template <bool is_ghost>
     void
     setup_kernel(const unsigned int patch_per_block) const
     {
       shared_mem = 0;
 
       const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst
+      // local_src, local_dst, local_residual
       shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
       // local_eigenvectors, local_eigenvalues
       shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
-      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
+        2 * patch_per_block * n_dofs_1d * n_dofs_1d * dim * sizeof(Number);
+      // tmp
+      shared_mem += (dim - 1) * patch_per_block * local_dim * sizeof(Number);
 
-      AssertCuda(cudaFuncSetAttribute(
-        loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        shared_mem));
+      AssertCuda(
+        cudaFuncSetAttribute(loop_kernel_global<dim, fe_degree, Number, solver>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_mem));
+
+      block_dim = dim3(patch_per_block * n_dofs_1d, n_dofs_1d);
     }
 
-    template <typename VectorType, typename DataType, bool is_ghost>
+    template <typename VectorType, typename DataType>
     void
     loop_kernel(const VectorType &src,
                 VectorType       &dst,
-                VectorType       &solution,
                 const DataType   &gpu_data,
                 const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
+                const dim3 &,
+                const unsigned int color) const
     {
-      if (grid_dim.x > 0)
-        loop_kernel_fused_cf<dim, fe_degree, Number, lapalace, is_ghost>
-          <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                        dst.get_values(),
-                                                        solution.get_values(),
-                                                        gpu_data);
+      if (color == 0)
+        {
+          A->vmult(tmp, dst);
+          tmp.sadd(-1., src);
+        }
+
+      loop_kernel_global<dim, fe_degree, Number, solver>
+        <<<grid_dim, block_dim, shared_mem>>>(
+          tmp.get_values(),
+          dst.get_values(),
+          gpu_data[static_cast<int>(solver)]);
     }
+    mutable std::size_t                  shared_mem;
+    mutable dim3                         block_dim;
+    const SmartPointer<const MatrixType> A;
+    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> tmp;
   };
 
-  template <typename MatrixType,
-            int dim,
-            int fe_degree,
-            typename Number,
-            LaplaceVariant lapalace>
-  struct LocalSmoother<MatrixType,
-                       dim,
-                       fe_degree,
-                       Number,
-                       lapalace,
-                       SmootherVariant::ExactRes>
-  {
-  public:
-    static constexpr unsigned int n_dofs_1d = 2 * fe_degree + 2;
-
-    mutable std::size_t shared_mem;
-
-    LocalSmoother() = default;
-
-    LocalSmoother(const SmartPointer<const MatrixType>)
-    {}
-
-    template <bool is_ghost>
-    void
-    setup_kernel(const unsigned int patch_per_block) const
-    {
-      shared_mem = 0;
-
-      const unsigned int local_dim = Util::pow(n_dofs_1d, dim);
-      // local_src, local_dst
-      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
-      // local_eigenvectors, local_eigenvalues
-      shared_mem +=
-        2 * patch_per_block * n_dofs_1d * n_dofs_1d * 1 * sizeof(Number);
-      // temp
-      shared_mem += 2 * patch_per_block * local_dim * sizeof(Number);
-
-      AssertCuda(cudaFuncSetAttribute(
-        loop_kernel_fused_exact<dim, fe_degree, Number, lapalace>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        shared_mem));
-    }
-
-    template <typename VectorType, typename DataType, bool is_ghost>
-    void
-    loop_kernel(const VectorType &src,
-                VectorType       &dst,
-                VectorType       &solution,
-                const DataType   &gpu_data,
-                const dim3       &grid_dim,
-                const dim3       &block_dim,
-                cudaStream_t      stream) const
-    {
-      if (grid_dim.x > 0)
-        loop_kernel_fused_exact<dim, fe_degree, Number, lapalace>
-          <<<grid_dim, block_dim, shared_mem, stream>>>(src.get_values(),
-                                                        dst.get_values(),
-                                                        solution.get_values(),
-                                                        gpu_data);
-    }
-  };
 
 
   // Forward declaration
   template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            LaplaceVariant  laplace,
-            SmootherVariant smooth>
+            int                dim,
+            int                fe_degree,
+            LocalSolverVariant solver,
+            LaplaceVariant     laplace,
+            SmootherVariant    smooth>
   class PatchSmoother;
 
   /**
    * Implementation of vertex-patch precondition.
    */
   template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            LaplaceVariant  laplace,
-            SmootherVariant smooth>
+            int                dim,
+            int                fe_degree,
+            LocalSolverVariant solver,
+            LaplaceVariant     laplace,
+            SmootherVariant    smooth>
   class PatchSmootherImpl
   {
   public:
@@ -362,7 +293,7 @@ namespace PSMF
     void
     step(VectorType &dst, const VectorType &src) const
     {
-      LocalSmoother<MatrixType, dim, fe_degree, Number, laplace, smooth>
+      LocalSmoother<MatrixType, dim, fe_degree, Number, solver, laplace, smooth>
         local_smoother(A);
 
       data->patch_loop(local_smoother, src, dst);
@@ -388,24 +319,27 @@ namespace PSMF
    * Vertex-patch preconditioner.
    */
   template <typename MatrixType,
-            int             dim,
-            int             fe_degree,
-            LaplaceVariant  laplace,
-            SmootherVariant smooth>
+            int                dim,
+            int                fe_degree,
+            LocalSolverVariant solver,
+            LaplaceVariant     laplace,
+            SmootherVariant    smooth>
   class PatchSmoother
     : public PreconditionRelaxation<
         MatrixType,
-        PatchSmootherImpl<MatrixType, dim, fe_degree, laplace, smooth>>
+        PatchSmootherImpl<MatrixType, dim, fe_degree, solver, laplace, smooth>>
   {
     using Number = typename MatrixType::value_type;
     using PreconditionerType =
-      PatchSmootherImpl<MatrixType, dim, fe_degree, laplace, smooth>;
+      PatchSmootherImpl<MatrixType, dim, fe_degree, solver, laplace, smooth>;
 
   public:
     class AdditionalData
     {
     public:
       AdditionalData() = default;
+
+      unsigned int n_iterations;
 
       std::shared_ptr<LevelVertexPatch<dim, fe_degree, Number>> data;
       /*
@@ -426,7 +360,7 @@ namespace PSMF
 
       this->A            = &A;
       this->relaxation   = 1;
-      this->n_iterations = 1;
+      this->n_iterations = parameters_in.n_iterations;
 
       Assert(parameters.preconditioner, ExcNotInitialized());
       this->preconditioner = parameters.preconditioner;

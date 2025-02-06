@@ -49,7 +49,7 @@ namespace PSMF
     get_eigenvectors(std::array<Table<2, Number>, dim> &eigenvectors) const;
 
   private:
-    MatrixFree<1, Number> matrix_free_1d;
+    MatrixFree<1, double> matrix_free_1d;
   };
 
   // *************** implementation ***************

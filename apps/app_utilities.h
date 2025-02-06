@@ -17,40 +17,36 @@
 #include "ct_parameter.h"
 #include "git_version.h"
 
-#define LA_MACRO(name, v1, v2, v3, v4, v5)                 \
-  enum class name                                          \
-  {                                                        \
-    v1,                                                    \
-    v2,                                                    \
-    v3,                                                    \
-    v4,                                                    \
-    v5,                                                    \
-  };                                                       \
-  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5}; \
-  template <typename T>                                    \
-  constexpr const char *name##ToString(T value)            \
-  {                                                        \
-    return name##Strings[static_cast<int>(value)];         \
+#define LA_MACRO(name, v1, v2, v3, v4, v5, v6)                  \
+  enum class name                                               \
+  {                                                             \
+    v1,                                                         \
+    v2,                                                         \
+    v3,                                                         \
+    v4,                                                         \
+    v5,                                                         \
+    v6,                                                         \
+  };                                                            \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6}; \
+  template <typename T>                                         \
+  constexpr const char *name##ToString(T value)                 \
+  {                                                             \
+    return name##Strings[static_cast<int>(value)];              \
   }
 
-#define SMO_MACRO(name, v1, v2, v3, v4, v5, v6, v7, v8, v9)                    \
-  enum class name                                                              \
-  {                                                                            \
-    v1,                                                                        \
-    v2,                                                                        \
-    v3,                                                                        \
-    v4,                                                                        \
-    v5,                                                                        \
-    v6,                                                                        \
-    v7,                                                                        \
-    v8,                                                                        \
-    v9,                                                                        \
-  };                                                                           \
-  const char *name##Strings[] = {#v1, #v2, #v3, #v4, #v5, #v6, #v7, #v8, #v9}; \
-  template <typename T>                                                        \
-  constexpr const char *name##ToString(T value)                                \
-  {                                                                            \
-    return name##Strings[static_cast<int>(value)];                             \
+#define SMO_MACRO(name, v1, v2, v3, v4)               \
+  enum class name                                     \
+  {                                                   \
+    v1,                                               \
+    v2,                                               \
+    v3,                                               \
+    v4,                                               \
+  };                                                  \
+  const char *name##Strings[] = {#v1, #v2, #v3, #v4}; \
+  template <typename T>                               \
+  constexpr const char *name##ToString(T value)       \
+  {                                                   \
+    return name##Strings[static_cast<int>(value)];    \
   }
 
 #define ENUM_MACRO(name, v1, v2, v3)               \
@@ -67,18 +63,15 @@
     return name##Strings[static_cast<int>(value)]; \
   }
 
-SMO_MACRO(Smoother,
-          GLOBAL,
-          FUSED_L,
-          ConflictFree,
-          TensorCore,
-          ExactRes,
-          Chebyshev,
-          MCS,
-          MCS_CG,
-          MCS_PCG);
-LA_MACRO(Laplace, Basic, BasicCell, ConflictFree, TensorCore, TensorCoreMMA);
-ENUM_MACRO(FaceIntegral, compact, element_wise, element_wise_partial);
+SMO_MACRO(Smoother, GLOBAL, AVS_colored, AVS_atomic, ConflictFree);
+LA_MACRO(Laplace,
+         Basic,
+         BasicCell,
+         ConflictFree,
+         TensorCore,
+         TensorCoreMMA,
+         TensorCoreMMACF);
+SMO_MACRO(LocalSolver, Exact, Bila, KSVD, NN);
 ENUM_MACRO(DoFLayout, DGQ, Q, RT);
 ENUM_MACRO(Granularity, none, user_define, multiple);
 
@@ -97,17 +90,11 @@ namespace Util
     else
       AssertThrow(false, ExcMessage("Invalid Vcycle number type."));
 
-    std::string str_face_int_variant     = "";
     std::string str_laplace_variant      = "";
     std::string str_smooth_vmult_variant = "";
     std::string str_smooth_inv_variant   = "";
+    std::string str_local_solver_variant = "";
 
-    for (unsigned int k = 0; k < CT::FACE_INTEGRAL_TYPE_.size(); ++k)
-      {
-        str_face_int_variant +=
-          FaceIntegralToString(CT::FACE_INTEGRAL_TYPE_[k]);
-        str_face_int_variant += "_";
-      }
     for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
       {
         str_laplace_variant += LaplaceToString(CT::LAPLACE_TYPE_[k]);
@@ -123,39 +110,28 @@ namespace Util
         str_smooth_inv_variant += SmootherToString(CT::SMOOTH_INV_[k]);
         str_smooth_inv_variant += "_";
       }
+    for (unsigned int k = 0; k < CT::LOCAL_SOLVER_.size(); ++k)
+      {
+        str_local_solver_variant += LocalSolverToString(CT::LOCAL_SOLVER_[k]);
+        str_local_solver_variant += "_";
+      }
     const auto str_dof_layout  = DoFLayoutToString(CT::DOF_LAYOUT_);
     const auto str_granularity = GranularityToString(CT::GRANULARITY_);
 
-    const auto n_mpi_procs = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
-    const auto n_coarse    = CT::N_REPLICATE_;
-
-    oss << "poisson";
-    oss << std::scientific << std::setprecision(2);
+    oss << "biharm";
+    // oss << std::scientific << std::setprecision(2);
+    oss << std::setprecision(2);
     oss << "_" << CT::DIMENSION_ << "D";
     oss << "_" << str_dof_layout;
-    oss << CT::FE_DEGREE_ << "_";
-    oss << n_mpi_procs << "prcs_";
-    oss << n_coarse << "cell";
-    oss << "_" << str_face_int_variant;
-#ifdef CONFLICTFREE
-    oss << "ConflictFree_";
-#else
-    oss << "Basic_";
-#endif
-    // oss << str_laplace_variant;
-    // oss << str_smooth_vmult_variant;
+    oss << CT::FE_DEGREE_;
+    oss << "_" << str_laplace_variant;
+    oss << str_smooth_vmult_variant;
     oss << str_smooth_inv_variant;
+    oss << str_local_solver_variant;
     oss << str_granularity;
     oss << "_" << value_type;
-    oss << "_" << CT::SETS_;
-    oss << "_MEM" << MEMORY_TYPE;
-    oss << "_K" << TENSORCORE;
-#ifdef UNIFORM_MESH
-    oss << "_uniform";
-#else
-    oss << "_non";
-#endif
-    oss << "_Dis" << std::lround(CT::DISTORT_ * 100);
+    oss << "_" << CT::N_SMOOTH_STEPS_ << "s";
+    oss << "_damp" << CT::DAMPING_;
 
     return oss.str();
   }
@@ -180,8 +156,6 @@ namespace Util
     auto mps   = deviceProp.multiProcessorCount;
     auto cores = _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor);
 
-    const auto n_mpi_procs = Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD);
-    const auto n_coarse    = CT::N_REPLICATE_;
 
     std::ostringstream oss;
 
@@ -201,68 +175,32 @@ namespace Util
     oss << "Settings of parameters: " << std::endl
         << "Dimension:                      " << CT::DIMENSION_ << std::endl
         << "Polynomial degree:              " << CT::FE_DEGREE_ << std::endl
-        << "MPI rank(s):                    " << n_mpi_procs << std::endl
-        << "Number of coarse cell(s):       " << n_coarse << std::endl
         << "DoF Layout:                     "
         << DoFLayoutToString(CT::DOF_LAYOUT_) << std::endl
         << "Number type for V-cycle:        " << value_type << std::endl;
-    oss << "FaceIntegral Variant:           ";
-    for (unsigned int k = 0; k < CT::FACE_INTEGRAL_TYPE_.size(); ++k)
-      oss << FaceIntegralToString(CT::FACE_INTEGRAL_TYPE_[k]) << " ";
-    oss << std::endl;
     oss << "Laplace Variant:                ";
-#ifdef CONFLICTFREE
-    oss << "ConflictFree" << " ";
-#else
-    oss << "Basic" << " ";
-#endif
-    // for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
-    //   oss << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " ";
+    for (unsigned int k = 0; k < CT::LAPLACE_TYPE_.size(); ++k)
+      oss << LaplaceToString(CT::LAPLACE_TYPE_[k]) << " ";
     oss << std::endl;
     oss << "Smoother Vmult Variant:         ";
-#ifdef CONFLICTFREE
-    oss << "ConflictFree" << " ";
-#else
-    oss << "Basic" << " ";
-#endif
-    // for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
-    //   oss << LaplaceToString(CT::SMOOTH_VMULT_[k]) << " ";
+    for (unsigned int k = 0; k < CT::SMOOTH_VMULT_.size(); ++k)
+      oss << LaplaceToString(CT::SMOOTH_VMULT_[k]) << " ";
     oss << std::endl;
     oss << "Smoother Inverse Variant:       ";
     for (unsigned int k = 0; k < CT::SMOOTH_INV_.size(); ++k)
       oss << SmootherToString(CT::SMOOTH_INV_[k]) << " ";
     oss << std::endl;
+    oss << "Local Solver Variant:           ";
+    for (unsigned int k = 0; k < CT::LOCAL_SOLVER_.size(); ++k)
+      oss << LocalSolverToString(CT::LOCAL_SOLVER_[k]) << " ";
+    oss << std::endl;
     oss << "Granularity Scheme:             "
         << GranularityToString(CT::GRANULARITY_) << std::endl
-        << "Experiment set:                 " << CT::SETS_ << std::endl
         << "Maximum size:                   " << CT::MAX_SIZES_ << std::endl
-        << "Tolerance:                      " << CT::REDUCE_ << std::endl
-        << "Shape data storage:             " <<
-#if MEMORY_TYPE == 0
-      "Global memory"
-#elif MEMORY_TYPE == 1
-      "Constant memory"
-#else
-      "Shared memory"
-#endif
+        << "Number of MG cycles in V-cycle: " << 1 << std::endl
+        << "Number of smoothing steps:      " << CT::N_SMOOTH_STEPS_
         << std::endl
-        << "Kernel type:                    " <<
-#if TENSORCORE == 0
-      "CUDA Core"
-#elif TENSORCORE == 1
-      "WMMA API"
-#else
-      "PTX MMA"
-#endif
-        << std::endl
-        << "Uniform mesh optimization:      " <<
-#ifdef UNIFORM_MESH
-      "On"
-#else
-      "Off"
-#endif
-        << std::endl
-        << "Distort factor:                 " << CT::DISTORT_ << std::endl
+        << "Damping factor:                 " << CT::DAMPING_ << std::endl
         << std::endl;
 
 
