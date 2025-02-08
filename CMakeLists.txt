@@ -59,7 +59,7 @@ configure_file(
 
 find_package (PythonInterp 3 REQUIRED)
 
-## Generates the default TPSS compile time parameters.
+## Generates the default GPUTPS compile time parameters.
 execute_process (
   COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_BINARY_DIR}/scripts/ct_parameter.py -O ${CMAKE_BINARY_DIR}/include/ct_parameter.h
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -108,10 +108,13 @@ IF(DEAL_II_WITH_CUDA)
         INCLUDE_DIRECTORIES(/export/home/cucui/SimServ06/cuda-samples/Common/)
 ENDIF()
 
+find_package (OpenMP REQUIRED)
+
 # Set the source files to be compiled
 SET( TARGET_SRC
         source/cuda_mg_transfer.cu
-        source/cuda_vector.cu)
+        source/cuda_vector.cu
+        source/transfer_internal.cc)
 
 # Set the include directory and the name of the project
 INCLUDE_DIRECTORIES(

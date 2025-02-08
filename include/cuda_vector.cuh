@@ -18,7 +18,7 @@ namespace PSMF
    * Implementation of a cuda vector class.
    * Mainly used for unsigned int.
    */
-  template <typename Number = types::global_dof_index>
+  template <typename Number = unsigned int>
   class CudaVector : public Subscriptor
   {
   public:
@@ -81,25 +81,19 @@ namespace PSMF
 
   template <bool add, typename Number, typename Number2>
   __global__ void
-  vec_equ(Number *dst, const Number2 *src, const unsigned int N)
+  vec_equ(Number *dst, const Number2 *src, const int N)
   {
-    const unsigned int idx_base =
+    const int idx_base =
       threadIdx.x + blockIdx.x * (blockDim.x * CHUNKSIZE_ELEMWISE_OP);
 
     for (int c = 0; c < CHUNKSIZE_ELEMWISE_OP; ++c)
       {
-        const unsigned int idx = idx_base + c * BKSIZE_ELEMWISE_OP;
+        const int idx = idx_base + c * BKSIZE_ELEMWISE_OP;
         if (idx < N)
-          {
-            if (add)
-              {
-                dst[idx] += src[idx];
-              }
-            else
-              {
-                dst[idx] = src[idx];
-              }
-          }
+          if (add)
+            dst[idx] += src[idx];
+          else
+            dst[idx] = src[idx];
       }
   }
 
@@ -107,54 +101,76 @@ namespace PSMF
   void
   plain_copy(VectorType &dst, const VectorType2 &src)
   {
-    if (src.locally_owned_size() == 0)
-      return;
-
-    if (dst.locally_owned_size() != src.locally_owned_size())
+    if (dst.size() != src.size())
       {
-        dst.reinit(src.locally_owned_size(), true);
+        dst.reinit(src.size(), true);
       }
 
-    const int nblocks = 1 + (src.locally_owned_size() - 1) /
-                              (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
-
+    const int nblocks =
+      1 + (src.size() - 1) / (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
     vec_equ<add,
             typename VectorType::value_type,
             typename VectorType2::value_type>
       <<<nblocks, BKSIZE_ELEMWISE_OP>>>(dst.get_values(),
                                         src.get_values(),
-                                        src.locally_owned_size());
+                                        src.size());
     AssertCudaKernel();
   }
 
 
-  template <typename Number>
+  template <typename Number, typename Number2>
   __global__ void
-  vec_invert(Number *v, const unsigned int N)
+  copy_with_indices_kernel(Number             *dst,
+                           Number2            *src,
+                           const unsigned int *dst_indices,
+                           const unsigned int *src_indices,
+                           int                 n)
   {
-    const unsigned idx_base =
-      threadIdx.x + blockIdx.x * (blockDim.x * CHUNKSIZE_ELEMWISE_OP);
-
-    for (int c = 0; c < CHUNKSIZE_ELEMWISE_OP; ++c)
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < n)
       {
-        const unsigned idx = idx_base + c * BKSIZE_ELEMWISE_OP;
-        if (idx < N)
-          v[idx] = (abs(v[idx]) < 1e-10) ? 1.0 : 1.0 / v[idx];
+        dst[dst_indices[i]] = src[src_indices[i]];
       }
+    __syncthreads();
   }
 
-  template <typename VectorType>
+  template <typename Number, typename Number2>
   void
-  vector_invert(VectorType &vec)
+  copy_with_indices(
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>        &dst,
+    const LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &src,
+    const CudaVector<unsigned int> &dst_indices,
+    const CudaVector<unsigned int> &src_indices)
   {
-    if (vec.locally_owned_size() == 0)
+    const int  n         = dst_indices.size();
+    const int  blocksize = 256;
+    const dim3 block_dim = dim3(blocksize);
+    const dim3 grid_dim  = dim3(1 + (n - 1) / blocksize);
+    copy_with_indices_kernel<<<grid_dim, block_dim>>>(dst.get_values(),
+                                                      src.get_values(),
+                                                      dst_indices.get_values(),
+                                                      src_indices.get_values(),
+                                                      n);
+    AssertCudaKernel();
+  }
+
+  template <typename Number, typename Number2>
+  void
+  copy_with_indices(
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>        &dst,
+    const LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &src,
+    const unsigned int *dst_indices,
+    const unsigned int *src_indices,
+    const unsigned int  n)
+  {
+    if (n == 0)
       return;
 
-    const int nblocks = 1 + (vec.locally_owned_size() - 1) /
-                              (CHUNKSIZE_ELEMWISE_OP * BKSIZE_ELEMWISE_OP);
-    vec_invert<typename VectorType::value_type>
-      <<<nblocks, BKSIZE_ELEMWISE_OP>>>(vec.get_values(),
-                                        vec.locally_owned_size());
+    const int  blocksize = 256;
+    const dim3 block_dim = dim3(blocksize);
+    const dim3 grid_dim  = dim3(1 + (n - 1) / blocksize);
+    copy_with_indices_kernel<<<grid_dim, block_dim>>>(
+      dst.get_values(), src.get_values(), dst_indices, src_indices, n);
     AssertCudaKernel();
   }
 

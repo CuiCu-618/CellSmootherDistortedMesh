@@ -38,13 +38,6 @@
 
 #include <deal.II/matrix_free/hanging_nodes_internal.h>
 
-#include "utilities.cuh"
-
-#define MEMORY_TYPE 2
-// 0: global memory
-// 1: constant memory
-// 2: shared memory
-
 namespace PSMF
 {
   // Forward declaration
@@ -57,13 +50,7 @@ namespace PSMF
     level_matrix,
     edge_up_matrix,
     edge_down_matrix,
-  };
-
-  enum FaceIntegralType
-  {
-    compact,
-    element_wise,
-    element_wise_partial,
+    interface_matrix,
   };
 
   /**
@@ -113,8 +100,7 @@ namespace PSMF
        * Constructor.
        */
       AdditionalData(
-        const MatrixType       matrix_type        = MatrixType::active_matrix,
-        const FaceIntegralType face_integral_type = FaceIntegralType::compact,
+        const MatrixType          matrix_type = MatrixType::active_matrix,
         const dealii::UpdateFlags mapping_update_flags =
           dealii::update_gradients | dealii::update_JxW_values,
         const dealii::UpdateFlags mapping_update_flags_boundary_faces =
@@ -123,15 +109,16 @@ namespace PSMF
           dealii::update_default,
         const unsigned int mg_level     = dealii::numbers::invalid_unsigned_int,
         const bool         use_coloring = false,
+        const unsigned int my_id        = 0,
         const bool         overlap_communication_computation = false)
         : matrix_type(matrix_type)
-        , face_integral_type(face_integral_type)
         , mapping_update_flags(mapping_update_flags)
         , mapping_update_flags_boundary_faces(
             mapping_update_flags_boundary_faces)
         , mapping_update_flags_inner_faces(mapping_update_flags_inner_faces)
         , mg_level(mg_level)
         , use_coloring(use_coloring)
+        , my_id(my_id)
         , overlap_communication_computation(overlap_communication_computation)
       {
 #ifndef DEAL_II_MPI_WITH_CUDA_SUPPORT
@@ -204,14 +191,17 @@ namespace PSMF
       bool use_coloring;
 
       /**
+       * Unique ID associated with the object.
+       */
+      int my_id;
+
+      /**
        * Overlap MPI communications with computation. This requires CUDA-aware
        * MPI and use_coloring must be false.
        */
       bool overlap_communication_computation;
 
       MatrixType matrix_type;
-
-      FaceIntegralType face_integral_type;
     };
 
     /**
@@ -224,11 +214,6 @@ namespace PSMF
        * Pointer to the quadrature points.
        */
       point_type *q_points;
-
-      /**
-       * Pointer to the face quadrature points.
-       */
-      point_type *face_q_points;
 
       /**
        * Map the position in the local vector to the position in the global
@@ -248,6 +233,11 @@ namespace PSMF
       dealii::types::global_dof_index *face2cell_id;
 
       /**
+       * Pointer to the cell Jacobian.
+       */
+      Number *jacobian;
+
+      /**
        * Pointer to the cell inverse Jacobian.
        */
       Number *inv_jacobian;
@@ -256,6 +246,22 @@ namespace PSMF
        * Pointer to the cell Jacobian times the weights.
        */
       Number *JxW;
+
+      /**
+       * Pointer to the cell quadrature weights.
+       */
+      Number *q_weights;
+
+      /**
+       * Pointer to the determinant cell inverse Jacobian associated to the
+       * cells of each color.
+       */
+      Number *inv_det;
+
+      /**
+       * Pointer to the face Jacobian.
+       */
+      Number *face_jacobian;
 
       /**
        * Pointer to the face inverse Jacobian.
@@ -268,15 +274,20 @@ namespace PSMF
       Number *face_JxW;
 
       /**
+       * Pointer to the face quadrature weights.
+       */
+      Number *face_q_weights;
+
+      /**
+       * Pointer to the determinant face inverse Jacobian associated to the
+       * cells of each color.
+       */
+      Number *face_inv_det;
+
+      /**
        * Pointer to the unit normal vector on a face.
        */
       Number *normal_vector;
-
-      /**
-       * Pointer to the 1D shape info.
-       */
-      Number *cell_face_shape_values;
-      Number *cell_face_shape_gradients;
 
       /**
        * Pointer to the face direction.
@@ -293,10 +304,6 @@ namespace PSMF
        */
       int *face_orientation;
 
-      /**
-       * Pointer to the cell to faces mapping.
-       */
-      dealii::types::global_dof_index *cell2face_id;
 
       /**
        * ID of the associated MatrixFree object.
@@ -309,6 +316,11 @@ namespace PSMF
       unsigned int mg_level;
 
       /**
+       * Whether the entire finite element is primitive
+       */
+      bool is_primitive;
+
+      /**
        * Number of objects.
        */
       unsigned int n_objs;
@@ -319,19 +331,9 @@ namespace PSMF
       unsigned int n_cells;
 
       /**
-       * Number of locally onwed cells.
-       */
-      unsigned int n_locally_owned_cells;
-
-      /**
        * Number of faces.
        */
       unsigned int n_faces;
-
-      /**
-       * Number of inner faces.
-       */
-      unsigned int n_inner_faces;
 
       /**
        * Length of the padding.
@@ -349,14 +351,40 @@ namespace PSMF
       unsigned int row_start;
 
       /**
+       * Mask deciding where constraints are set on a given cell.
+       */
+      dealii::internal::MatrixFreeFunctions::ConstraintKinds *constraint_mask;
+
+      /**
+       * Range of cell constrains.
+       */
+      dealii::types::global_dof_index *constraint_range;
+      dealii::types::global_dof_index *constraint_coarse_range;
+
+      /**
        * If true, use graph coloring has been used and we can simply add into
        * the destingation vector. Otherwise, use atomic operations.
        */
       bool use_coloring;
 
-      MatrixType matrix_type;
+      /**
+       * Pointer to the hanging nodes constrained degrees of freedom.
+       */
+      dealii::types::global_dof_index *hanging_nodes_constraint;
 
-      FaceIntegralType face_integral_type;
+      dealii::types::global_dof_index *hanging_nodes_constraint_coarse;
+
+      /**
+       * Pointer to the hanging nodes constraint indicator.
+       */
+      int *hanging_nodes_constraint_indicator;
+
+      /**
+       * Pointer to the hanging nodes constraint weights.
+       */
+      Number *hanging_nodes_constraint_weights;
+
+      MatrixType matrix_type;
     };
 
     /**
@@ -413,12 +441,6 @@ namespace PSMF
     Data
     get_face_data(unsigned int color) const;
 
-    /**
-     * Return the Data structure associated with @p color.
-     */
-    Data
-    get_cell_face_data(unsigned int color) const;
-
     // clang-format off
     /**
      * This method runs the loop over all cells and apply the local operation on
@@ -470,19 +492,6 @@ namespace PSMF
     boundary_face_loop(const Functor    &face_operation,
                        const VectorType &src,
                        VectorType       &dst) const;
-
-    /**
-     * This method runs the loop over all cells and apply the local operation on
-     * each element in parallel. @p cell_operation is a functor which is applied
-     * on each color. As opposed to the other variants that only runs a function
-     * on cells, this method also takes as arguments a function for the interior
-     * faces and for the boundary faces, respectively.
-     */
-    template <typename Functor, typename VectorType>
-    void
-    cell_face_loop(const Functor    &cell_face_operation,
-                   const VectorType &src,
-                   VectorType       &dst) const;
 
     /**
      * This method runs the loop over all cells and apply the local operation on
@@ -570,13 +579,19 @@ namespace PSMF
     get_dof_handler() const;
 
     /**
+     * Return the number of dofs.
+     */
+    dealii::types::global_dof_index
+    get_n_dofs() const;
+
+
+    /**
      * Return an approximation of the memory consumption of this class in bytes.
      */
     std::size_t
     memory_consumption() const;
 
-
-    FaceIntegralType face_integral_type;
+    MatrixType matrix_type;
 
   private:
     /**
@@ -652,6 +667,16 @@ namespace PSMF
     unsigned int fe_degree;
 
     /**
+     * Whether the entire finite element is primitive
+     */
+    bool is_primitive;
+
+    /**
+     * Number of components.
+     */
+    unsigned int n_components;
+
+    /**
      * Number of degrees of freedom per cell.
      */
     unsigned int dofs_per_cell;
@@ -687,11 +712,6 @@ namespace PSMF
     std::vector<unsigned int> n_cells;
 
     /**
-     * Number of locally owned cells in each color.
-     */
-    std::vector<unsigned int> n_locally_owned_cells;
-
-    /**
      * Number of inner faces in each color.
      */
     std::vector<unsigned int> n_inner_faces;
@@ -706,12 +726,6 @@ namespace PSMF
      * each color.
      */
     std::vector<point_type *> q_points;
-
-    /**
-     * Vector of pointers to the face quadrature points associated to the cells
-     * of each color.
-     */
-    std::vector<point_type *> face_q_points;
 
     /**
      * Map the position in the local vector to the position in the global
@@ -736,9 +750,10 @@ namespace PSMF
     std::vector<dealii::types::global_dof_index *> boundary_face2cell_id;
 
     /**
-     * Map the cell id to faces.
+     * Vector of pointer to the cell Jacobian associated to the cells of each
+     * color.
      */
-    std::vector<dealii::types::global_dof_index *> cell2face_id;
+    std::vector<Number *> jacobian;
 
     /**
      * Vector of pointer to the cell inverse Jacobian associated to the cells of
@@ -753,6 +768,24 @@ namespace PSMF
     std::vector<Number *> JxW;
 
     /**
+     * Vector of pointer to the cell quadrature weights associated to
+     * the cells of each color.
+     */
+    std::vector<Number *> q_weights;
+
+    /**
+     * Vector of pointer to the determinant cell inverse Jacobian associated to
+     * the cells of each color.
+     */
+    std::vector<Number *> inv_det;
+
+    /**
+     * Vector of pointer to the face Jacobian associated to the cells of each
+     * color.
+     */
+    std::vector<Number *> face_jacobian;
+
+    /**
      * Vector of pointer to the face inverse Jacobian associated to the cells of
      * each color.
      */
@@ -765,16 +798,21 @@ namespace PSMF
     std::vector<Number *> face_JxW;
 
     /**
+     * Vector of pointer to the face quadrature weights.
+     */
+    std::vector<Number *> face_q_weights;
+
+    /**
+     * Vector of pointer to the determinant face inverse Jacobian associated to
+     * the cells of each color.
+     */
+    std::vector<Number *> face_inv_det;
+
+    /**
      * Vector of pointer to the unit normal vector on a face associated to the
      * cells of each color.
      */
     std::vector<Number *> normal_vector;
-
-    /**
-     * Pointer to the 1D shape info.
-     */
-    Number *cell_face_shape_values;
-    Number *cell_face_shape_gradients;
 
     /**
      * Vector of pointer to the face direction.
@@ -799,10 +837,33 @@ namespace PSMF
     dealii::types::global_dof_index *constrained_dofs;
 
     /**
+     * Pointer to the hanging nodes constrained degrees of freedom.
+     */
+    dealii::types::global_dof_index *hanging_nodes_constraint;
+
+    dealii::types::global_dof_index *hanging_nodes_constraint_coarse;
+
+    /**
+     * Pointer to the hanging nodes constraint indicator.
+     */
+    int *hanging_nodes_constraint_indicator;
+
+    /**
+     * Pointer to the hanging nodes constraint weights.
+     */
+    Number *hanging_nodes_constraint_weights;
+
+    /**
      * Mask deciding where constraints are set on a given cell.
      */
     std::vector<dealii::internal::MatrixFreeFunctions::ConstraintKinds *>
       constraint_mask;
+
+    /**
+     * Range of cell constrains.
+     */
+    std::vector<dealii::types::global_dof_index *> constraint_range;
+    std::vector<dealii::types::global_dof_index *> constraint_coarse_range;
 
     /**
      * Grid dimensions associated to the different colors. The grid dimensions
@@ -895,7 +956,6 @@ namespace PSMF
      */
     const dealii::DoFHandler<dim> *dof_handler;
 
-    MatrixType matrix_type;
     /**
      * Colored graphed of locally owned active cells.
      */
@@ -927,16 +987,6 @@ namespace PSMF
         gradients[d] = gq[d];
     }
 
-    __device__
-    SharedData(Number *vd, Number *gq[dim], Number *shv, Number *shg)
-      : values(vd)
-      , shape_values(shv)
-      , shape_gradients(shg)
-    {
-      for (unsigned int d = 0; d < dim; ++d)
-        gradients[d] = gq[d];
-    }
-
     /**
      * Shared memory for dof and quad values.
      */
@@ -948,16 +998,6 @@ namespace PSMF
      * format, i.e. first, all gradients in the x-direction come...
      */
     Number *gradients[dim];
-
-    /*
-     * Shared memory for 1D shape values.
-     */
-    Number *shape_values;
-
-    /*
-     * Shared memory for 1D shape gradients.
-     */
-    Number *shape_gradients;
   };
 
   // This function determines the number of cells per block, possibly at compile
@@ -970,26 +1010,11 @@ namespace PSMF
 
     constexpr int warp_size = 32;
 
-    return dim==2 ? (fe_degree==1 ? warp_size :    // 128
-                     fe_degree==2 ? warp_size/4 :  //  72
-                     fe_degree==3 ? warp_size/8 :  //  64
-                     fe_degree==4 ? warp_size/8 :  // 100
-                     1) :
-           dim==3 ? (fe_degree==1 ? 1 :  //  
-                     fe_degree==2 ? 8 : // 1 < 2 < 4 < 8 > 16  
-                     fe_degree==3 ? 4 : // 1 < 2 < 4 < 8 > 16 
-                     fe_degree==7 ? 1 : // 1 > 2  
-                     1) : 1;
-  }
-
-
-  __host__ __device__ constexpr unsigned int
-  faces_per_block_shmem(int dim, int fe_degree)
-  {
-    return 1;
-
-    constexpr int warp_size = 32;
-
+    /* clang-format off */
+    // We are limiting the number of threads according to the
+    // following formulas:
+    //  - in 2D: `threads = cells * (k+1)^d <= 4*warp_size`
+    //  - in 3D: `threads = cells * (k+1)^d <= 2*warp_size`
     return dim==2 ? (fe_degree==1 ? warp_size :    // 128
                      fe_degree==2 ? warp_size/4 :  //  72
                      fe_degree==3 ? warp_size/8 :  //  64
@@ -998,6 +1023,7 @@ namespace PSMF
            dim==3 ? (fe_degree==1 ? warp_size/4 :  //  64
                      fe_degree==2 ? warp_size/16 : //  54
                      1) : 1;
+    /* clang-format on */
   }
 
 
@@ -1007,14 +1033,15 @@ namespace PSMF
    *
    * @relates MatrixFree
    */
-  template <int dim, int n_q_points_1d>
+  template <int dim>
   __device__ inline unsigned int
-  q_point_id_in_cell()
+  q_point_id_in_cell(const unsigned int n_q_points_1d)
   {
     return (
       dim == 1 ? threadIdx.x % n_q_points_1d :
-      dim == 2 ? threadIdx.x + n_q_points_1d * (threadIdx.y % n_q_points_1d) :
-                 threadIdx.x + n_q_points_1d * (threadIdx.y % n_q_points_1d));
+      dim == 2 ? threadIdx.x % n_q_points_1d + n_q_points_1d * threadIdx.y :
+                 threadIdx.x % n_q_points_1d +
+                   n_q_points_1d * (threadIdx.y + n_q_points_1d * threadIdx.z));
   }
 
   /**
@@ -1039,16 +1066,15 @@ namespace PSMF
    *
    * @relates MatrixFree
    */
-  template <int dim, typename Number, int n_q_points_1d>
+  template <int dim, typename Number>
   __device__ inline typename MatrixFree<dim, Number>::point_type &
   get_quadrature_point(const unsigned int                            cell,
                        const typename MatrixFree<dim, Number>::Data *data,
-                       const unsigned int                            index)
+                       const unsigned int n_q_points_1d)
   {
-    return *(data->q_points + data->padding_length * cell + index);
+    return *(data->q_points + data->padding_length * cell +
+             q_point_id_in_cell<dim>(n_q_points_1d));
   }
-
-
 
   /*----------------------- Inline functions ---------------------------------*/
   // template <int dim, typename Number>
@@ -1077,6 +1103,14 @@ namespace PSMF
     Assert(dof_handler != nullptr, dealii::ExcNotInitialized());
 
     return *dof_handler;
+  }
+
+
+  template <int dim, typename Number>
+  inline dealii::types::global_dof_index
+  MatrixFree<dim, Number>::get_n_dofs() const
+  {
+    return n_dofs;
   }
 
 } // namespace PSMF

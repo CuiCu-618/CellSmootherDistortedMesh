@@ -29,6 +29,7 @@
 #include <deal.II/multigrid/mg_transfer_internal.h>
 
 #include "cuda_vector.cuh"
+#include "transfer_internal.h"
 #include "utilities.cuh"
 
 using namespace dealii;
@@ -38,8 +39,8 @@ namespace PSMF
 
   struct IndexMapping
   {
-    CudaVector<types::global_dof_index> global_indices;
-    CudaVector<types::global_dof_index> level_indices;
+    CudaVector<unsigned int> global_indices;
+    CudaVector<unsigned int> level_indices;
 
     std::size_t
     memory_consumption() const
@@ -48,6 +49,7 @@ namespace PSMF
              level_indices.memory_consumption();
     }
   };
+
 
   /**
    * Implementation of the MGTransferBase interface for which the transfer
@@ -58,10 +60,9 @@ namespace PSMF
    */
   template <int dim, typename Number>
   class MGTransferCUDA
-    : public MGTransferBase<
-        LinearAlgebra::distributed::Vector<Number,
-                                           MemorySpace::CUDA>> // public
-                                                               // Subscriptor
+    : public MGTransferBase<LinearAlgebra::distributed::Vector<
+        Number,
+        MemorySpace::CUDA>> // public Subscriptor
   {
   public:
     /**
@@ -99,7 +100,8 @@ namespace PSMF
      */
     void
     build(
-      const DoFHandler<dim, dim> &mg_dof,
+      const DoFHandler<dim, dim> &mg_dof_velocity,
+      const DoFHandler<dim, dim> &mg_dof_pressure,
       const std::vector<std::shared_ptr<const Utilities::MPI::Partitioner>>
         &external_partitioners =
           std::vector<std::shared_ptr<const Utilities::MPI::Partitioner>>());
@@ -254,13 +256,21 @@ namespace PSMF
      * cells necessary for the transfer to the next level.
      *
      */
-    std::vector<CudaVector<types::global_dof_index>> level_dof_indices;
+    std::vector<CudaVector<unsigned int>> level_dof_indices;
+
+    std::vector<CudaVector<unsigned int>> level_dof_indices_parent;
+    std::vector<CudaVector<unsigned int>> level_dof_indices_child;
+
+    CudaVector<unsigned int> base_dof;
+    CudaVector<unsigned int> dof_offset;
+    CudaVector<unsigned int> base_dof_coarse;
+    CudaVector<unsigned int> dof_offset_coarse;
 
     /**
      * A variable storing the connectivity from parent to child cell numbers
      * for each level.
      */
-    std::vector<CudaVector<types::global_dof_index>> child_offset_in_parent;
+    std::vector<CudaVector<unsigned int>> child_offset_in_parent;
 
     /**
      * A variable storing the number of cells owned on a given process (sets
@@ -269,11 +279,17 @@ namespace PSMF
     std::vector<unsigned int> n_owned_level_cells;
 
     /**
-     * Holds the one-dimensional embedding (prolongation) matrix from mother
-     * element to the children.
+     * Holds the (todo: one-dimensional) embedding (prolongation) matrix from
+     * mother element to the children. {P, R}
      */
     LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
       prolongation_matrix_1d;
+
+    std::vector<LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
+      transfer_matrix_val;
+
+    std::vector<CudaVector<unsigned int>> transfer_matrix_row_ptr;
+    std::vector<CudaVector<unsigned int>> transfer_matrix_col_idx;
 
     /**
      * For continuous elements, restriction is not additive and we need to
@@ -299,21 +315,6 @@ namespace PSMF
     std::vector<IndexMapping> copy_indices;
 
     /**
-     * Additional degrees of freedom for the copy_to_mg() function. These are
-     * the ones where the global degree of freedom is locally owned and the
-     * level degree of freedom is not.
-     */
-    std::vector<IndexMapping>           copy_indices_global_mine;
-    std::vector<Table<2, unsigned int>> copy_indices_global_mine_host;
-
-    /**
-     * Additional degrees of freedom for the copy_from_mg() function. These
-     * are the ones where the level degree of freedom is locally owned and the
-     * global degree of freedom is not.
-     */
-    std::vector<IndexMapping> copy_indices_level_mine;
-
-    /**
      * This variable stores whether the copy operation from the global to the
      * level vector is actually a plain copy to the finest level. This means
      * that the grid has no adaptive refinement and the numbering on the
@@ -322,19 +323,11 @@ namespace PSMF
     bool perform_plain_copy;
 
     /**
-     * This variable stores whether the copy operation from the global to the
-     * level vector is actually a plain copy to the finest level except for a
-     * renumbering within the finest level of the degrees of freedom. This
-     * means that the grid has no adaptive refinement.
-     */
-    bool perform_renumbered_plain_copy;
-
-    /**
      * A variable storing the local indices of Dirichlet boundary conditions
      * on cells for all levels (outer index), the cells within the levels
      * (second index), and the indices on the cell (inner index).
      */
-    std::vector<CudaVector<types::global_dof_index>> dirichlet_indices;
+    std::vector<CudaVector<unsigned int>> dirichlet_indices;
 
     /**
      * A vector that holds shared pointers to the partitioners of the
@@ -352,39 +345,20 @@ namespace PSMF
       mg_constrained_dofs;
 
     /**
-     * In the function copy_to_mg, we need to access ghosted entries of the
-     * global vector for inserting into the level vectors. This vector is
-     * populated with those entries.
+     * Setup the embedding (prolongation) matrix.
      */
-    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-      ghosted_global_vector;
-
-    /**
-     * Same as above but used when working with solution vectors.
-     */
-    mutable LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-      solution_ghosted_global_vector;
-
-    /**
-     * In the function copy_from_mg, we access all level vectors with certain
-     * ghost entries for inserting the result into a global vector.
-     */
-    mutable MGLevelObject<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
-      ghosted_level_vector;
-
-    /**
-     * Same as above but used when working with solution vectors.
-     */
-    mutable MGLevelObject<
-      LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>>
-      solution_ghosted_level_vector;
+    void
+    setup_prolongatino_matrix(
+      const DoFHandler<dim, dim>               &mg_dof_velocity,
+      const DoFHandler<dim, dim>               &mg_dof_pressure,
+      std::vector<internal::CSRMatrix<Number>> &transfer_matrix);
 
     /**
      * Internal function to fill copy_indice.
      */
     void
-    fill_copy_indices(const DoFHandler<dim> &mg_dof);
+    fill_copy_indices(const DoFHandler<dim> &mg_dof_v,
+                      const DoFHandler<dim> &mg_dof_p);
 
     /**
      * Internal function to transfer data.
@@ -411,45 +385,216 @@ namespace PSMF
       Number                                                         val) const;
   };
 
-  template <typename Number, typename Number2, bool add>
-  __global__ void
-  copy_with_indices_kernel(Number                        *dst,
-                           Number2                       *src,
-                           const types::global_dof_index *dst_indices,
-                           const types::global_dof_index *src_indices,
-                           int                            n)
-  {
-    const int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i < n)
-      {
-        if (add)
-          dst[dst_indices[i]] += src[src_indices[i]];
-        else
-          dst[dst_indices[i]] = src[src_indices[i]];
-      }
-  }
 
-  template <typename Number, typename Number2, bool add = false>
-  void
-  copy_with_indices(
-    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>        &dst,
-    const LinearAlgebra::distributed::Vector<Number2, MemorySpace::CUDA> &src,
-    const CudaVector<types::global_dof_index> &dst_indices,
-    const CudaVector<types::global_dof_index> &src_indices)
-  {
-    const int  n         = dst_indices.size();
-    const int  blocksize = 256;
-    const dim3 block_dim = dim3(blocksize);
-    const dim3 grid_dim  = dim3(1 + (n - 1) / blocksize);
-    copy_with_indices_kernel<Number, Number2, add>
-      <<<grid_dim, block_dim>>>(dst.get_values(),
-                                src.get_values(),
-                                dst_indices.get_values(),
-                                src_indices.get_values(),
-                                n);
-    AssertCudaKernel();
-  }
+  namespace internal
+  { // Sets up most of the internal data structures of the
+    // MGTransferCUDA class
+    template <int dim, typename Number>
+    void
+    setup_transfer(
+      const DoFHandler<dim>   &dof_handler_velocity,
+      const DoFHandler<dim>   &dof_handler_pressure,
+      const MGConstrainedDoFs *mg_constrained_dofs,
+      const std::vector<std::shared_ptr<const Utilities::MPI::Partitioner>>
+                                             &external_partitioners,
+      ElementInfo<Number>                    &elem_info,
+      std::vector<std::vector<unsigned int>> &level_dof_indices_parent,
+      std::vector<std::vector<unsigned int>> &level_dof_indices_child,
+      std::vector<unsigned int>              &n_owned_level_cells,
+      std::vector<std::vector<Number>>       &weights_on_refined,
+      std::vector<Table<2, unsigned int>>    &copy_indices_global_mine,
+      MGLevelObject<std::shared_ptr<const Utilities::MPI::Partitioner>>
+        &target_partitioners)
+    {
+      level_dof_indices_parent.clear();
+      level_dof_indices_child.clear();
+      n_owned_level_cells.clear();
+      weights_on_refined.clear();
 
+      // we collect all child DoFs of a mother cell together. For faster
+      // tensorized operations, we align the degrees of freedom
+      // lexicographically. We distinguish FE_Q elements and FE_DGQ elements
+
+      const ::Triangulation<dim> &tria =
+        dof_handler_velocity.get_triangulation();
+
+      // ---------- 1. Extract info about the finite element
+      elem_info.reinit(dof_handler_velocity);
+
+      // ---------- 2. Extract and match dof indices between child and parent
+      const unsigned int n_levels = tria.n_global_levels();
+      level_dof_indices_parent.resize(n_levels);
+      level_dof_indices_child.resize(n_levels);
+      n_owned_level_cells.resize(n_levels - 1);
+
+      const unsigned int n_child_cell_dofs = elem_info.n_child_cell_dofs;
+
+      std::vector<types::global_dof_index> local_dof_indices_v(
+        dof_handler_velocity.get_fe().n_dofs_per_cell());
+
+      std::vector<types::global_dof_index> local_dof_indices_p(
+        dof_handler_pressure.get_fe().n_dofs_per_cell());
+
+      AssertDimension(target_partitioners.max_level(), n_levels - 1);
+      Assert(external_partitioners.empty() ||
+               external_partitioners.size() == n_levels,
+             ExcDimensionMismatch(external_partitioners.size(), n_levels));
+
+      for (unsigned int level = n_levels - 1; level > 0; --level)
+        {
+          unsigned int                         counter = 0;
+          std::vector<types::global_dof_index> child_level_dof_indices;
+          std::vector<types::global_dof_index> ghosted_level_dofs;
+
+          // step 2.1: loop over the cells on the coarse side
+          typename ::DoFHandler<dim>::cell_iterator
+            cell_v = dof_handler_velocity.begin(level - 1),
+            cell_p = dof_handler_pressure.begin(level - 1),
+            endc_v = dof_handler_velocity.end(level - 1);
+          for (; cell_v != endc_v; ++cell_v, ++cell_p)
+            {
+              // need to look into a cell if it has children and it is locally
+              // owned
+              if (!cell_v->has_children())
+                continue;
+
+              bool consider_cell = (tria.locally_owned_subdomain() ==
+                                      numbers::invalid_subdomain_id ||
+                                    cell_v->level_subdomain_id() ==
+                                      tria.locally_owned_subdomain());
+
+              if (!consider_cell)
+                continue;
+
+              counter++;
+
+              // step 2.2: loop through children and append the dof indices to
+              // the appropriate list. We need separate lists for the owned
+              // coarse cell case (which will be part of
+              // restriction/prolongation between level-1 and level) and the
+              // remote case (which needs to store DoF indices for the
+              // operations between level and level+1).
+              AssertDimension(cell_v->n_children(),
+                              GeometryInfo<dim>::max_children_per_cell);
+
+              // const std::size_t start_index =
+              // parent_level_dof_indices.size();
+              // parent_level_dof_indices.resize(
+              //   start_index + dof_handler.get_fe().n_dofs_per_cell());
+              // for (unsigned int i = 0; i < local_dof_indices.size(); ++i)
+              //   parent_level_dof_indices[start_index + i] =
+              //     local_dof_indices[i];
+
+              cell_v->get_mg_dof_indices(local_dof_indices_v);
+              cell_p->get_mg_dof_indices(local_dof_indices_p);
+              for (auto ind : local_dof_indices_v)
+                level_dof_indices_parent[level - 1].push_back(ind);
+              for (auto ind : local_dof_indices_p)
+                level_dof_indices_parent[level - 1].push_back(
+                  dof_handler_velocity.n_dofs(level - 1) + ind);
+
+              std::unordered_set<unsigned int> s;
+              for (unsigned int c = 0;
+                   c < GeometryInfo<dim>::max_children_per_cell;
+                   ++c)
+                {
+                  if (!consider_cell)
+                    continue;
+                  cell_v->child(c)->get_mg_dof_indices(local_dof_indices_v);
+
+                  resolve_identity_constraints(mg_constrained_dofs,
+                                               level,
+                                               local_dof_indices_v);
+
+                  const IndexSet &owned_level_dofs =
+                    dof_handler_velocity.locally_owned_mg_dofs(level);
+                  for (const auto local_dof_index : local_dof_indices_v)
+                    if (!owned_level_dofs.is_element(local_dof_index))
+                      ghosted_level_dofs.push_back(local_dof_index);
+
+                  for (auto ind : local_dof_indices_v)
+                    if (s.count(ind) == 0)
+                      {
+                        child_level_dof_indices.push_back(ind);
+                        s.insert(ind);
+                      }
+                }
+
+              for (unsigned int c = 0;
+                   c < GeometryInfo<dim>::max_children_per_cell;
+                   ++c)
+                {
+                  if (!consider_cell)
+                    continue;
+                  cell_p->child(c)->get_mg_dof_indices(local_dof_indices_p);
+
+                  // const IndexSet &owned_level_dofs =
+                  //   dof_handler_pressure.locally_owned_mg_dofs(level);
+                  // for (const auto local_dof_index : local_dof_indices_p)
+                  //   if (!owned_level_dofs.is_element(local_dof_index))
+                  //     ghosted_level_dofs.push_back(local_dof_index);
+
+                  for (auto ind : local_dof_indices_p)
+                    child_level_dof_indices.push_back(
+                      dof_handler_velocity.n_dofs(level) + ind);
+                }
+              // n_child_cell_dofs = s.size();
+            }
+          n_owned_level_cells[level - 1] = counter;
+
+          reinit_level_partitioner(dof_handler_velocity.locally_owned_mg_dofs(
+                                     level),
+                                   ghosted_level_dofs,
+                                   external_partitioners.empty() ?
+                                     nullptr :
+                                     external_partitioners[level],
+                                   tria.get_communicator(),
+                                   target_partitioners[level],
+                                   copy_indices_global_mine[level]);
+
+          copy_indices_to_mpi_local_numbers(*target_partitioners[level],
+                                            child_level_dof_indices,
+                                            level_dof_indices_child[level]);
+        }
+
+      // for (auto &level_dof_indices : level_dof_indices_child)
+      //   {
+      //     for (auto ind : level_dof_indices)
+      //       std::cout << ind << " ";
+      //     std::cout << std::endl;
+      //   }
+
+      // ----------- 3. compute weights to make restriction additive
+
+      // get the valence of the individual components and compute the weights
+      // as the inverse of the valence
+      weights_on_refined.resize(n_levels - 1);
+      for (unsigned int level = 1; level < n_levels; ++level)
+        {
+          LinearAlgebra::distributed::Vector<Number> touch_count(
+            dof_handler_velocity.n_dofs(level) +
+            dof_handler_pressure.n_dofs(level));
+          for (unsigned int c = 0; c < n_owned_level_cells[level - 1]; ++c)
+            for (unsigned int j = 0; j < elem_info.n_child_cell_dofs; ++j)
+              touch_count[level_dof_indices_child
+                            [level][elem_info.n_child_cell_dofs * c + j]] +=
+                Number(1.);
+          touch_count.compress(VectorOperation::add);
+          touch_count.update_ghost_values();
+
+          weights_on_refined[level - 1].resize(n_owned_level_cells[level - 1] *
+                                               elem_info.n_child_cell_dofs);
+          for (unsigned int c = 0; c < n_owned_level_cells[level - 1]; ++c)
+            for (unsigned int j = 0; j < n_child_cell_dofs; ++j)
+              {
+                weights_on_refined[level - 1][c * n_child_cell_dofs + j] =
+                  Number(1.) /
+                  touch_count[level_dof_indices_child
+                                [level][elem_info.n_child_cell_dofs * c + j]];
+              }
+        }
+    }
+  } // namespace internal
 
 } // namespace PSMF
 

@@ -12,8 +12,12 @@
 #ifndef MG_TRANSFER_TEMPLATE_CUH
 #define MG_TRANSFER_TEMPLATE_CUH
 
+#include <deal.II/grid/grid_generator.h>
+
 #include "cuda_mg_transfer.cuh"
 #include "cuda_vector.cuh"
+#include "renumber.h"
+#include "transfer_internal.h"
 
 namespace PSMF
 {
@@ -28,169 +32,125 @@ namespace PSMF
   class MGTransferHelper
   {
   protected:
-    static constexpr unsigned int n_coarse = fe_degree + 1;
-    static constexpr unsigned int n_fine   = fe_degree * 2 + 2;
-    static constexpr unsigned int M        = 2;
+    static constexpr unsigned int n_coarse =
+      dim * Util::pow(fe_degree + 1, dim - 1) * (fe_degree + 2) +
+      Util::pow(fe_degree + 1, dim);
 
-    Number                        *values;
-    const Number                  *weights;
-    const Number                  *shape_values;
-    const types::global_dof_index *dof_indices_coarse;
-    const types::global_dof_index *dof_indices_fine;
+    static constexpr unsigned int n_fine =
+      dim * Util::pow(2 * fe_degree + 2, dim - 1) * (2 * fe_degree + 3) +
+      Util::pow(2 * fe_degree + 2, dim);
+
+    Number             *values;
+    const Number       *weights;
+    const Number       *shape_values;
+    const unsigned int *row_ptr;
+    const unsigned int *col_idx;
+    const unsigned int *dof_indices_coarse;
+    const unsigned int *dof_indices_fine;
+    const unsigned int *base_dof;
+    const unsigned int *dof_offset;
+    const unsigned int *base_dof_coarse;
+    const unsigned int *dof_offset_coarse;
 
     __device__
-    MGTransferHelper(Number                        *buf,
-                     const Number                  *w,
-                     const Number                  *shvals,
-                     const types::global_dof_index *idx_coarse,
-                     const types::global_dof_index *idx_fine)
+    MGTransferHelper(Number             *buf,
+                     const Number       *w,
+                     const Number       *shvals,
+                     const unsigned int *row_ptr_,
+                     const unsigned int *col_idx_,
+                     const unsigned int *idx_coarse,
+                     const unsigned int *idx_fine,
+                     const unsigned int *base_dof_,
+                     const unsigned int *dof_offset_,
+                     const unsigned int *base_dof_coarse_,
+                     const unsigned int *dof_offset_coarse_)
       : values(buf)
       , weights(w)
       , shape_values(shvals)
+      , row_ptr(row_ptr_)
+      , col_idx(col_idx_)
       , dof_indices_coarse(idx_coarse)
       , dof_indices_fine(idx_fine)
+      , base_dof(base_dof_)
+      , dof_offset(dof_offset_)
+      , base_dof_coarse(base_dof_coarse_)
+      , dof_offset_coarse(dof_offset_coarse_)
     {}
 
-    template <TransferVariant transfer_type, int dir>
+    template <int kernel>
     __device__ void
-    reduce(const Number *my_shvals)
+    reduce()
+    {}
+
+
+    __device__ void
+    weigh_values()
     {
-      // multiplicity of large and small size
-      constexpr bool         prol  = transfer_type == PROLONGATION;
-      constexpr unsigned int n_src = prol ? n_coarse : n_fine;
-
-      // in direction of reduction (dir and threadIdx.x respectively), always
-      // read from 1 location, and write to M (typically 2). in other
-      // directions, either read M or 1 and write same number.
-      constexpr unsigned int M1 = prol ? M : 1;
-      constexpr unsigned int M2 =
-        prol ? (dir > 0 ? M : 1) : ((dir > 0 || dim < 2) ? 1 : M);
-      constexpr unsigned int M3 =
-        prol ? (dir > 1 ? M : 1) : ((dir > 1 || dim < 3) ? 1 : M);
-
-      // const bool last_thread_x = 0;
-      // const bool last_thread_y = 0;
-      // const bool last_thread_z = 0;
-
-      Number tmp[M1 * M2 * M3];
-
-#pragma unroll
-      for (int m3 = 0; m3 < M3; ++m3)
-        {
-#pragma unroll
-          for (int m2 = 0; m2 < M2; ++m2)
-            {
-#pragma unroll
-              for (int m1 = 0; m1 < M1; ++m1)
-                {
-                  tmp[m1 + M1 * (m2 + M2 * m3)] = 0;
-
-                  for (int i = 0; i < n_src; ++i)
-                    {
-                      const unsigned int x = i;
-                      const unsigned int y = m2 + M2 * threadIdx.y;
-                      const unsigned int z = m3 + M3 * threadIdx.z;
-                      const unsigned int idx =
-                        (dir == 0 ? x + n_fine * (y + n_fine * z) :
-                         dir == 1 ? y + n_fine * (x + n_fine * z) :
-                                    y + n_fine * (z + n_fine * x));
-                      // unless we are the last thread in a direction AND we
-                      // are updating any value after the first one, go ahead
-                      // if (((m1 == 0) || !last_thread_x) &&
-                      //     ((m2 == 0) || !last_thread_y) &&
-                      //     ((m3 == 0) || !last_thread_z))
-                      {
-                        tmp[m1 + M1 * (m2 + M2 * m3)] +=
-                          my_shvals[m1 * n_src + i] * values[idx];
-                      }
-                    }
-                }
-            }
-        }
-      __syncthreads();
-
-#pragma unroll
-      for (int m3 = 0; m3 < M3; ++m3)
-        {
-#pragma unroll
-          for (int m2 = 0; m2 < M2; ++m2)
-            {
-#pragma unroll
-              for (int m1 = 0; m1 < M1; ++m1)
-                {
-                  const unsigned int x = m1 + M1 * threadIdx.x;
-                  const unsigned int y = m2 + M2 * threadIdx.y;
-                  const unsigned int z = m3 + M3 * threadIdx.z;
-                  const unsigned int idx =
-                    (dir == 0 ? x + n_fine * (y + n_fine * z) :
-                     dir == 1 ? y + n_fine * (x + n_fine * z) :
-                                y + n_fine * (z + n_fine * x));
-
-                  // if (((m1 == 0) || !last_thread_x) &&
-                  //     ((m2 == 0) || !last_thread_y) &&
-                  //     ((m3 == 0) || !last_thread_z))
-                  {
-                    values[idx] = tmp[m1 + M1 * (m2 + M2 * m3)];
-                  }
-                }
-            }
-        }
+      for (int i = 0; i < n_fine / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_fine)
+          values[threadIdx.x + i * Util::BLOCK_DIM] *=
+            weights[threadIdx.x + i * Util::BLOCK_DIM];
     }
   };
 
   template <int dim, int fe_degree, typename Number>
   class MGProlongateHelper : public MGTransferHelper<dim, fe_degree, Number>
   {
-    using MGTransferHelper<dim, fe_degree, Number>::M;
     using MGTransferHelper<dim, fe_degree, Number>::n_coarse;
     using MGTransferHelper<dim, fe_degree, Number>::n_fine;
     using MGTransferHelper<dim, fe_degree, Number>::dof_indices_coarse;
     using MGTransferHelper<dim, fe_degree, Number>::dof_indices_fine;
     using MGTransferHelper<dim, fe_degree, Number>::values;
     using MGTransferHelper<dim, fe_degree, Number>::shape_values;
+    using MGTransferHelper<dim, fe_degree, Number>::row_ptr;
+    using MGTransferHelper<dim, fe_degree, Number>::col_idx;
     using MGTransferHelper<dim, fe_degree, Number>::weights;
 
+    using MGTransferHelper<dim, fe_degree, Number>::base_dof;
+    using MGTransferHelper<dim, fe_degree, Number>::dof_offset;
+    using MGTransferHelper<dim, fe_degree, Number>::base_dof_coarse;
+    using MGTransferHelper<dim, fe_degree, Number>::dof_offset_coarse;
+
+
   public:
+    static constexpr TransferVariant transfer_variant = PROLONGATION;
+
     __device__
-    MGProlongateHelper(Number                        *buf,
-                       const Number                  *w,
-                       const Number                  *shvals,
-                       const types::global_dof_index *idx_coarse,
-                       const types::global_dof_index *idx_fine)
+    MGProlongateHelper(Number             *buf,
+                       const Number       *w,
+                       const Number       *shvals,
+                       const unsigned int *row_ptr,
+                       const unsigned int *col_idx,
+                       const unsigned int *idx_coarse,
+                       const unsigned int *idx_fine,
+                       const unsigned int *base_dof_,
+                       const unsigned int *dof_offset_,
+                       const unsigned int *base_dof_coarse_,
+                       const unsigned int *dof_offset_coarse_)
       : MGTransferHelper<dim, fe_degree, Number>(buf,
                                                  w,
                                                  shvals,
+                                                 row_ptr,
+                                                 col_idx,
                                                  idx_coarse,
-                                                 idx_fine)
+                                                 idx_fine,
+                                                 base_dof_,
+                                                 dof_offset_,
+                                                 base_dof_coarse_,
+                                                 dof_offset_coarse_)
     {}
 
     __device__ void
     run(Number *dst, const Number *src)
     {
-      Number my_shvals[M * n_coarse];
-      for (int m = 0; m < (threadIdx.x < fe_degree ? M : M); ++m)
-        for (int i = 0; i < n_coarse; ++i)
-          my_shvals[m * n_coarse + i] =
-            shape_values[(threadIdx.x * M + m) + n_fine * i];
-
       read_coarse(src);
       __syncthreads();
 
-      this->template reduce<PROLONGATION, 0>(my_shvals);
+      reduce_csr();
       __syncthreads();
-      if (dim > 1)
-        {
-          this->template reduce<PROLONGATION, 1>(my_shvals);
-          __syncthreads();
-          if (dim > 2)
-            {
-              this->template reduce<PROLONGATION, 2>(my_shvals);
-              __syncthreads();
-            }
-        }
 
-      // this->weigh_values();
-      // __syncthreads();
+      this->weigh_values();
+      __syncthreads();
 
       write_fine(dst);
     }
@@ -199,83 +159,103 @@ namespace PSMF
     __device__ void
     read_coarse(const Number *vec)
     {
-      const unsigned int idx =
-        threadIdx.x + n_fine * (threadIdx.y + n_fine * threadIdx.z);
-      values[idx] = vec[dof_indices_coarse[idx]];
+      for (int i = 0; i < n_coarse / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_coarse)
+          values[threadIdx.x + i * Util::BLOCK_DIM] =
+            vec[dof_indices_coarse[base_dof_coarse[threadIdx.x +
+                                                   i * Util::BLOCK_DIM]] +
+                dof_offset_coarse[threadIdx.x + i * Util::BLOCK_DIM]];
+    }
+
+    __device__ void
+    reduce_csr()
+    {
+      Number sum[n_fine / Util::BLOCK_DIM + 1];
+
+      for (int i = 0; i < n_fine / Util::BLOCK_DIM + 1; ++i)
+        {
+          sum[i] = 0;
+          if (threadIdx.x + i * Util::BLOCK_DIM < n_fine)
+            for (auto j = row_ptr[threadIdx.x + i * Util::BLOCK_DIM];
+                 j < row_ptr[threadIdx.x + i * Util::BLOCK_DIM + 1];
+                 ++j)
+              sum[i] += shape_values[j] * values[col_idx[j]];
+        }
+      __syncthreads();
+      for (int i = 0; i < n_fine / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_fine)
+          values[threadIdx.x + i * Util::BLOCK_DIM] = sum[i];
     }
 
     __device__ void
     write_fine(Number *vec) const
     {
-      const unsigned int M1 = M;
-      const unsigned int M2 = (dim > 1 ? M : 1);
-      const unsigned int M3 = (dim > 2 ? M : 1);
-
-      for (int m3 = 0; m3 < M3; ++m3)
-        for (int m2 = 0; m2 < M2; ++m2)
-          for (int m1 = 0; m1 < M1; ++m1)
-            {
-              const unsigned int x = (M1 * threadIdx.x + m1);
-              const unsigned int y = (M2 * threadIdx.y + m2);
-              const unsigned int z = (M3 * threadIdx.z + m3);
-
-              const unsigned int idx = x + n_fine * (y + n_fine * z);
-              if (x < n_fine && y < n_fine && z < n_fine)
-                atomicAdd(&vec[dof_indices_fine[idx]], values[idx]);
-            }
+      for (int i = 0; i < n_fine / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_fine)
+          atomicAdd(
+            &vec[dof_indices_fine[base_dof[threadIdx.x + i * Util::BLOCK_DIM]] +
+                 dof_offset[threadIdx.x + i * Util::BLOCK_DIM]],
+            values[threadIdx.x + i * Util::BLOCK_DIM]);
     }
   };
 
   template <int dim, int fe_degree, typename Number>
   class MGRestrictHelper : public MGTransferHelper<dim, fe_degree, Number>
   {
-    using MGTransferHelper<dim, fe_degree, Number>::M;
     using MGTransferHelper<dim, fe_degree, Number>::n_coarse;
     using MGTransferHelper<dim, fe_degree, Number>::n_fine;
     using MGTransferHelper<dim, fe_degree, Number>::dof_indices_coarse;
     using MGTransferHelper<dim, fe_degree, Number>::dof_indices_fine;
     using MGTransferHelper<dim, fe_degree, Number>::values;
     using MGTransferHelper<dim, fe_degree, Number>::shape_values;
+    using MGTransferHelper<dim, fe_degree, Number>::row_ptr;
+    using MGTransferHelper<dim, fe_degree, Number>::col_idx;
     using MGTransferHelper<dim, fe_degree, Number>::weights;
 
+    using MGTransferHelper<dim, fe_degree, Number>::base_dof;
+    using MGTransferHelper<dim, fe_degree, Number>::dof_offset;
+    using MGTransferHelper<dim, fe_degree, Number>::base_dof_coarse;
+    using MGTransferHelper<dim, fe_degree, Number>::dof_offset_coarse;
+
   public:
+    static constexpr TransferVariant transfer_variant = RESTRICTION;
+
     __device__
-    MGRestrictHelper(Number                        *buf,
-                     const Number                  *w,
-                     const Number                  *shvals,
-                     const types::global_dof_index *idx_coarse,
-                     const types::global_dof_index *idx_fine)
+    MGRestrictHelper(Number             *buf,
+                     const Number       *w,
+                     const Number       *shvals,
+                     const unsigned int *row_ptr,
+                     const unsigned int *col_idx,
+                     const unsigned int *idx_coarse,
+                     const unsigned int *idx_fine,
+                     const unsigned int *base_dof_,
+                     const unsigned int *dof_offset_,
+                     const unsigned int *base_dof_coarse_,
+                     const unsigned int *dof_offset_coarse_)
       : MGTransferHelper<dim, fe_degree, Number>(buf,
                                                  w,
                                                  shvals,
+                                                 row_ptr,
+                                                 col_idx,
                                                  idx_coarse,
-                                                 idx_fine)
+                                                 idx_fine,
+                                                 base_dof_,
+                                                 dof_offset_,
+                                                 base_dof_coarse_,
+                                                 dof_offset_coarse_)
     {}
 
     __device__ void
     run(Number *dst, const Number *src)
     {
-      Number my_shvals[n_fine];
-      for (int i = 0; i < n_fine; ++i)
-        my_shvals[i] = shape_values[threadIdx.x * n_fine + i];
-
       read_fine(src);
       __syncthreads();
-      // this->weigh_values();
-      // __syncthreads();
 
-      this->template reduce<RESTRICTION, 0>(my_shvals);
+      this->weigh_values();
       __syncthreads();
-      if (dim > 1)
-        {
-          this->template reduce<RESTRICTION, 1>(my_shvals);
-          __syncthreads();
-          if (dim > 2)
-            {
-              this->template reduce<RESTRICTION, 2>(my_shvals);
-              __syncthreads();
-            }
-        }
+
+      reduce_csr();
+      __syncthreads();
 
       write_coarse(dst);
     }
@@ -284,81 +264,108 @@ namespace PSMF
     __device__ void
     read_fine(const Number *vec)
     {
-      const unsigned int M1 = M;
-      const unsigned int M2 = (dim > 1 ? M : 1);
-      const unsigned int M3 = (dim > 2 ? M : 1);
+      for (int i = 0; i < n_fine / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_fine)
+          values[threadIdx.x + i * Util::BLOCK_DIM] =
+            vec[dof_indices_fine[base_dof[threadIdx.x + i * Util::BLOCK_DIM]] +
+                dof_offset[threadIdx.x + i * Util::BLOCK_DIM]];
+    }
 
-      for (int m3 = 0; m3 < M3; ++m3)
-        for (int m2 = 0; m2 < M2; ++m2)
-          for (int m1 = 0; m1 < M1; ++m1)
-            {
-              const unsigned int x = (M1 * threadIdx.x + m1);
-              const unsigned int y = (M2 * threadIdx.y + m2);
-              const unsigned int z = (M3 * threadIdx.z + m3);
+    __device__ void
+    reduce_csr()
+    {
+      Number sum[n_coarse / Util::BLOCK_DIM + 1];
 
-              const unsigned int idx = x + n_fine * (y + n_fine * z);
-              if (x < n_fine && y < n_fine && z < n_fine)
-                values[idx] = vec[dof_indices_fine[idx]];
-            }
+      for (int i = 0; i < n_coarse / Util::BLOCK_DIM + 1; ++i)
+        {
+          sum[i] = 0;
+          if (threadIdx.x + i * Util::BLOCK_DIM < n_coarse)
+            for (auto j = row_ptr[threadIdx.x + i * Util::BLOCK_DIM];
+                 j < row_ptr[threadIdx.x + i * Util::BLOCK_DIM + 1];
+                 ++j)
+              sum[i] += shape_values[j] * values[col_idx[j]];
+        }
+
+      __syncthreads();
+      for (int i = 0; i < n_coarse / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_coarse)
+          values[threadIdx.x + i * Util::BLOCK_DIM] = sum[i];
     }
 
     __device__ void
     write_coarse(Number *vec) const
     {
-      const unsigned int idx =
-        threadIdx.x + n_fine * (threadIdx.y + n_fine * threadIdx.z);
-
-      // printf("[%d %d] ", idx, dof_indices_coarse[idx]);
-
-      atomicAdd(&vec[dof_indices_coarse[idx]], values[idx]);
+      for (int i = 0; i < n_coarse / Util::BLOCK_DIM + 1; ++i)
+        if (threadIdx.x + i * Util::BLOCK_DIM < n_coarse)
+          atomicAdd(
+            &vec[dof_indices_coarse[base_dof_coarse[threadIdx.x +
+                                                    i * Util::BLOCK_DIM]] +
+                 dof_offset_coarse[threadIdx.x + i * Util::BLOCK_DIM]],
+            values[threadIdx.x + i * Util::BLOCK_DIM]);
     }
   };
 
-  namespace internal
+
+  extern __shared__ double data_d[];
+  extern __shared__ float  data_f[];
+
+  template <typename Number>
+  __device__ inline Number *
+  get_shared_data_ptr();
+
+  template <>
+  __device__ inline double *
+  get_shared_data_ptr()
   {
-    extern __shared__ double shmem_d[];
-    extern __shared__ float  shmem_f[];
+    return data_d;
+  }
 
-    template <typename Number>
-    __device__ inline Number *
-    get_shared_mem_ptr();
+  template <>
+  __device__ inline float *
+  get_shared_data_ptr()
+  {
+    return data_f;
+  }
 
-    template <>
-    __device__ inline double *
-    get_shared_mem_ptr()
-    {
-      return shmem_d;
-    }
-
-    template <>
-    __device__ inline float *
-    get_shared_mem_ptr()
-    {
-      return shmem_f;
-    }
-  } // namespace internal
 
   template <int dim, int degree, typename loop_body, typename Number>
-  __global__ void __launch_bounds__(1024, 1)
-    mg_kernel(Number                        *dst,
-              const Number                  *src,
-              const Number                  *weights,
-              const Number                  *shape_values,
-              const types::global_dof_index *dof_indices_coarse,
-              const types::global_dof_index *dof_indices_fine,
-              const types::global_dof_index *child_offset_in_parent,
-              const unsigned int             n_child_cell_dofs)
+  __global__ void
+  mg_kernel(Number             *dst,
+            const Number       *src,
+            const Number       *weights,
+            const Number       *shape_values,
+            const unsigned int *row_ptr,
+            const unsigned int *col_idx,
+            const unsigned int *dof_indices_coarse,
+            const unsigned int *dof_indices_fine,
+            const unsigned int *base_dof,
+            const unsigned int *dof_offset,
+            const unsigned int *base_dof_coarse,
+            const unsigned int *dof_offset_coarse,
+            const unsigned int  n_child_cell_dofs)
   {
-    const unsigned int            n_fine      = Util::pow(degree * 2 + 2, dim);
-    const unsigned int            coarse_cell = blockIdx.x;
-    const types::global_dof_index coarse_offset =
-      child_offset_in_parent[coarse_cell];
+    constexpr unsigned int n_coarse =
+      dim * Util::pow(degree + 1, dim - 1) * (degree + 2) +
+      Util::pow(degree + 1, dim);
 
-    loop_body body(internal::get_shared_mem_ptr<Number>(),
-                   weights + coarse_cell * Util::pow(3, dim),
+    constexpr unsigned int n_first_dof =
+      dim == 2 ? 4 + 3 + 3 + 2 + 4 + (1 << dim) :
+                 6 + 5 + 5 + 4 + 5 + 4 + 4 + 3 + 8 + (1 << dim);
+    constexpr unsigned int n_first_dof_coarse = 2 * dim + 1 + 1;
+
+    const unsigned int coarse_cell = blockIdx.x;
+
+    loop_body body(get_shared_data_ptr<Number>(),
+                   weights + coarse_cell * n_child_cell_dofs,
                    shape_values,
-                   dof_indices_coarse + coarse_offset,
-                   dof_indices_fine + coarse_cell * n_child_cell_dofs);
+                   row_ptr,
+                   col_idx,
+                   dof_indices_coarse + coarse_cell * n_first_dof_coarse,
+                   dof_indices_fine + coarse_cell * n_first_dof,
+                   base_dof,
+                   dof_offset,
+                   base_dof_coarse,
+                   dof_offset_coarse);
 
     body.run(dst, src);
   }
@@ -374,17 +381,24 @@ namespace PSMF
     const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &src)
     const
   {
-    constexpr unsigned int n_fine_size =
-      Util::pow(degree * 2 + 2, dim) * sizeof(Number);
-    constexpr unsigned int n_coarse_dofs_1d = degree + 1;
+    constexpr unsigned int n_coarse =
+      dim * Util::pow(degree + 1, dim - 1) * (degree + 2) +
+      Util::pow(degree + 1, dim);
+    constexpr unsigned int n_fine_dofs =
+      dim * Util::pow(2 * degree + 2, dim - 1) * (2 * degree + 3) +
+      Util::pow(2 * degree + 2, dim);
+
+    constexpr unsigned int n_fine_size = n_fine_dofs * sizeof(Number);
+
+    AssertDimension(n_child_cell_dofs, n_fine_dofs);
+
+    constexpr TransferVariant transfer_vatiant =
+      loop_body<dim, degree, Number>::transfer_variant;
 
     const unsigned int n_coarse_cells = n_owned_level_cells[fine_level - 1];
 
     // kernel parameters
-    dim3 bk_dim(n_coarse_dofs_1d,
-                (dim > 1) ? n_coarse_dofs_1d : 1,
-                (dim > 2) ? n_coarse_dofs_1d : 1);
-
+    dim3 bk_dim(Util::BLOCK_DIM, 1, 1);
     dim3 gd_dim(n_coarse_cells);
 
     AssertCuda(cudaFuncSetAttribute(
@@ -392,19 +406,21 @@ namespace PSMF
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       n_fine_size));
 
-    if (n_coarse_cells > 0)
-      mg_kernel<dim, degree, loop_body<dim, degree, Number>>
-        <<<gd_dim, bk_dim, n_fine_size>>>(
-          dst.get_values(),
-          src.get_values(),
-          weights_on_refined[fine_level - 1]
-            .get_values(), // only has fine-level entries
-          prolongation_matrix_1d.get_values(),
-          level_dof_indices[fine_level - 1].get_values(),
-          level_dof_indices[fine_level].get_values(),
-          child_offset_in_parent[fine_level - 1]
-            .get_values(), // on coarse level
-          n_child_cell_dofs);
+    mg_kernel<dim, degree, loop_body<dim, degree, Number>>
+      <<<gd_dim, bk_dim, n_fine_size>>>(
+        dst.get_values(),
+        src.get_values(),
+        weights_on_refined[fine_level - 1].get_values(),
+        transfer_matrix_val[transfer_vatiant].get_values(),
+        transfer_matrix_row_ptr[transfer_vatiant].get_values(),
+        transfer_matrix_col_idx[transfer_vatiant].get_values(),
+        level_dof_indices_parent[fine_level - 1].get_values(),
+        level_dof_indices_child[fine_level].get_values(),
+        base_dof.get_values(),
+        dof_offset.get_values(),
+        base_dof_coarse.get_values(),
+        dof_offset_coarse.get_values(),
+        n_child_cell_dofs);
 
     AssertCudaKernel();
   }
@@ -456,41 +472,36 @@ namespace PSMF
   template <int dim, typename Number>
   void
   MGTransferCUDA<dim, Number>::build(
-    const DoFHandler<dim, dim> &mg_dof,
+    const DoFHandler<dim, dim> &mg_dof_velocity,
+    const DoFHandler<dim, dim> &mg_dof_pressure,
     const std::vector<std::shared_ptr<const Utilities::MPI::Partitioner>>
       &external_partitioners)
   {
-    Assert(mg_dof.has_level_dofs(),
+    Assert(mg_dof_velocity.has_level_dofs() && mg_dof_pressure.has_level_dofs(),
            ExcMessage(
              "The underlying DoFHandler object has not had its "
              "distribute_mg_dofs() function called, but this is a prerequisite "
              "for multigrid transfers. You will need to call this function, "
              "probably close to where you already call distribute_dofs()."));
 
-    /**
-     * Only global refinement so far, just plain copy. Uncomment for adaptice
-     * refinement.
-     */
-    fill_copy_indices(mg_dof);
+    fill_copy_indices(mg_dof_velocity, mg_dof_pressure);
 
-    const unsigned int n_levels = mg_dof.get_triangulation().n_global_levels();
-
-    vector_partitioners.resize(0, n_levels - 1);
-    for (unsigned int level = 0; level <= ghosted_level_vector.max_level();
-         ++level)
-      vector_partitioners[level] =
-        ghosted_level_vector[level].get_partitioner();
+    const unsigned int n_levels =
+      mg_dof_velocity.get_triangulation().n_global_levels();
 
     std::vector<std::vector<Number>>       weights_host;
-    std::vector<std::vector<unsigned int>> level_dof_indices_host;
+    std::vector<std::vector<unsigned int>> level_dof_indices_parent_host;
+    std::vector<std::vector<unsigned int>> level_dof_indices_child_host;
     std::vector<std::vector<std::pair<unsigned int, unsigned int>>>
       parent_child_connect;
 
-    // std::vector<Table<2, unsigned int>> copy_indices_global_mine;
-    // MGLevelObject<LinearAlgebra::distributed::Vector<Number>>
-    //   ghosted_level_vector;
+    std::vector<Table<2, unsigned int>> copy_indices_global_mine;
+    MGLevelObject<LinearAlgebra::distributed::Vector<Number>>
+      ghosted_level_vector;
     std::vector<std::vector<std::vector<unsigned short>>>
       dirichlet_indices_host;
+
+    std::vector<internal::CSRMatrix<Number>> transfer_matrix;
 
     ghosted_level_vector.resize(0, n_levels - 1);
 
@@ -500,20 +511,19 @@ namespace PSMF
       vector_partitioners[level] =
         ghosted_level_vector[level].get_partitioner();
 
-    // WARN: setup_transfer() only works with "unsigned int"
-    dealii::internal::MGTransfer::ElementInfo<Number> elem_info;
-    dealii::internal::MGTransfer::setup_transfer<dim, Number>(
-      mg_dof,
-      this->mg_constrained_dofs,
-      external_partitioners,
-      elem_info,
-      level_dof_indices_host,
-      parent_child_connect,
-      n_owned_level_cells,
-      dirichlet_indices_host,
-      weights_host,
-      copy_indices_global_mine_host,
-      vector_partitioners);
+
+    internal::ElementInfo<Number> elem_info;
+    internal::setup_transfer<dim, Number>(mg_dof_velocity,
+                                          mg_dof_pressure,
+                                          this->mg_constrained_dofs,
+                                          external_partitioners,
+                                          elem_info,
+                                          level_dof_indices_parent_host,
+                                          level_dof_indices_child_host,
+                                          n_owned_level_cells,
+                                          weights_host,
+                                          copy_indices_global_mine,
+                                          vector_partitioners);
 
     // unpack element info data
     fe_degree             = elem_info.fe_degree;
@@ -524,41 +534,85 @@ namespace PSMF
     //---------------------------------------------------------------------------
     // transfer stuff from host to device
     //---------------------------------------------------------------------------
-    copy_to_device(prolongation_matrix_1d, elem_info.prolongation_matrix_1d);
+    setup_prolongatino_matrix(mg_dof_velocity,
+                              mg_dof_pressure,
+                              transfer_matrix);
+    transfer_matrix_val.resize(2);
+    transfer_matrix_row_ptr.resize(2);
+    transfer_matrix_col_idx.resize(2);
+    for (unsigned int i = 0; i < transfer_matrix.size(); ++i)
+      {
+        copy_to_device(transfer_matrix_val[i], transfer_matrix[i].values);
+        copy_to_device(transfer_matrix_row_ptr[i], transfer_matrix[i].row_ptr);
+        copy_to_device(transfer_matrix_col_idx[i], transfer_matrix[i].col_idx);
+      }
+
+    DoFMapping<dim> dm(fe_degree);
+
+    auto first_dofs_host      = dm.get_first_dofs();
+    auto base_dof_host        = dm.get_base_dof();
+    auto dof_offset_host      = dm.get_dof_offset();
+    auto first_dofs_cell_host = dm.get_first_dofs_cell();
+    auto base_dof_cell_host   = dm.get_base_dof_cell();
+    auto dof_offset_cell_host = dm.get_dof_offset_cell();
+
+    copy_to_device(base_dof, base_dof_host);
+    copy_to_device(dof_offset, dof_offset_host);
+    copy_to_device(base_dof_coarse, base_dof_cell_host);
+    copy_to_device(dof_offset_coarse, dof_offset_cell_host);
 
     level_dof_indices.resize(n_levels);
+    level_dof_indices_parent.resize(n_levels);
+    level_dof_indices_child.resize(n_levels);
 
     for (unsigned int l = 0; l < n_levels; l++)
       {
-        copy_to_device(level_dof_indices[l], level_dof_indices_host[l]);
+        std::vector<unsigned int> level_parent_first_dof;
+        std::vector<unsigned int> level_child_first_dof;
+
+        for (auto ind = 0U; ind < level_dof_indices_parent_host[l].size();
+             ind += base_dof_cell_host.size())
+          {
+            for (auto ii = 0U; ii < first_dofs_cell_host.size(); ++ii)
+              level_parent_first_dof.push_back(
+                level_dof_indices_parent_host[l]
+                                             [ind + first_dofs_cell_host[ii]]);
+          }
+
+        for (auto ind = 0U; ind < level_dof_indices_child_host[l].size();
+             ind += base_dof_host.size())
+          {
+            for (auto ii = 0U; ii < first_dofs_host.size(); ++ii)
+              level_child_first_dof.push_back(
+                level_dof_indices_child_host[l][ind + first_dofs_host[ii]]);
+          }
+
+        // copy_to_device(level_dof_indices_parent[l],
+        //                level_dof_indices_parent_host[l]);
+        // copy_to_device(level_dof_indices_child[l],
+        //                level_dof_indices_child_host[l]);
+
+        copy_to_device(level_dof_indices_parent[l], level_parent_first_dof);
+        copy_to_device(level_dof_indices_child[l], level_child_first_dof);
+
+        // std::cout << "Level " << l << std::endl;
+        // for (auto ind : level_dof_indices_parent_host[l])
+        //   std::cout << ind << " ";
+        // std::cout << "\n\n";
       }
 
     weights_on_refined.resize(n_levels - 1);
-    // for (unsigned int l = 0; l < n_levels - 1; l++)
-    //   {
-    //     copy_to_device(weights_on_refined[l], weights_host[l]);
-    //   }
-
-    child_offset_in_parent.resize(n_levels - 1);
-    std::vector<types::global_dof_index> offsets;
-
     for (unsigned int l = 0; l < n_levels - 1; l++)
       {
-        offsets.resize(n_owned_level_cells[l]);
+        copy_to_device(weights_on_refined[l], weights_host[l]);
 
-        for (unsigned int c = 0; c < n_owned_level_cells[l]; ++c)
-          {
-            const auto shift =
-              dealii::internal::MGTransfer::compute_shift_within_children<dim>(
-                parent_child_connect[l][c].second,
-                fe_degree + 1 - element_is_continuous,
-                fe_degree);
-            offsets[c] =
-              parent_child_connect[l][c].first * n_child_cell_dofs + shift;
-          }
-
-        copy_to_device(child_offset_in_parent[l], offsets);
+        // std::cout << "Level " << l << std::endl;
+        // for (auto ind : weights_host[l])
+        //   std::cout << ind << " ";
+        // std::cout << "\n\n";
       }
+
+    child_offset_in_parent.resize(n_levels - 1);
 
     std::vector<types::global_dof_index> dirichlet_index_vector;
     dirichlet_indices.resize(n_levels);
@@ -597,69 +651,33 @@ namespace PSMF
     Assert((to_level >= 1) && (to_level <= level_dof_indices.size()),
            ExcIndexRange(to_level, 1, level_dof_indices.size() + 1));
 
-    const bool src_inplace = src.get_partitioner().get() ==
-                             this->vector_partitioners[to_level - 1].get();
-    if (src_inplace == false)
-      {
-        if (this->ghosted_level_vector[to_level - 1].get_partitioner().get() !=
-            this->vector_partitioners[to_level - 1].get())
-          this->ghosted_level_vector[to_level - 1].reinit(
-            this->vector_partitioners[to_level - 1]);
-        this->ghosted_level_vector[to_level - 1].copy_locally_owned_data_from(
-          src);
-      }
-
-    const bool dst_inplace =
-      dst.get_partitioner().get() == this->vector_partitioners[to_level].get();
-    if (dst_inplace == false)
-      {
-        if (this->ghosted_level_vector[to_level].get_partitioner().get() !=
-            this->vector_partitioners[to_level].get())
-          this->ghosted_level_vector[to_level].reinit(
-            this->vector_partitioners[to_level]);
-        AssertDimension(
-          this->ghosted_level_vector[to_level].locally_owned_size(),
-          dst.locally_owned_size());
-        this->ghosted_level_vector[to_level] = 0.;
-      }
-
-    const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-      &src_vec = src_inplace ? src : this->ghosted_level_vector[to_level - 1];
-    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst_vec =
-      dst_inplace ? dst : this->ghosted_level_vector[to_level];
-
-    src_vec.update_ghost_values();
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> src_with_bc(
+      src);
+    set_mg_constrained_dofs(src_with_bc, to_level - 1, 0);
 
     if (fe_degree == 1)
-      coarse_cell_loop<MGProlongateHelper, 1>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 1>(to_level, dst, src_with_bc);
     else if (fe_degree == 2)
-      coarse_cell_loop<MGProlongateHelper, 2>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 2>(to_level, dst, src_with_bc);
     else if (fe_degree == 3)
-      coarse_cell_loop<MGProlongateHelper, 3>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 3>(to_level, dst, src_with_bc);
     else if (fe_degree == 4)
-      coarse_cell_loop<MGProlongateHelper, 4>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 4>(to_level, dst, src_with_bc);
     else if (fe_degree == 5)
-      coarse_cell_loop<MGProlongateHelper, 5>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 5>(to_level, dst, src_with_bc);
     else if (fe_degree == 6)
-      coarse_cell_loop<MGProlongateHelper, 6>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 6>(to_level, dst, src_with_bc);
     else if (fe_degree == 7)
-      coarse_cell_loop<MGProlongateHelper, 7>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 7>(to_level, dst, src_with_bc);
     else if (fe_degree == 8)
-      coarse_cell_loop<MGProlongateHelper, 8>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 8>(to_level, dst, src_with_bc);
     else if (fe_degree == 9)
-      coarse_cell_loop<MGProlongateHelper, 9>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 9>(to_level, dst, src_with_bc);
     else if (fe_degree == 10)
-      coarse_cell_loop<MGProlongateHelper, 10>(to_level, dst_vec, src_vec);
+      coarse_cell_loop<MGProlongateHelper, 10>(to_level, dst, src_with_bc);
     else
       AssertThrow(false,
                   ExcNotImplemented("Only degrees 1 through 10 implemented."));
-
-    dst_vec.compress(VectorOperation::add);
-    if (dst_inplace == false)
-      dst += dst_vec;
-
-    if (src_inplace == true)
-      src.zero_out_ghost_values();
   }
 
   template <int dim, typename Number>
@@ -673,78 +691,45 @@ namespace PSMF
     Assert((from_level >= 1) && (from_level <= level_dof_indices.size()),
            ExcIndexRange(from_level, 1, level_dof_indices.size() + 1));
 
-    const bool src_inplace = src.get_partitioner().get() ==
-                             this->vector_partitioners[from_level].get();
-    if (src_inplace == false)
-      {
-        if (this->ghosted_level_vector[from_level].get_partitioner().get() !=
-            this->vector_partitioners[from_level].get())
-          this->ghosted_level_vector[from_level].reinit(
-            this->vector_partitioners[from_level]);
-        this->ghosted_level_vector[from_level].copy_locally_owned_data_from(
-          src);
-      }
-
-    const bool dst_inplace = dst.get_partitioner().get() ==
-                             this->vector_partitioners[from_level - 1].get();
-    if (dst_inplace == false)
-      {
-        if (this->ghosted_level_vector[from_level - 1]
-              .get_partitioner()
-              .get() != this->vector_partitioners[from_level - 1].get())
-          this->ghosted_level_vector[from_level - 1].reinit(
-            this->vector_partitioners[from_level - 1]);
-        AssertDimension(
-          this->ghosted_level_vector[from_level - 1].locally_owned_size(),
-          dst.locally_owned_size());
-        this->ghosted_level_vector[from_level - 1] = 0.;
-      }
-
-    const LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-      &src_vec = src_inplace ? src : this->ghosted_level_vector[from_level];
-    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> &dst_vec =
-      dst_inplace ? dst : this->ghosted_level_vector[from_level - 1];
-
-    src_vec.update_ghost_values();
+    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA> increment;
+    increment.reinit(dst,
+                     false); // resize to correct size and initialize to 0
 
     if (fe_degree == 1)
-      coarse_cell_loop<MGRestrictHelper, 1>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 1>(from_level, increment, src);
     else if (fe_degree == 2)
-      coarse_cell_loop<MGRestrictHelper, 2>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 2>(from_level, increment, src);
     else if (fe_degree == 3)
-      coarse_cell_loop<MGRestrictHelper, 3>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 3>(from_level, increment, src);
     else if (fe_degree == 4)
-      coarse_cell_loop<MGRestrictHelper, 4>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 4>(from_level, increment, src);
     else if (fe_degree == 5)
-      coarse_cell_loop<MGRestrictHelper, 5>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 5>(from_level, increment, src);
     else if (fe_degree == 6)
-      coarse_cell_loop<MGRestrictHelper, 6>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 6>(from_level, increment, src);
     else if (fe_degree == 7)
-      coarse_cell_loop<MGRestrictHelper, 7>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 7>(from_level, increment, src);
     else if (fe_degree == 8)
-      coarse_cell_loop<MGRestrictHelper, 8>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 8>(from_level, increment, src);
     else if (fe_degree == 9)
-      coarse_cell_loop<MGRestrictHelper, 9>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 9>(from_level, increment, src);
     else if (fe_degree == 10)
-      coarse_cell_loop<MGRestrictHelper, 10>(from_level, dst_vec, src_vec);
+      coarse_cell_loop<MGRestrictHelper, 10>(from_level, increment, src);
     else
       AssertThrow(false,
                   ExcNotImplemented("Only degrees 1 through 10 implemented."));
 
-    dst_vec.compress(VectorOperation::add);
-    if (dst_inplace == false)
-      dst += dst_vec;
+    set_mg_constrained_dofs(increment, from_level - 1, 0);
 
-    if (src_inplace == true)
-      src.zero_out_ghost_values();
+    dst.add(1., increment);
   }
 
   template <typename Number>
   __global__ void
-  set_mg_constrained_dofs_kernel(Number                        *vec,
-                                 const types::global_dof_index *indices,
-                                 types::global_dof_index        len,
-                                 Number                         val)
+  set_mg_constrained_dofs_kernel(Number             *vec,
+                                 const unsigned int *indices,
+                                 unsigned int        len,
+                                 Number              val)
   {
     const unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < len)
@@ -760,7 +745,7 @@ namespace PSMF
     unsigned int                                                   level,
     Number                                                         val) const
   {
-    const types::global_dof_index len = dirichlet_indices[level].size();
+    const unsigned int len = dirichlet_indices[level].size();
     if (len > 0)
       {
         const unsigned int bksize  = 256;
@@ -788,55 +773,24 @@ namespace PSMF
                      mg_dof.get_triangulation().n_global_levels());
     AssertIndexRange(dst.min_level(), dst.max_level() + 1);
 
-    LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-         &this_ghosted_global_vector   = ghosted_global_vector;
-    auto &this_copy_indices            = copy_indices;
-    auto &this_copy_indices_level_mine = copy_indices_level_mine;
-
-
     for (unsigned int level = dst.min_level(); level <= dst.max_level();
          ++level)
-      if (dst[level].size() != mg_dof.n_dofs(level) ||
-          dst[level].locally_owned_size() !=
-            mg_dof.locally_owned_mg_dofs(level).n_elements())
-        {
-          // In case a ghosted level vector has been initialized, we can
-          // simply use that as a template for the vector partitioning. If
-          // not, we resort to the locally owned range of the dof handler.
-          if (level <= ghosted_level_vector.max_level() &&
-              ghosted_level_vector[level].size() == mg_dof.n_dofs(level))
-            dst[level].reinit(ghosted_level_vector[level], false);
-          else
-            dst[level].reinit(mg_dof.locally_owned_mg_dofs(level),
-                              mg_dof.get_communicator());
-        }
-      else if ((perform_plain_copy == false &&
-                perform_renumbered_plain_copy == false) ||
-               level != dst.max_level())
-        dst[level] = 0;
+      {
+        dst[level].reinit(mg_dof.n_dofs(level));
+      }
 
     if (perform_plain_copy)
       {
-        // In this case, we can simply copy the local range.
-        AssertDimension(dst[dst.max_level()].locally_owned_size(),
-                        src.locally_owned_size());
+        // if the finest multigrid level covers the whole domain (i.e., no
+        // adaptive refinement) and the numbering of the finest level DoFs and
+        // the global DoFs are the same, we can do a plain copy
+
+        AssertDimension(dst[dst.max_level()].size(), src.size());
 
         plain_copy<false>(dst[dst.max_level()], src);
 
         return;
       }
-    else if (perform_renumbered_plain_copy)
-      {
-      }
-
-
-    // std::cout << "Warning! Non-plain copy encourted! \n";
-
-    // copy the source vector to the temporary vector that we hold for the
-    // purpose of data exchange
-    // this_ghosted_global_vector = src;
-    plain_copy<false>(this_ghosted_global_vector, src);
-    this_ghosted_global_vector.update_ghost_values();
 
     for (unsigned int level = dst.max_level() + 1; level != dst.min_level();)
       {
@@ -844,16 +798,9 @@ namespace PSMF
         auto &dst_level = dst[level];
 
         copy_with_indices(dst_level,
-                          this_ghosted_global_vector,
-                          this_copy_indices[level].level_indices,
-                          this_copy_indices[level].global_indices);
-
-        copy_with_indices(dst_level,
-                          this_ghosted_global_vector,
-                          this_copy_indices_level_mine[level].level_indices,
-                          this_copy_indices_level_mine[level].global_indices);
-
-        dst_level.compress(VectorOperation::insert);
+                          src,
+                          copy_indices[level].level_indices,
+                          copy_indices[level].global_indices);
       }
   }
 
@@ -866,60 +813,30 @@ namespace PSMF
     const MGLevelObject<
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>> &src) const
   {
-    (void)mg_dof;
     AssertIndexRange(src.max_level(),
                      mg_dof.get_triangulation().n_global_levels());
     AssertIndexRange(src.min_level(), src.max_level() + 1);
 
+    (void)mg_dof;
+
     if (perform_plain_copy)
       {
-        AssertDimension(dst.locally_owned_size(),
-                        src[src.max_level()].locally_owned_size());
+        AssertDimension(dst.size(), src[src.max_level()].size());
         plain_copy<false>(dst, src[src.max_level()]);
         return;
       }
-    else if (perform_renumbered_plain_copy)
-      {
-      }
-
-
-    // std::cout << "Warning! Non-plain copy encourted! \n";
 
     dst = 0;
     for (unsigned int level = src.min_level(); level <= src.max_level();
          ++level)
       {
-        // the ghosted vector should already have the correct local size (but
-        // different parallel layout)
-        if (ghosted_level_vector[level].size() > 0)
-          AssertDimension(ghosted_level_vector[level].locally_owned_size(),
-                          src[level].locally_owned_size());
-
-        // the first time around, we copy the source vector to the temporary
-        // vector that we hold for the purpose of data exchange
-        LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-          &ghosted_vector = ghosted_level_vector[level];
-
-        if (ghosted_level_vector[level].size() > 0)
-          ghosted_vector = src[level];
-
-        const auto ghosted_vector_ptr =
-          (ghosted_level_vector[level].size() > 0) ? &ghosted_vector :
-                                                     &src[level];
-
-        ghosted_vector_ptr->update_ghost_values();
+        const auto &src_level = src[level];
 
         copy_with_indices(dst,
-                          *ghosted_vector_ptr,
+                          src_level,
                           copy_indices[level].global_indices,
                           copy_indices[level].level_indices);
-
-        copy_with_indices(dst,
-                          *ghosted_vector_ptr,
-                          copy_indices_global_mine[level].global_indices,
-                          copy_indices_global_mine[level].level_indices);
       }
-    dst.compress(VectorOperation::insert);
   }
 
   template <int dim, typename Number>
@@ -931,42 +848,31 @@ namespace PSMF
     const MGLevelObject<
       LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>> &src) const
   {
-    (void)mg_dof;
     AssertIndexRange(src.max_level(),
                      mg_dof.get_triangulation().n_global_levels());
     AssertIndexRange(src.min_level(), src.max_level() + 1);
 
-    dst.zero_out_ghost_values();
+    (void)mg_dof;
+
+    if (perform_plain_copy)
+      {
+        AssertDimension(dst.size(), src[src.max_level()].size());
+        plain_copy<true>(dst, src[src.max_level()]);
+        return;
+      }
+
+    auto temp = dst;
     for (unsigned int level = src.min_level(); level <= src.max_level();
          ++level)
       {
-        // the ghosted vector should already have the correct local size (but
-        // different parallel layout)
-        AssertDimension(ghosted_level_vector[level].locally_owned_size(),
-                        src[level].locally_owned_size());
+        const auto &src_level = src[level];
 
-        // the first time around, we copy the source vector to the temporary
-        // vector that we hold for the purpose of data exchange
-        LinearAlgebra::distributed::Vector<Number, MemorySpace::CUDA>
-          &ghosted_vector = ghosted_level_vector[level];
-        ghosted_vector    = src[level];
-        ghosted_vector.update_ghost_values();
-
-        copy_with_indices<Number2, Number, true>(
-          dst,
-          ghosted_vector,
-          copy_indices[level].global_indices,
-          copy_indices[level].level_indices);
-
-        copy_with_indices<Number2, Number, true>(
-          dst,
-          ghosted_vector,
-          copy_indices_global_mine[level].global_indices,
-          copy_indices_global_mine[level].level_indices);
+        copy_with_indices(temp,
+                          src_level,
+                          copy_indices[level].global_indices,
+                          copy_indices[level].level_indices);
       }
-    dst.compress(VectorOperation::add);
-
-    std::cout << "Warning! Non-plain copy encourted! \n";
+    dst += temp;
   }
 
   template <int dim, typename Number>
@@ -993,21 +899,200 @@ namespace PSMF
     LinearAlgebra::ReadWriteVector<typename VectorType::value_type> rw_vector(
       host.size());
     device.reinit(host.size());
-    for (types::global_dof_index i = 0; i < host.size(); ++i)
+    for (unsigned int i = 0; i < host.size(); ++i)
       rw_vector[i] = host[i];
     device.import(rw_vector, VectorOperation::insert);
   }
 
   template <int dim, typename Number>
   void
-  MGTransferCUDA<dim, Number>::fill_copy_indices(const DoFHandler<dim> &mg_dof)
+  MGTransferCUDA<dim, Number>::setup_prolongatino_matrix(
+    const DoFHandler<dim, dim>               &mg_dof_velocity,
+    const DoFHandler<dim, dim>               &mg_dof_pressure,
+    std::vector<internal::CSRMatrix<Number>> &transfer_matrix)
   {
-    const MPI_Comm mpi_communicator = mg_dof.get_communicator();
+    Triangulation<dim> tr(
+      Triangulation<dim>::limit_level_difference_at_vertices);
+    GridGenerator::hyper_cube(tr, 0, 1);
+    tr.refine_global(1);
 
-    // fill_internal
+    // COO format to CSR format
+    std::vector<unsigned int> row, col;
+    std::vector<Number>       val;
+
+    // velocity
+
+    DoFHandler<dim> mgdof_v(tr);
+    mgdof_v.distribute_dofs(mg_dof_velocity.get_fe());
+    mgdof_v.distribute_mg_dofs();
+    {
+      // MGConstrainedDoFs mg_constrained_dofs;
+      // mg_constrained_dofs.initialize(mgdof_v);
+      // mg_constrained_dofs.make_zero_boundary_constraints(mgdof_v, {0});
+
+      MGTransferPrebuilt<Vector<Number>> transfer_ref;
+      transfer_ref.build(mgdof_v);
+
+      std::string temp_str;
+
+      std::ostringstream oss;
+      transfer_ref.print_matrices(oss);
+
+      // transfer_ref.print_matrices(std::cout);
+
+      std::string        data = oss.str();
+      std::istringstream iss(data);
+
+      for (std::string line; std::getline(iss, line);)
+        {
+          std::stringstream str_strm;
+          str_strm << line;
+
+          str_strm >> temp_str; // take words into temp_str one by one
+
+          int p1 = temp_str.find("(");
+          int p2 = temp_str.find(",");
+          int p3 = temp_str.find(")");
+
+          if (p1 < 0)
+            continue;
+          row.push_back(std::stoi(temp_str.substr(p1 + 1, p2 - p1 - 1)));
+          col.push_back(std::stoi(temp_str.substr(p2 + 1, p3 - p2 - 1)));
+
+          str_strm >> temp_str;
+
+          val.push_back(std::stod(temp_str));
+
+          temp_str = ""; // clear temp string
+        }
+    }
+
+    // pressure
+
+    DoFHandler<dim> mgdof_p(tr);
+    mgdof_p.distribute_dofs(mg_dof_pressure.get_fe());
+    mgdof_p.distribute_mg_dofs();
+    {
+      MGTransferPrebuilt<Vector<Number>> transfer_ref;
+      transfer_ref.build(mgdof_p);
+
+      std::string temp_str;
+
+      std::ostringstream oss;
+      transfer_ref.print_matrices(oss);
+
+      // transfer_ref.print_matrices(std::cout);
+
+      std::string        data = oss.str();
+      std::istringstream iss(data);
+
+      for (std::string line; std::getline(iss, line);)
+        {
+          std::stringstream str_strm;
+          str_strm << line;
+
+          str_strm >> temp_str; // take words into temp_str one by one
+
+          int p1 = temp_str.find("(");
+          int p2 = temp_str.find(",");
+          int p3 = temp_str.find(")");
+
+          if (p1 < 0)
+            continue;
+          row.push_back(mgdof_v.n_dofs(1) +
+                        std::stoi(temp_str.substr(p1 + 1, p2 - p1 - 1)));
+          col.push_back(mgdof_v.n_dofs(0) +
+                        std::stoi(temp_str.substr(p2 + 1, p3 - p2 - 1)));
+
+          str_strm >> temp_str;
+
+          val.push_back(std::stod(temp_str));
+
+          temp_str = ""; // clear temp string
+        }
+    }
+
+    std::vector<internal::COOEntry<Number>> coo_entries(row.size());
+    for (unsigned int i = 0; i < val.size(); ++i)
+      {
+        coo_entries[i].row   = row[i];
+        coo_entries[i].col   = col[i];
+        coo_entries[i].value = val[i];
+
+        // std::cout << row[i] << ", " << col[i] << " " << val[i] << std::endl;
+      }
+
+    auto coo_to_csr = [&](auto coo, unsigned int num_rows, unsigned int) {
+      // Sort the COO entries by row index
+      std::vector<internal::COOEntry<Number>> sorted_coo_entries = coo;
+      std::sort(sorted_coo_entries.begin(),
+                sorted_coo_entries.end(),
+                [](const internal::COOEntry<Number> &a,
+                   const internal::COOEntry<Number> &b) {
+                  if (a.row == b.row)
+                    return a.col < b.col;
+                  else
+                    return a.row < b.row;
+                });
+
+      internal::CSRMatrix<Number> csr_matrix;
+      csr_matrix.row_ptr.resize(num_rows + 1);
+      csr_matrix.col_idx.reserve(coo.size());
+      csr_matrix.values.reserve(coo.size());
+
+      // Initialize row_ptr to all zeros
+      std::fill(csr_matrix.row_ptr.begin(), csr_matrix.row_ptr.end(), 0);
+
+      // Count the number of non-zero entries in each row
+      for (const auto &entry : sorted_coo_entries)
+        {
+          csr_matrix.row_ptr[entry.row + 1]++;
+        }
+
+      // Cumulative sum of row counts to get row_ptr
+      for (unsigned int i = 0; i < num_rows; i++)
+        {
+          csr_matrix.row_ptr[i + 1] += csr_matrix.row_ptr[i];
+        }
+
+      // Copy data from sorted_coo_entries into CSR format
+      for (const auto &entry : sorted_coo_entries)
+        {
+          csr_matrix.col_idx.push_back(entry.col);
+          csr_matrix.values.push_back(entry.value);
+        }
+
+      return csr_matrix;
+    };
+
+    auto prolongation_matrix =
+      coo_to_csr(coo_entries,
+                 mgdof_v.n_dofs(1) + mgdof_p.n_dofs(1),
+                 mgdof_v.n_dofs(0) + mgdof_p.n_dofs(0));
+    transfer_matrix.push_back(prolongation_matrix);
+
+    // transpose_coo
+    for (unsigned int i = 0; i < coo_entries.size(); ++i)
+      std::swap(coo_entries[i].row, coo_entries[i].col);
+
+    auto restriction_matrix = coo_to_csr(coo_entries,
+                                         mgdof_v.n_dofs(0) + mgdof_p.n_dofs(0),
+                                         mgdof_v.n_dofs(1) + mgdof_p.n_dofs(1));
+    transfer_matrix.push_back(restriction_matrix);
+  }
+
+  template <int dim, typename Number>
+  void
+  MGTransferCUDA<dim, Number>::fill_copy_indices(
+    const DoFHandler<dim> &mg_dof_v,
+    const DoFHandler<dim> &mg_dof_p)
+  {
     std::vector<
       std::vector<std::pair<types::global_dof_index, types::global_dof_index>>>
       my_copy_indices;
+    std::vector<
+      std::vector<std::pair<types::global_dof_index, types::global_dof_index>>>
+      my_copy_indices_p;
     std::vector<
       std::vector<std::pair<types::global_dof_index, types::global_dof_index>>>
       my_copy_indices_global_mine;
@@ -1015,146 +1100,85 @@ namespace PSMF
       std::vector<std::pair<types::global_dof_index, types::global_dof_index>>>
       my_copy_indices_level_mine;
 
-    dealii::internal::MGTransfer::fill_copy_indices(mg_dof,
+    dealii::internal::MGTransfer::fill_copy_indices(mg_dof_v,
                                                     mg_constrained_dofs,
                                                     my_copy_indices,
                                                     my_copy_indices_global_mine,
                                                     my_copy_indices_level_mine);
 
-    const unsigned int nlevels = mg_dof.get_triangulation().n_global_levels();
+    std::set<types::boundary_id> dirichlet_boundary;
+    dirichlet_boundary.insert(0);
+    MGConstrainedDoFs mgc;
+    mgc.clear();
+    mgc.initialize(mg_dof_p);
+    // mgc.make_zero_boundary_constraints(mg_dof_p, dirichlet_boundary);
+    dealii::internal::MGTransfer::fill_copy_indices(mg_dof_p,
+                                                    &mgc,
+                                                    my_copy_indices_p,
+                                                    my_copy_indices_global_mine,
+                                                    my_copy_indices_level_mine);
 
-    IndexSet index_set(mg_dof.locally_owned_dofs().size());
-    std::vector<types::global_dof_index> accessed_indices;
-    ghosted_level_vector.resize(0, nlevels - 1);
-    std::vector<IndexSet> level_index_set(nlevels);
-    for (unsigned int l = 0; l < nlevels; ++l)
-      {
-        for (const auto &indices : my_copy_indices_level_mine[l])
-          accessed_indices.push_back(indices.first);
-        std::vector<types::global_dof_index> accessed_level_indices;
-        for (const auto &indices : my_copy_indices_global_mine[l])
-          accessed_level_indices.push_back(indices.second);
-        std::sort(accessed_level_indices.begin(), accessed_level_indices.end());
-        level_index_set[l].set_size(mg_dof.locally_owned_mg_dofs(l).size());
-        level_index_set[l].add_indices(accessed_level_indices.begin(),
-                                       accessed_level_indices.end());
-        level_index_set[l].compress();
-        ghosted_level_vector[l].reinit(mg_dof.locally_owned_mg_dofs(l),
-                                       level_index_set[l],
-                                       mpi_communicator);
-      }
-    std::sort(accessed_indices.begin(), accessed_indices.end());
-    index_set.add_indices(accessed_indices.begin(), accessed_indices.end());
-    index_set.compress();
-    ghosted_global_vector.reinit(mg_dof.locally_owned_dofs(),
-                                 index_set,
-                                 mpi_communicator);
+    const unsigned int nlevels = mg_dof_v.get_triangulation().n_global_levels();
 
-    // localize the copy indices for faster access. Since all access will be
-    // through the ghosted vector in 'data', we can use this (much faster)
-    // option
-    copy_indices.resize(nlevels);
-    copy_indices_level_mine.resize(nlevels);
-    copy_indices_global_mine.resize(nlevels);
-    copy_indices_global_mine_host.resize(nlevels);
     for (unsigned int level = 0; level < nlevels; ++level)
       {
-        const Utilities::MPI::Partitioner &global_partitioner =
-          *ghosted_global_vector.get_partitioner();
-        const Utilities::MPI::Partitioner &level_partitioner =
-          *ghosted_level_vector[level].get_partitioner();
-
-        auto translate_indices =
-          [&](const std::vector<
-                std::pair<types::global_dof_index, types::global_dof_index>>
-                           &global_copy_indices,
-              IndexMapping &local_copy_indices) {
-            const types::global_dof_index nmappings =
-              global_copy_indices.size();
-            std::vector<int> global_indices(nmappings);
-            std::vector<int> level_indices(nmappings);
-
-            for (types::global_dof_index j = 0; j < nmappings; ++j)
-              {
-                global_indices[j] = global_partitioner.global_to_local(
-                  global_copy_indices[j].first);
-                level_indices[j] = level_partitioner.global_to_local(
-                  global_copy_indices[j].second);
-              }
-
-            copy_to_device(local_copy_indices.global_indices, global_indices);
-            copy_to_device(local_copy_indices.level_indices, level_indices);
-          };
-
-        // owned-owned case
-        translate_indices(my_copy_indices[level], copy_indices[level]);
-
-        // remote-owned case
-        translate_indices(my_copy_indices_level_mine[level],
-                          copy_indices_level_mine[level]);
-
-        // owned-remote case
-        translate_indices(my_copy_indices_global_mine[level],
-                          copy_indices_global_mine[level]);
-
-        // copy_indices_global_mine_host
-        copy_indices_global_mine_host[level].reinit(
-          2, my_copy_indices_global_mine[level].size());
-        for (types::global_dof_index i = 0;
-             i < my_copy_indices_global_mine[level].size();
-             ++i)
-          {
-            copy_indices_global_mine_host[level](0, i) =
-              global_partitioner.global_to_local(
-                my_copy_indices_global_mine[level][i].first);
-            copy_indices_global_mine_host[level](1, i) =
-              level_partitioner.global_to_local(
-                my_copy_indices_global_mine[level][i].second);
-          }
+        Assert((my_copy_indices_global_mine[level].size() == 0) &&
+                 (my_copy_indices_level_mine[level].size() == 0),
+               ExcMessage("Only implemented for non-distributed case"));
       }
 
-    // Check if we can perform a cheaper "plain copy" (with or without
-    // renumbering) instead of having to translate individual entries
-    // using copy_indices*. This only works if a) we don't have to send
-    // or receive any DoFs and we have all locally owned DoFs in our
-    // copy_indices (so no adaptive refinement) and b) all processors
-    // agree on the choice (see below).
-    const bool my_perform_renumbered_plain_copy =
-      (my_copy_indices.back().size() ==
-       mg_dof.locally_owned_dofs().n_elements()) &&
-      (my_copy_indices_global_mine.back().size() == 0) &&
-      (my_copy_indices_level_mine.back().size() == 0);
-
-    bool my_perform_plain_copy = false;
-    if (my_perform_renumbered_plain_copy)
+    copy_indices.resize(nlevels);
+    for (unsigned int i = 0; i < nlevels; ++i)
       {
-        my_perform_plain_copy = true;
+        const unsigned int nmappings   = my_copy_indices[i].size();
+        const unsigned int nmappings_p = my_copy_indices_p[i].size();
+
+        std::vector<int> global_indices(nmappings + nmappings_p);
+        std::vector<int> level_indices(nmappings + nmappings_p);
+
+        for (unsigned int j = 0; j < nmappings; ++j)
+          {
+            global_indices[j] = my_copy_indices[i][j].first;
+            level_indices[j]  = my_copy_indices[i][j].second;
+          }
+
+        for (unsigned int j = 0; j < nmappings_p; ++j)
+          {
+            global_indices[j + nmappings] =
+              my_copy_indices_p[i][j].first + mg_dof_v.n_dofs();
+            level_indices[j + nmappings] =
+              my_copy_indices_p[i][j].second + mg_dof_v.n_dofs(i);
+          }
+
+        copy_to_device(copy_indices[i].global_indices, global_indices);
+        copy_to_device(copy_indices[i].level_indices, level_indices);
+      }
+
+    // check if we can run a plain copy operation between the global DoFs and
+    // the finest level.
+    perform_plain_copy =
+      (my_copy_indices.back().size() ==
+       mg_dof_v.locally_owned_dofs().n_elements()) &&
+      (mg_dof_v.locally_owned_dofs().n_elements() ==
+       mg_dof_v.locally_owned_mg_dofs(nlevels - 1).n_elements());
+
+    if (perform_plain_copy)
+      {
+        AssertDimension(my_copy_indices_global_mine.back().size(), 0);
+        AssertDimension(my_copy_indices_level_mine.back().size(), 0);
+
         // check whether there is a renumbering of degrees of freedom on
         // either the finest level or the global dofs, which means that we
         // cannot apply a plain copy
-        for (types::global_dof_index i = 0; i < my_copy_indices.back().size();
-             ++i)
+        for (unsigned int i = 0; i < my_copy_indices.back().size(); ++i)
           if (my_copy_indices.back()[i].first !=
               my_copy_indices.back()[i].second)
             {
-              my_perform_plain_copy = false;
+              perform_plain_copy = false;
               break;
             }
       }
-
-    // now do a global reduction over all processors to see what operation
-    // they can agree upon
-    perform_plain_copy =
-      Utilities::MPI::min(static_cast<int>(my_perform_plain_copy),
-                          mpi_communicator);
-    perform_renumbered_plain_copy =
-      Utilities::MPI::min(static_cast<int>(my_perform_renumbered_plain_copy),
-                          mpi_communicator);
-
-    // if we do a plain copy, no need to hold additional ghosted vectors
-    if (perform_renumbered_plain_copy)
-      {
-      }
+    // perform_plain_copy = true;
   }
 } // namespace PSMF
 

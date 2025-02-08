@@ -37,6 +37,7 @@
 #include <type_traits>
 
 // #include "cuda_matrix_free.cuh"
+#include "renumber.h"
 
 namespace PSMF
 {
@@ -58,7 +59,7 @@ namespace PSMF
    * MatrixFree. Changing this number will affect the amount of
    * constant memory being used.
    */
-  constexpr unsigned int mf_max_elem_degree = 10;
+  constexpr unsigned int mf_max_elem_degree = 15;
 
   constexpr unsigned int data_array_size =
     (mf_max_elem_degree + 1) * (mf_max_elem_degree + 1);
@@ -100,11 +101,7 @@ namespace PSMF
                                                [data_array_size];
   __constant__ float face_co_shape_gradients_f[mf_n_concurrent_objects]
                                               [data_array_size];
-  // Shape hessians
-  __constant__ double cell_shape_hessians_d[mf_n_concurrent_objects]
-                                           [data_array_size];
-  __constant__ float cell_shape_hessians_f[mf_n_concurrent_objects]
-                                          [data_array_size];
+
 
   template <typename Number>
   __host__ __device__ inline DataArray<Number>          &
@@ -220,24 +217,6 @@ namespace PSMF
   }
 
 
-  template <typename Number>
-  __host__ __device__ inline DataArray<Number>          &
-  get_cell_shape_hessians(unsigned int i);
-
-  template <>
-  __host__ __device__ inline DataArray<double>          &
-  get_cell_shape_hessians<double>(unsigned int i)
-  {
-    return cell_shape_hessians_d[i];
-  }
-
-  template <>
-  __host__ __device__ inline DataArray<float>          &
-  get_cell_shape_hessians<float>(unsigned int i)
-  {
-    return cell_shape_hessians_f[i];
-  }
-
 
   /**
    * Transpose a N x M matrix stored in a one-dimensional array to a M x N
@@ -315,10 +294,11 @@ namespace PSMF
                  const dealii::FiniteElement<dim, dim> &fe,
                  const dealii::Quadrature<1>           &quad,
                  const dealii::internal::MatrixFreeFunctions::ShapeInfo<Number>
-                                               &shape_info,
-                 const dealii::DoFHandler<dim> &dof_handler,
-                 const dealii::UpdateFlags     &update_flags,
-                 const dealii::UpdateFlags     &update_flags_boundary_faces =
+                                                         &shape_info,
+                 const dealii::DoFHandler<dim>           &dof_handler,
+                 const dealii::AffineConstraints<Number> &constraints,
+                 const dealii::UpdateFlags               &update_flags,
+                 const dealii::UpdateFlags &update_flags_boundary_faces =
                    dealii::update_default,
                  const dealii::UpdateFlags &update_flags_inner_faces =
                    dealii::update_default);
@@ -364,19 +344,25 @@ namespace PSMF
     std::vector<dealii::types::global_dof_index> l_to_g_coarse_host;
     std::vector<dealii::types::global_dof_index> inner_face2cell_id_host;
     std::vector<dealii::types::global_dof_index> boundary_face2cell_id_host;
-    std::vector<dealii::types::global_dof_index> cell2face_id_host;
     std::vector<dealii::Point<dim, Number>>      q_points_host;
-    std::vector<dealii::Point<dim, Number>>      face_q_points_host;
     std::vector<Number>                          JxW_host;
+    std::vector<Number>                          q_weights_host;
+    std::vector<Number>                          inv_det_host;
+    std::vector<Number>                          jacobian_host;
     std::vector<Number>                          inv_jacobian_host;
     std::vector<Number>                          face_JxW_host;
+    std::vector<Number>                          face_q_weights_host;
+    std::vector<Number>                          face_inv_det_host;
+    std::vector<Number>                          face_jacobian_host;
     std::vector<Number>                          face_inv_jacobian_host;
     std::vector<Number>                          normal_vector_host;
-    std::vector<unsigned int>                    face_number_host;
+    std::vector<dealii::types::global_dof_index> face_number_host;
     std::vector<int>                             subface_number_host;
     std::vector<int>                             face_orientation_host;
     std::vector<dealii::internal::MatrixFreeFunctions::ConstraintKinds>
-      constraint_mask_host;
+                                                 constraint_mask_host;
+    std::vector<dealii::types::global_dof_index> constraint_range_host;
+    std::vector<dealii::types::global_dof_index> constraint_coarse_range_host;
     // Local buffer
     std::vector<dealii::types::global_dof_index> local_dof_indices;
     std::vector<dealii::types::global_dof_index> local_dof_indices_coarse;
@@ -384,9 +370,12 @@ namespace PSMF
     dealii::FEFaceValues<dim>                    fe_face_values;
     dealii::FESubfaceValues<dim>                 fe_subface_values;
     // Convert the default dof numbering to a lexicographic one
-    const std::vector<unsigned int>             &lexicographic_inv;
+    std::vector<unsigned int>                    lexicographic_inv;
     std::vector<dealii::types::global_dof_index> lexicographic_dof_indices;
+    std::vector<unsigned int>                    constrained_indices;
+    std::vector<unsigned int>                    constrained_indices_coarse;
     const unsigned int                           fe_degree;
+    const unsigned int                           n_components;
     const unsigned int                           dofs_per_cell;
     const unsigned int                           dofs_per_face;
     const unsigned int                           q_points_per_cell;
@@ -397,13 +386,13 @@ namespace PSMF
     const unsigned int                           padding_length;
     const unsigned int                           face_padding_length;
     const bool                                   element_is_continuous;
+    const bool                                   is_primitive;
     const unsigned int                           mg_level;
     const MatrixType                             matrix_type;
-    const FaceIntegralType                       face_integral_type;
+    const dealii::AffineConstraints<Number>     &constraints;
     dealii::internal::MatrixFreeFunctions::HangingNodes<dim> hanging_nodes;
-    std::vector<std::map<std::tuple<int, int, int>, int>>    cell2cell_id;
-    std::vector<std::map<std::tuple<int, int, int>, int>>    face2face_id;
-    std::vector<std::map<std::tuple<int, int, int>, int>> cell2cell_id_coarse;
+    std::vector<std::map<std::pair<int, int>, int>>          cell2cell_id;
+    std::vector<std::map<std::pair<int, int>, int>> cell2cell_id_coarse;
   };
 
   template <int dim, typename Number>
@@ -414,11 +403,13 @@ namespace PSMF
     const dealii::Quadrature<1>                                    &quad,
     const dealii::internal::MatrixFreeFunctions::ShapeInfo<Number> &shape_info,
     const dealii::DoFHandler<dim>                                  &dof_handler,
+    const dealii::AffineConstraints<Number>                        &constraints,
     const dealii::UpdateFlags &update_flags,
     const dealii::UpdateFlags &update_flags_inner_faces,
     const dealii::UpdateFlags &update_flags_boundary_faces)
     : data(data)
     , fe_degree(data->fe_degree)
+    , n_components(data->n_components)
     , dofs_per_cell(data->dofs_per_cell)
     , dofs_per_face(data->dofs_per_face)
     , q_points_per_cell(data->q_points_per_cell)
@@ -426,13 +417,14 @@ namespace PSMF
     , fe_values(mapping,
                 fe,
                 dealii::Quadrature<dim>(quad),
-                dealii::update_inverse_jacobians |
+                dealii::update_inverse_jacobians | dealii::update_jacobians |
                   dealii::update_quadrature_points | dealii::update_values |
                   dealii::update_gradients | dealii::update_JxW_values)
     , fe_face_values(mapping,
                      fe,
                      dealii::Quadrature<dim - 1>(quad),
                      dealii::update_inverse_jacobians |
+                       dealii::update_jacobians |
                        dealii::update_quadrature_points |
                        dealii::update_normal_vectors | dealii::update_values |
                        dealii::update_gradients | dealii::update_JxW_values)
@@ -440,34 +432,63 @@ namespace PSMF
                         fe,
                         dealii::Quadrature<dim - 1>(quad),
                         dealii::update_inverse_jacobians |
+                          dealii::update_jacobians |
                           dealii::update_quadrature_points |
                           dealii::update_normal_vectors |
                           dealii::update_values | dealii::update_gradients |
                           dealii::update_JxW_values)
-    , lexicographic_inv(shape_info.lexicographic_numbering)
     , update_flags(update_flags)
     , update_flags_inner_faces(update_flags_inner_faces)
     , update_flags_boundary_faces(update_flags_boundary_faces)
     , padding_length(data->get_padding_length())
     , face_padding_length(data->get_face_padding_length())
     , element_is_continuous(fe.n_dofs_per_vertex() > 0)
+    , is_primitive(data->is_primitive)
     , mg_level(data->mg_level)
     , matrix_type(data->matrix_type)
-    , face_integral_type(data->face_integral_type)
+    , constraints(constraints)
     , n_inner_faces(0)
     , n_boundary_faces(0)
     , hanging_nodes(dof_handler.get_triangulation())
   {
-    cudaError_t error_code = cudaMemcpyToSymbol(
-      dealii::CUDAWrappers::internal::constraint_weights,
-      shape_info.data.front().subface_interpolation_matrices[0].data(),
-      sizeof(double) *
-        shape_info.data.front().subface_interpolation_matrices[0].size());
-    AssertCuda(error_code);
+    // cudaError_t error_code = cudaMemcpyToSymbol(
+    //   dealii::CUDAWrappers::internal::constraint_weights,
+    //   shape_info.data.front().subface_interpolation_matrices[0].data(),
+    //   sizeof(double) *
+    //     shape_info.data.front().subface_interpolation_matrices[0].size());
+    // AssertCuda(error_code);
+
+    auto lines = constraints.get_lines();
+    for (auto &l : lines)
+      if (l.entries.size() > 0)
+        for (auto e : l.entries)
+          if (e.second < -100)
+            constrained_indices_coarse.push_back(e.first);
+          else
+            constrained_indices.push_back(l.index);
+      else
+        constrained_indices.push_back(l.index);
+
+    if (is_primitive)
+      {
+        lexicographic_inv = shape_info.lexicographic_numbering;
+      }
+    else
+      {
+        lexicographic_inv = shape_info.lexicographic_numbering;
+
+        // DoFMapping<dim> dm(fe_degree - 1);
+        // lexicographic_inv = dm.get_lexicographic_numbering();
+      }
 
     local_dof_indices.resize(data->dofs_per_cell);
     local_dof_indices_coarse.resize(data->dofs_per_cell);
-    lexicographic_dof_indices.resize(dofs_per_cell);
+    lexicographic_dof_indices.resize(data->dofs_per_cell);
+
+    // std::cout << "constrained_indices_coarse\n";
+    // for (auto c : constrained_indices_coarse)
+    //   std::cout << c << " ";
+    // std::cout << std::endl;
   }
 
   template <int dim, typename Number>
@@ -476,12 +497,10 @@ namespace PSMF
   {
     cell2cell_id.resize(n_colors);
     cell2cell_id_coarse.resize(n_colors);
-    face2face_id.resize(n_colors);
 
     // We need at least three colors when we are using CUDA-aware MPI and
     // overlapping the communication
     data->n_cells.resize(std::max(n_colors, 3U), 0);
-    data->n_locally_owned_cells.resize(std::max(n_colors, 3U), 0);
     data->n_inner_faces.resize(std::max(n_colors, 3U), 0);
     data->n_boundary_faces.resize(std::max(n_colors, 3U), 0);
     data->grid_dim.resize(n_colors);
@@ -494,11 +513,12 @@ namespace PSMF
     data->l_to_g_coarse.resize(n_colors);
     data->inner_face2cell_id.resize(n_colors);
     data->boundary_face2cell_id.resize(n_colors);
-    data->cell2face_id.resize(n_colors);
     data->face_number.resize(n_colors);
     data->subface_number.resize(n_colors);
     data->face_orientation.resize(n_colors);
     data->constraint_mask.resize(n_colors);
+    data->constraint_range.resize(n_colors);
+    data->constraint_coarse_range.resize(n_colors);
 
     data->row_start.resize(n_colors);
 
@@ -508,17 +528,28 @@ namespace PSMF
     if (update_flags & dealii::update_JxW_values)
       data->JxW.resize(n_colors);
 
+    if (update_flags & dealii::update_jacobians)
+      {
+        data->jacobian.resize(n_colors);
+        data->inv_det.resize(n_colors);
+        data->q_weights.resize(n_colors);
+      }
+
     if (update_flags & dealii::update_gradients)
       data->inv_jacobian.resize(n_colors);
-
-    if (update_flags_inner_faces & dealii::update_quadrature_points)
-      data->face_q_points.resize(n_colors);
 
     if (update_flags_inner_faces & dealii::update_JxW_values)
       data->face_JxW.resize(n_colors);
 
     if (update_flags_inner_faces & dealii::update_gradients)
       data->face_inv_jacobian.resize(n_colors);
+
+    if (update_flags_inner_faces & dealii::update_jacobians)
+      {
+        data->face_jacobian.resize(n_colors);
+        data->face_inv_det.resize(n_colors);
+        data->face_q_weights.resize(n_colors);
+      }
 
     if (update_flags_inner_faces & dealii::update_normal_vectors)
       data->normal_vector.resize(n_colors);
@@ -528,15 +559,12 @@ namespace PSMF
   void
   ReinitHelper<dim, Number>::setup_cell_arrays(const unsigned int color)
   {
-    const unsigned int n_cells = data->n_cells[color];
-    const unsigned int n_locally_owned_cells =
-      data->n_locally_owned_cells[color];
+    const unsigned int n_cells         = data->n_cells[color];
     const unsigned int cells_per_block = data->cells_per_block;
 
     // Setup kernel parameters
-    double apply_n_blocks =
-      std::ceil(static_cast<double>(n_locally_owned_cells) /
-                static_cast<double>(cells_per_block));
+    double apply_n_blocks = std::ceil(static_cast<double>(n_cells) /
+                                      static_cast<double>(cells_per_block));
     data->grid_dim[color] = dim3(apply_n_blocks);
 
     // TODO this should be a templated parameter.
@@ -544,24 +572,36 @@ namespace PSMF
 
     if (dim == 2)
       {
-        data->block_dim[color] = dim3(n_dofs_1d, n_dofs_1d * cells_per_block);
+        data->block_dim[color] = dim3(n_dofs_1d * cells_per_block, n_dofs_1d);
       }
     else if (dim == 3)
       {
-        data->block_dim[color] = dim3(n_dofs_1d, n_dofs_1d * cells_per_block);
+        data->block_dim[color] =
+          dim3(n_dofs_1d * cells_per_block, n_dofs_1d, n_dofs_1d);
       }
     else
       AssertThrow(false, dealii::ExcMessage("Invalid dimension."));
 
-    local_to_global_host.resize(n_cells);
-    l_to_g_coarse_host.resize(n_cells * padding_length);
 
     if (matrix_type == MatrixType::edge_up_matrix ||
         matrix_type == MatrixType::edge_down_matrix)
       {
-        local_to_global_host.resize(n_cells * padding_length * (1 << dim - 1));
-        l_to_g_coarse_host.resize(n_cells * padding_length * (1 << dim - 1));
-        return;
+        local_to_global_host.resize(n_cells * padding_length * n_components *
+                                    (1 << dim - 1));
+        l_to_g_coarse_host.resize(n_cells * padding_length * n_components *
+                                  (1 << dim - 1));
+      }
+    else if (matrix_type == MatrixType::interface_matrix)
+      {
+        local_to_global_host.resize(n_cells * padding_length * n_components *
+                                    (1 << dim));
+        l_to_g_coarse_host.resize(n_cells * padding_length * n_components *
+                                  (1 << dim));
+      }
+    else
+      {
+        local_to_global_host.resize(n_cells * padding_length * n_components);
+        l_to_g_coarse_host.resize(n_cells * padding_length * n_components);
       }
 
     if (update_flags & dealii::update_quadrature_points)
@@ -570,10 +610,19 @@ namespace PSMF
     if (update_flags & dealii::update_JxW_values)
       JxW_host.resize(n_cells * padding_length);
 
+    if (update_flags & dealii::update_jacobians)
+      {
+        jacobian_host.resize(n_cells * padding_length * dim * dim);
+        inv_det_host.resize(n_cells * padding_length);
+        q_weights_host.resize(padding_length);
+      }
+
     if (update_flags & dealii::update_gradients)
       inv_jacobian_host.resize(n_cells * padding_length * dim * dim);
 
-    constraint_mask_host.resize(n_cells);
+    constraint_mask_host.resize(n_cells * n_components);
+    constraint_range_host.resize(n_cells * 2 * (1 << dim - 1));
+    constraint_coarse_range_host.resize(n_cells * 2 * (1 << dim - 1));
   }
 
 
@@ -606,35 +655,38 @@ namespace PSMF
     if (dim == 2)
       {
         data->block_dim_inner_face[color] =
-          dim3(n_dofs_1d, n_dofs_1d * inner_faces_per_block);
+          dim3(n_dofs_1d * inner_faces_per_block, n_dofs_1d);
         data->block_dim_boundary_face[color] =
-          dim3(n_dofs_1d, n_dofs_1d * boundary_faces_per_block);
+          dim3(n_dofs_1d * boundary_faces_per_block, n_dofs_1d);
       }
     else if (dim == 3)
       {
         data->block_dim_inner_face[color] =
-          dim3(n_dofs_1d, n_dofs_1d * inner_faces_per_block);
+          dim3(n_dofs_1d * inner_faces_per_block, n_dofs_1d, n_dofs_1d);
         data->block_dim_boundary_face[color] =
-          dim3(n_dofs_1d, n_dofs_1d * boundary_faces_per_block);
+          dim3(n_dofs_1d * boundary_faces_per_block, n_dofs_1d, n_dofs_1d);
       }
     else
       AssertThrow(false, dealii::ExcMessage("Invalid dimension."));
 
     inner_face2cell_id_host.resize(n_inner_faces * 2);
     boundary_face2cell_id_host.resize(n_boundary_faces);
-    cell2face_id_host.resize(data->n_cells[color] * (dim * 2) * 2);
     face_number_host.resize(n_faces);
     subface_number_host.resize(n_faces);
     face_orientation_host.resize(n_faces);
-
-    if (update_flags_inner_faces & dealii::update_quadrature_points)
-      face_q_points_host.resize(n_faces * face_padding_length);
 
     if (update_flags_inner_faces & dealii::update_JxW_values)
       face_JxW_host.resize(n_faces * face_padding_length);
 
     if (update_flags_inner_faces & dealii::update_gradients)
       face_inv_jacobian_host.resize(n_faces * face_padding_length * dim * dim);
+
+    if (update_flags_inner_faces & dealii::update_jacobians)
+      {
+        face_jacobian_host.resize(n_faces * face_padding_length * dim * dim);
+        face_inv_det_host.resize(n_faces * face_padding_length);
+        face_q_weights_host.resize(face_padding_length);
+      }
 
     if (update_flags_inner_faces & dealii::update_normal_vectors)
       normal_vector_host.resize(n_faces * face_padding_length * dim * 1);
@@ -660,12 +712,62 @@ namespace PSMF
         for (auto &index : local_dof_indices)
           index = partitioner->global_to_local(index);
 
-      for (unsigned int i = 0; i < dofs_per_cell; ++i)
-        lexicographic_dof_indices[i] = local_dof_indices[lexicographic_inv[i]];
 
-      memcpy(&local_to_global_host[obj_id],
+      constraint_range_host[2 * obj_id]     = 0;
+      constraint_range_host[2 * obj_id + 1] = 0;
+
+      unsigned int begin_pos = constrained_indices.size() + 1;
+      unsigned int n_cons    = 0;
+
+      for (unsigned int i = 0; i < dofs_per_cell; ++i)
+        {
+          lexicographic_dof_indices[i] =
+            local_dof_indices[lexicographic_inv[i]];
+
+          if (constraints.is_constrained(lexicographic_dof_indices[i]))
+            {
+              auto entries_size =
+                constraints
+                  .get_constraint_entries(lexicographic_dof_indices[i])
+                  ->size();
+
+              auto         it   = std::find(constrained_indices.begin(),
+                                  constrained_indices.end(),
+                                  lexicographic_dof_indices[i]);
+              unsigned int diff = it - constrained_indices.begin();
+              begin_pos         = std::min(begin_pos, diff);
+              n_cons += (entries_size > 0 ? entries_size : 1);
+
+              constraint_range_host[2 * obj_id] = begin_pos;
+            }
+        }
+      constraint_range_host[2 * obj_id + 1] =
+        constraint_range_host[2 * obj_id] + n_cons;
+
+      // if (obj_id >= 5)
+      //   {
+      //     std::cout << obj_id << ": " << constraint_range_host[2 * obj_id]
+      //               << " " << constraint_range_host[2 * obj_id + 1]
+      //               << std::endl;
+      //   }
+
+      // std::cout << obj_id << ": " << constraint_range_host[2 * obj_id] << " "
+      //           << constraint_range_host[2 * obj_id + 1] << std::endl;
+
+      // const dealii::ArrayView<
+      //   dealii::internal::MatrixFreeFunctions::ConstraintKinds>
+      //   cell_id_view(&constraint_mask_host[obj_id * n_components],
+      //                n_components);
+
+      // hanging_nodes.setup_constraints(c,
+      //                                 partitioner,
+      //                                 {lexicographic_inv},
+      //                                 lexicographic_dof_indices,
+      //                                 cell_id_view);
+
+      memcpy(&local_to_global_host[obj_id * padding_length * n_components],
              lexicographic_dof_indices.data(),
-             1 * sizeof(dealii::types::global_dof_index));
+             dofs_per_cell * sizeof(dealii::types::global_dof_index));
     };
 
     auto fill_cell_data = [&](auto &fe_value, auto obj_id) {
@@ -687,6 +789,35 @@ namespace PSMF
             JxW_host[i + offset] = static_cast<Number>(JxW_values_double[i]);
         }
 
+      if (update_flags & dealii::update_jacobians)
+        {
+          const std::vector<dealii::DerivativeForm<1, dim, dim>> &jacobians =
+            fe_value.get_jacobians();
+          std::copy(&jacobians[0][0][0],
+                    &jacobians[0][0][0] +
+                      q_points_per_cell *
+                        sizeof(dealii::DerivativeForm<1, dim, dim>) /
+                        sizeof(double),
+                    &jacobian_host[obj_id * padding_length * dim * dim]);
+
+          // determinant of inverse jacobian
+          const unsigned int offset = obj_id * padding_length;
+          const std::vector<dealii::DerivativeForm<1, dim, dim>>
+            &inv_jacobians = fe_value.get_inverse_jacobians();
+          for (unsigned int i = 0; i < q_points_per_cell; ++i)
+            inv_det_host[i + offset] =
+              static_cast<Number>(inv_jacobians[i].determinant());
+
+          // quadrature weights
+          if (obj_id == 0)
+            {
+              std::vector<double> quadrature_weights =
+                fe_value.get_quadrature().get_weights();
+              for (unsigned int i = 0; i < q_points_per_cell; ++i)
+                q_weights_host[i] = static_cast<Number>(quadrature_weights[i]);
+            }
+        }
+
       if (update_flags & dealii::update_gradients)
         {
           const std::vector<dealii::DerivativeForm<1, dim, dim>>
@@ -702,12 +833,10 @@ namespace PSMF
 
 
     if (matrix_type == MatrixType::active_matrix ||
-        matrix_type == MatrixType::level_matrix)
+        matrix_type == MatrixType::level_matrix ||
+        matrix_type == MatrixType::interface_matrix)
       {
-        auto cell_info =
-          std::make_tuple<int, int, int>(cell->level_subdomain_id(),
-                                         cell->level(),
-                                         cell->index());
+        auto cell_info = std::make_pair<int, int>(cell->level(), cell->index());
         cell2cell_id[color][cell_info] = cell_id;
 
         fill_index_data(cell, cell_id);
@@ -717,9 +846,6 @@ namespace PSMF
 
         cell_id++;
       }
-
-    if (cell->is_ghost_on_level())
-      return;
 
     for (const unsigned int face_no : cell->face_indices())
       {
@@ -737,27 +863,52 @@ namespace PSMF
                     matrix_type == MatrixType::edge_down_matrix)
                   {
                     auto cell_info =
-                      std::make_tuple<int, int, int>(cell->level_subdomain_id(),
-                                                     cell->level(),
-                                                     cell->index());
+                      std::make_pair<int, int>(cell->level(), cell->index());
                     cell2cell_id[color][cell_info] = cell_id;
 
                     fill_index_data(cell, cell_id);
 
-                    auto cell_info_coarse = std::make_tuple<int, int, int>(
-                      neighbor->level_subdomain_id(),
-                      neighbor->level(),
-                      neighbor->index());
+                    auto cell_info_coarse =
+                      std::make_pair<int, int>(neighbor->level(),
+                                               neighbor->index());
                     cell2cell_id_coarse[color][cell_info_coarse] = cell_id;
 
                     neighbor->get_active_or_mg_dof_indices(
                       local_dof_indices_coarse);
-                    // todo: we need a coarser level partitioner
-                    // if (partitioner)
-                    //   for (auto &index : local_dof_indices_coarse)
-                    //     index = partitioner->global_to_local(index);
-                    memcpy(&l_to_g_coarse_host[cell_id * padding_length],
-                           local_dof_indices_coarse.data(),
+
+                    constraint_coarse_range_host[2 * cell_id]     = 0;
+                    constraint_coarse_range_host[2 * cell_id + 1] = 0;
+
+                    unsigned int begin_pos =
+                      constrained_indices_coarse.size() + 1;
+                    unsigned int n_cons = 0;
+
+                    for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                      {
+                        lexicographic_dof_indices[i] =
+                          local_dof_indices_coarse[lexicographic_inv[i]];
+
+                        auto it = std::find(constrained_indices_coarse.begin(),
+                                            constrained_indices_coarse.end(),
+                                            lexicographic_dof_indices[i]);
+
+                        if (it == constrained_indices_coarse.end())
+                          continue;
+
+                        unsigned int diff =
+                          it - constrained_indices_coarse.begin();
+                        begin_pos = std::min(begin_pos, diff);
+                        n_cons += 1;
+
+                        constraint_coarse_range_host[2 * cell_id] = begin_pos;
+                      }
+                    constraint_coarse_range_host[2 * cell_id + 1] =
+                      constraint_coarse_range_host[2 * cell_id] + n_cons;
+
+                    // todo: mpi
+                    memcpy(&l_to_g_coarse_host[cell_id * padding_length *
+                                               n_components],
+                           lexicographic_dof_indices.data(),
                            dofs_per_cell *
                              sizeof(dealii::types::global_dof_index));
 
@@ -772,18 +923,8 @@ namespace PSMF
                     neighbor->has_children())
                   continue;
 
-                if (data->face_integral_type == FaceIntegralType::element_wise)
-                  {
-                    if (neighbor < cell &&
-                        neighbor->is_locally_owned_on_level())
-                      {
-                        continue;
-                      }
-                  }
-                else if (neighbor < cell)
-                  {
-                    continue;
-                  }
+                if (neighbor < cell)
+                  continue;
 
                 n_inner_faces++;
               }
@@ -799,19 +940,7 @@ namespace PSMF
                                            unsigned int      &boundary_face_id,
                                            const unsigned int color)
   {
-    if (cell->is_ghost_on_level())
-      return;
-
     auto fill_data = [&](auto &fe_value, auto obj_id) {
-      if (update_flags_inner_faces & dealii::update_quadrature_points)
-        {
-          const std::vector<dealii::Point<dim>> &q_points =
-            fe_value.get_quadrature_points();
-          std::copy(q_points.begin(),
-                    q_points.end(),
-                    &face_q_points_host[obj_id * face_padding_length]);
-        }
-
       if (update_flags_inner_faces & dealii::update_JxW_values)
         {
           std::vector<double> JxW_values = fe_value.get_JxW_values();
@@ -832,6 +961,32 @@ namespace PSMF
             &face_inv_jacobian_host[obj_id * face_padding_length * dim * dim]);
         }
 
+      if (update_flags_inner_faces & dealii::update_jacobians)
+        {
+          const std::vector<dealii::DerivativeForm<1, dim, dim>> &jacobians =
+            fe_value.get_jacobians();
+          std::copy(
+            &jacobians[0][0][0],
+            &jacobians[0][0][0] +
+              q_points_per_face * sizeof(dealii::DerivativeForm<1, dim, dim>) /
+                sizeof(double),
+            &face_jacobian_host[obj_id * face_padding_length * dim * dim]);
+
+          // determinant of inverse jacobian
+          const unsigned int offset = obj_id * face_padding_length;
+          const std::vector<dealii::DerivativeForm<1, dim, dim>>
+            &inv_jacobians = fe_value.get_inverse_jacobians();
+          for (unsigned int i = 0; i < q_points_per_face; ++i)
+            face_inv_det_host[i + offset] =
+              static_cast<Number>(inv_jacobians[i].determinant());
+
+          // quadrature weights
+          std::vector<double> quadrature_weights =
+            fe_value.get_quadrature().get_weights();
+          for (unsigned int i = 0; i < q_points_per_face; ++i)
+            face_q_weights_host[i] = static_cast<Number>(quadrature_weights[i]);
+        }
+
       if (update_flags_inner_faces & dealii::update_normal_vectors)
         {
           const std::vector<dealii::Tensor<1, dim>> &normal_vectors =
@@ -847,11 +1002,8 @@ namespace PSMF
 
     for (const unsigned int face_no : cell->face_indices())
       {
-        auto cell_info =
-          std::make_tuple<int, int, int>(cell->level_subdomain_id(),
-                                         cell->level(),
-                                         cell->index());
-        auto cell_id = cell2cell_id[color][cell_info];
+        auto cell_info = std::make_pair<int, int>(cell->level(), cell->index());
+        auto cell_id   = cell2cell_id[color][cell_info];
 
         if (cell->at_boundary(face_no))
           {
@@ -865,11 +1017,6 @@ namespace PSMF
             fe_face_values.reinit(cell, face_no);
             fill_data(fe_face_values, n_inner_faces * 2 + boundary_face_id);
 
-            cell2face_id_host[cell_id * (dim * 2) * 2 + face_no * 2] =
-              n_inner_faces * 2 + boundary_face_id;
-            cell2face_id_host[cell_id * (dim * 2) * 2 + face_no * 2 + 1] =
-              n_inner_faces * 2 + boundary_face_id;
-
             boundary_face_id++;
           }
         else
@@ -882,13 +1029,13 @@ namespace PSMF
                   cell->neighbor_of_coarser_neighbor(face_no);
 
                 auto neighbor_info =
-                  std::make_tuple<int, int, int>(neighbor->level_subdomain_id(),
-                                                 neighbor->level(),
-                                                 neighbor->index());
+                  std::make_pair<int, int>(neighbor->level(),
+                                           neighbor->index());
                 int cell_id1;
 
                 if (matrix_type == MatrixType::edge_up_matrix ||
-                    matrix_type == MatrixType::edge_down_matrix)
+                    matrix_type == MatrixType::edge_down_matrix ||
+                    matrix_type == MatrixType::interface_matrix)
                   cell_id1 = cell2cell_id_coarse[color][neighbor_info];
                 else
                   cell_id1 = cell2cell_id[color][neighbor_info];
@@ -920,45 +1067,18 @@ namespace PSMF
               }
             else
               {
-                auto neighbor_info =
-                  std::make_tuple<int, int, int>(neighbor->level_subdomain_id(),
-                                                 neighbor->level(),
-                                                 neighbor->index());
-                auto cell_id1         = cell2cell_id[color][neighbor_info];
-                auto neighbor_face_no = cell->neighbor_face_no(face_no);
-
-                auto face_info =
-                  std::make_tuple<int, int, int>((int)cell_id,
-                                                 (int)cell_id1,
-                                                 static_cast<int>(face_no));
-
                 if (matrix_type == MatrixType::active_matrix &&
                     neighbor->has_children())
                   continue;
 
-                if (data->face_integral_type == FaceIntegralType::element_wise)
-                  {
-                    if (neighbor < cell &&
-                        neighbor->is_locally_owned_on_level())
-                      {
-                        continue;
-                      }
-                  }
-                else if (neighbor < cell)
-                  {
-                    // TODO: level == 0, i.e only one cell
-                    if (data->face_integral_type ==
-                        FaceIntegralType::element_wise_partial)
-                      {
-                        cell2face_id_host[cell_id * (dim * 2) * 2 +
-                                          face_no * 2]     = 0;
-                        cell2face_id_host[cell_id * (dim * 2) * 2 +
-                                          face_no * 2 + 1] = 0;
-                      }
-                    continue;
-                  }
+                if (neighbor < cell)
+                  continue;
 
-                face2face_id[color][face_info] = inner_face_id;
+                auto neighbor_info =
+                  std::make_pair<int, int>(neighbor->level(),
+                                           neighbor->index());
+                auto cell_id1         = cell2cell_id[color][neighbor_info];
+                auto neighbor_face_no = cell->neighbor_face_no(face_no);
 
                 inner_face2cell_id_host[inner_face_id] = cell_id;
                 face_number_host[inner_face_id]        = face_no;
@@ -980,20 +1100,6 @@ namespace PSMF
                 fe_face_values.reinit(neighbor, neighbor_face_no);
                 fill_data(fe_face_values, inner_face_id + n_inner_faces);
 
-                cell2face_id_host[cell_id * (dim * 2) * 2 + face_no * 2] =
-                  inner_face_id;
-                cell2face_id_host[cell_id * (dim * 2) * 2 + face_no * 2 + 1] =
-                  n_inner_faces + inner_face_id;
-
-                if (data->face_integral_type == FaceIntegralType::element_wise)
-                  {
-                    cell2face_id_host[cell_id1 * (dim * 2) * 2 +
-                                      neighbor_face_no * 2] =
-                      inner_face_id + n_inner_faces;
-                    cell2face_id_host[cell_id1 * (dim * 2) * 2 +
-                                      neighbor_face_no * 2 + 1] = inner_face_id;
-                  }
-
                 inner_face_id++;
               }
           }
@@ -1004,29 +1110,26 @@ namespace PSMF
   void
   ReinitHelper<dim, Number>::alloc_and_copy_arrays(const unsigned int color)
   {
-    // todo n_cells for flux matrix
+    const unsigned int n_cells = data->n_cells[color];
 
-    unsigned int n_cells = data->n_cells[color];
-
+    unsigned int nn_cells = n_cells;
     if (matrix_type == MatrixType::edge_up_matrix ||
         matrix_type == MatrixType::edge_down_matrix)
-      n_cells *= 1 << dim - 1;
+      nn_cells *= 1 << dim - 1;
+    else if (matrix_type == MatrixType::interface_matrix)
+      nn_cells *= 1 << dim;
 
     // Local-to-global mapping
     alloc_and_copy(&data->local_to_global[color],
                    dealii::ArrayView<const dealii::types::global_dof_index>(
                      local_to_global_host.data(), local_to_global_host.size()),
-                   n_cells);
+                   nn_cells * padding_length * n_components);
 
     // Local-to-global mapping
     alloc_and_copy(&data->l_to_g_coarse[color],
                    dealii::ArrayView<const dealii::types::global_dof_index>(
                      l_to_g_coarse_host.data(), l_to_g_coarse_host.size()),
-                   n_cells * padding_length);
-
-    if (matrix_type == MatrixType::edge_up_matrix ||
-        matrix_type == MatrixType::edge_down_matrix)
-      return;
+                   nn_cells * padding_length * n_components);
 
     // Quadrature points
     if (update_flags & dealii::update_quadrature_points)
@@ -1046,6 +1149,31 @@ namespace PSMF
                        n_cells * padding_length);
       }
 
+    // Jacobians
+    if (update_flags & dealii::update_jacobians)
+      {
+        // Reorder so that all J_11 elements are together, all J_12 elements
+        // are together, etc., i.e., reorder indices from
+        // cell_id*q_points_per_cell*dim*dim + q*dim*dim +i to
+        // i*q_points_per_cell*n_cells + cell_id*q_points_per_cell+q
+        transpose_in_place(jacobian_host, padding_length * n_cells, dim * dim);
+
+        alloc_and_copy(&data->jacobian[color],
+                       dealii::ArrayView<const Number>(jacobian_host.data(),
+                                                       jacobian_host.size()),
+                       n_cells * dim * dim * padding_length);
+
+        alloc_and_copy(&data->inv_det[color],
+                       dealii::ArrayView<const Number>(inv_det_host.data(),
+                                                       inv_det_host.size()),
+                       n_cells * padding_length);
+
+        alloc_and_copy(&data->q_weights[color],
+                       dealii::ArrayView<const Number>(q_weights_host.data(),
+                                                       q_weights_host.size()),
+                       padding_length);
+      }
+
     // Inverse jacobians
     if (update_flags & dealii::update_gradients)
       {
@@ -1063,12 +1191,28 @@ namespace PSMF
                        n_cells * dim * dim * padding_length);
       }
 
-    alloc_and_copy(
-      &data->constraint_mask[color],
-      dealii::ArrayView<
-        const dealii::internal::MatrixFreeFunctions::ConstraintKinds>(
-        constraint_mask_host.data(), constraint_mask_host.size()),
-      n_cells);
+    // alloc_and_copy(
+    //   &data->constraint_mask[color],
+    //   dealii::ArrayView<
+    //     const dealii::internal::MatrixFreeFunctions::ConstraintKinds>(
+    //     constraint_mask_host.data(), constraint_mask_host.size()),
+    //   n_cells * n_components);
+
+    alloc_and_copy(&data->constraint_range[color],
+                   dealii::ArrayView<const dealii::types::global_dof_index>(
+                     constraint_range_host.data(),
+                     constraint_range_host.size()),
+                   n_cells * 2 * (1 << dim - 1));
+
+    alloc_and_copy(&data->constraint_coarse_range[color],
+                   dealii::ArrayView<const dealii::types::global_dof_index>(
+                     constraint_coarse_range_host.data(),
+                     constraint_coarse_range_host.size()),
+                   n_cells * 2 * (1 << dim - 1));
+
+    // for (auto c : constraint_coarse_range_host)
+    //   std::cout << c << " ";
+    // std::cout << std::endl;
   }
 
   template <int dim, typename Number>
@@ -1080,7 +1224,7 @@ namespace PSMF
       data->n_inner_faces[color] * 2 + data->n_boundary_faces[color];
 
     alloc_and_copy(&data->face_number[color],
-                   dealii::ArrayView<const unsigned int>(
+                   dealii::ArrayView<const dealii::types::global_dof_index>(
                      face_number_host.data(), face_number_host.size()),
                    n_faces);
 
@@ -1094,51 +1238,17 @@ namespace PSMF
                                                 face_orientation_host.size()),
                    n_faces);
 
-    if (data->face_integral_type == FaceIntegralType::compact)
-      {
-        alloc_and_copy(&data->inner_face2cell_id[color],
-                       dealii::ArrayView<const dealii::types::global_dof_index>(
-                         inner_face2cell_id_host.data(),
-                         inner_face2cell_id_host.size()),
-                       data->n_inner_faces[color] * 2);
-
-        alloc_and_copy(&data->boundary_face2cell_id[color],
-                       dealii::ArrayView<const dealii::types::global_dof_index>(
-                         boundary_face2cell_id_host.data(),
-                         boundary_face2cell_id_host.size()),
-                       data->n_boundary_faces[color]);
-      }
-    else if (data->face_integral_type == FaceIntegralType::element_wise ||
-             data->face_integral_type == FaceIntegralType::element_wise_partial)
-      {
-        std::vector<dealii::types::global_dof_index> face2cell_id_host(
-          inner_face2cell_id_host);
-
-        face2cell_id_host.insert(face2cell_id_host.end(),
-                                 boundary_face2cell_id_host.begin(),
-                                 boundary_face2cell_id_host.end());
-
-        alloc_and_copy(&data->inner_face2cell_id[color],
-                       dealii::ArrayView<const dealii::types::global_dof_index>(
-                         face2cell_id_host.data(), face2cell_id_host.size()),
-                       n_faces);
-      }
-    else
-      AssertThrow(false, dealii::ExcMessage("Invalid FaceIntegralType."));
-
-    alloc_and_copy(&data->cell2face_id[color],
+    alloc_and_copy(&data->inner_face2cell_id[color],
                    dealii::ArrayView<const dealii::types::global_dof_index>(
-                     cell2face_id_host.data(), cell2face_id_host.size()),
-                   data->n_cells[color] * (dim * 2) * 2);
+                     inner_face2cell_id_host.data(),
+                     inner_face2cell_id_host.size()),
+                   data->n_inner_faces[color] * 2);
 
-    // Quadrature points
-    if (update_flags_inner_faces & dealii::update_quadrature_points)
-      {
-        alloc_and_copy(&data->face_q_points[color],
-                       dealii::ArrayView<const dealii::Point<dim, Number>>(
-                         face_q_points_host.data(), face_q_points_host.size()),
-                       n_faces * face_padding_length);
-      }
+    alloc_and_copy(&data->boundary_face2cell_id[color],
+                   dealii::ArrayView<const dealii::types::global_dof_index>(
+                     boundary_face2cell_id_host.data(),
+                     boundary_face2cell_id_host.size()),
+                   data->n_boundary_faces[color]);
 
     // Face jacobian determinants/quadrature weights
     if (update_flags_inner_faces & dealii::update_JxW_values)
@@ -1147,6 +1257,34 @@ namespace PSMF
                        dealii::ArrayView<const Number>(face_JxW_host.data(),
                                                        face_JxW_host.size()),
                        n_faces * face_padding_length);
+      }
+
+    // face Jacobians
+    if (update_flags_inner_faces & dealii::update_jacobians)
+      {
+        // Reorder so that all J_11 elements are together, all J_12 elements
+        // are together, etc., i.e., reorder indices from
+        // cell_id*q_points_per_cell*dim*dim + q*dim*dim +i to
+        // i*q_points_per_cell*n_cells + cell_id*q_points_per_cell+q
+        transpose_in_place(face_jacobian_host,
+                           face_padding_length * n_faces,
+                           dim * dim);
+
+        alloc_and_copy(&data->face_jacobian[color],
+                       dealii::ArrayView<const Number>(
+                         face_jacobian_host.data(), face_jacobian_host.size()),
+                       n_faces * dim * dim * face_padding_length);
+
+        alloc_and_copy(&data->face_inv_det[color],
+                       dealii::ArrayView<const Number>(
+                         face_inv_det_host.data(), face_inv_det_host.size()),
+                       n_faces * face_padding_length);
+
+        alloc_and_copy(
+          &data->face_q_weights[color],
+          dealii::ArrayView<const Number>(face_q_weights_host.data(),
+                                          face_q_weights_host.size()),
+          face_padding_length);
       }
 
     // face Inverse jacobians
@@ -1232,87 +1370,35 @@ namespace PSMF
       dst[constrained_dofs[dof]] = val;
   }
 
-  extern __shared__ double data_dd[];
-  extern __shared__ float  data_ff[];
-
-  template <typename Number>
-  __device__ inline Number *
-  get_shared_data();
-
-  template <>
-  __device__ inline double *
-  get_shared_data()
-  {
-    return data_dd;
-  }
-
-  template <>
-  __device__ inline float *
-  get_shared_data()
-  {
-    return data_ff;
-  }
-
   template <int dim, typename Number, typename Functor>
-  __global__ void __launch_bounds__(256, 1)
-    apply_kernel_shmem(Functor                                func,
-                       typename MatrixFree<dim, Number>::Data gpu_data,
-                       const Number                          *src,
-                       Number                                *dst)
+  __global__ void
+  apply_kernel_shmem(Functor            func,
+                     const unsigned int color,
+                     const Number      *src,
+                     Number            *dst)
   {
-    constexpr unsigned int n_dofs_2d = Functor::n_dofs_1d * Functor::n_dofs_1d;
     constexpr unsigned int cells_per_block = Functor::cells_per_block;
+
     constexpr unsigned int n_dofs_per_block =
       cells_per_block * Functor::n_local_dofs;
     constexpr unsigned int n_q_points_per_block =
       cells_per_block * Functor::n_q_points;
+    // TODO make use of dynamically allocated shared memory
+    __shared__ Number values[n_dofs_per_block];
+    __shared__ Number gradients[dim][n_q_points_per_block];
 
-    const unsigned int local_cell = threadIdx.y / Functor::n_dofs_1d;
+    const unsigned int local_cell = threadIdx.x / Functor::n_dofs_1d;
     const unsigned int cell       = local_cell + cells_per_block * blockIdx.x;
-
-    Number *data = get_shared_data<Number>();
 
     Number *gq[dim];
     for (unsigned int d = 0; d < dim; ++d)
-      gq[d] = &data[n_dofs_per_block + d * n_q_points_per_block +
-                    local_cell * Functor::n_q_points];
+      gq[d] = &gradients[d][local_cell * Functor::n_q_points];
 
     SharedData<dim, Number> shared_data(
-      &data[local_cell * Functor::n_local_dofs],
-      gq,
-      &data[n_dofs_per_block * (dim + 1) + local_cell * n_dofs_2d * 3],
-      &data[n_dofs_per_block * (dim + 1) +
-            (cells_per_block + local_cell) * n_dofs_2d * 3]);
+      &values[local_cell * Functor::n_local_dofs], gq);
 
-    if (cell <
-        gpu_data.n_locally_owned_cells) // todo should be n_cells or n_faces
-      func(cell, &gpu_data, &shared_data, src, dst);
-  }
-
-  template <int dim, typename Number, typename Functor>
-  std::size_t
-  allocate_shared_memory()
-  {
-    constexpr unsigned int cells_per_block = Functor::cells_per_block;
-    constexpr unsigned int n_dofs_1d       = Functor::n_dofs_1d;
-    constexpr unsigned int n_dofs_per_block =
-      cells_per_block * Functor::n_local_dofs;
-    constexpr unsigned int n_q_points_per_block =
-      cells_per_block * Functor::n_q_points;
-
-    std::size_t shared_mem = 0;
-
-    shared_mem += n_dofs_per_block * sizeof(Number);
-    shared_mem += dim * n_q_points_per_block * sizeof(Number);
-
-    shared_mem += 2 * cells_per_block * n_dofs_1d * n_dofs_1d * sizeof(Number);
-    shared_mem += 4 * cells_per_block * n_dofs_1d * n_dofs_1d * sizeof(Number);
-
-    AssertCuda(cudaFuncSetAttribute(apply_kernel_shmem<dim, Number, Functor>,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    shared_mem));
-
-    return shared_mem;
+    // if (cell < gpu_data.n_cells) // todo should be n_cells or n_faces
+    func(cell, color, &shared_data, src, dst);
   }
 
 
@@ -1325,7 +1411,7 @@ namespace PSMF
     constexpr unsigned int cells_per_block =
       cells_per_block_shmem(dim, Functor::n_dofs_1d - 1);
 
-    const unsigned int local_cell = threadIdx.y / Functor::n_dofs_1d;
+    const unsigned int local_cell = threadIdx.x / Functor::n_dofs_1d;
     const unsigned int cell =
       local_cell + cells_per_block * (blockIdx.x + gridDim.x * blockIdx.y);
 
@@ -1372,9 +1458,9 @@ namespace PSMF
       dealii::Utilities::CUDA::free(JxW_color_ptr);
     JxW.clear();
 
-    for (auto &constraint_mask_color_ptr : constraint_mask)
-      dealii::Utilities::CUDA::free(constraint_mask_color_ptr);
-    constraint_mask.clear();
+    // for (auto &constraint_mask_color_ptr : constraint_mask)
+    //   dealii::Utilities::CUDA::free(constraint_mask_color_ptr);
+    // constraint_mask.clear();
 
     dealii::Utilities::CUDA::free(constrained_dofs);
 
@@ -1394,8 +1480,7 @@ namespace PSMF
     const IteratorFiltersType               &iterator_filter,
     const AdditionalData                    &additional_data)
   {
-    this->matrix_type        = additional_data.matrix_type;
-    this->face_integral_type = additional_data.face_integral_type;
+    this->matrix_type = additional_data.matrix_type;
 
     if (matrix_type == MatrixType::active_matrix)
       {
@@ -1468,20 +1553,33 @@ namespace PSMF
     Data data_copy;
     if (q_points.size() > 0)
       data_copy.q_points = q_points[color];
+    if (jacobian.size() > 0)
+      data_copy.jacobian = jacobian[color];
     if (inv_jacobian.size() > 0)
       data_copy.inv_jacobian = inv_jacobian[color];
     if (JxW.size() > 0)
       data_copy.JxW = JxW[color];
-    data_copy.local_to_global       = local_to_global[color];
-    data_copy.id                    = my_id;
-    data_copy.n_cells               = n_cells[color];
-    data_copy.n_locally_owned_cells = n_locally_owned_cells[color];
-    data_copy.padding_length        = padding_length;
-    data_copy.row_start             = row_start[color];
-    data_copy.use_coloring          = use_coloring;
+    if (inv_det.size() > 0)
+      data_copy.inv_det = inv_det[color];
+    if (q_weights.size() > 0)
+      data_copy.q_weights = q_weights[color];
 
-    data_copy.cell_face_shape_values    = cell_face_shape_values;
-    data_copy.cell_face_shape_gradients = cell_face_shape_gradients;
+    data_copy.local_to_global = local_to_global[color];
+    data_copy.id              = my_id;
+    data_copy.n_cells         = n_cells[color];
+    data_copy.padding_length  = padding_length;
+    data_copy.row_start       = row_start[color];
+    data_copy.use_coloring    = use_coloring;
+    data_copy.is_primitive    = is_primitive;
+
+    data_copy.constraint_mask  = constraint_mask[color];
+    data_copy.constraint_range = constraint_range[color];
+
+    data_copy.hanging_nodes_constraint = hanging_nodes_constraint;
+    data_copy.hanging_nodes_constraint_indicator =
+      hanging_nodes_constraint_indicator;
+    data_copy.hanging_nodes_constraint_weights =
+      hanging_nodes_constraint_weights;
 
     return data_copy;
   }
@@ -1496,17 +1594,22 @@ namespace PSMF
     const unsigned int shift =
       is_boundary_face * n_inner_faces[color] * 2 * face_padding_length;
 
-    if (face_q_points.size() > 0)
-      data_copy.face_q_points = face_q_points[color];
+    if (face_jacobian.size() > 0)
+      data_copy.face_jacobian = face_jacobian[color] + shift;
     if (face_inv_jacobian.size() > 0)
       data_copy.face_inv_jacobian = face_inv_jacobian[color] + shift;
     if (face_JxW.size() > 0)
       data_copy.face_JxW = face_JxW[color] + shift;
     if (normal_vector.size() > 0)
       data_copy.normal_vector = normal_vector[color] + shift;
+    if (face_inv_det.size() > 0)
+      data_copy.face_inv_det = face_inv_det[color] + shift;
+    if (face_q_weights.size() > 0)
+      data_copy.face_q_weights = face_q_weights[color];
 
     if (matrix_type == MatrixType::active_matrix ||
-        matrix_type == MatrixType::level_matrix)
+        matrix_type == MatrixType::level_matrix ||
+        matrix_type == MatrixType::interface_matrix)
       {
         data_copy.local_to_global = local_to_global[color];
         data_copy.l_to_g_coarse   = local_to_global[color];
@@ -1533,6 +1636,18 @@ namespace PSMF
     data_copy.padding_length      = padding_length;
     data_copy.face_padding_length = face_padding_length;
     data_copy.use_coloring        = use_coloring;
+    data_copy.is_primitive        = is_primitive;
+
+    data_copy.constraint_range        = constraint_range[color];
+    data_copy.constraint_coarse_range = constraint_coarse_range[color];
+
+    data_copy.hanging_nodes_constraint = hanging_nodes_constraint;
+    data_copy.hanging_nodes_constraint_indicator =
+      hanging_nodes_constraint_indicator;
+    data_copy.hanging_nodes_constraint_weights =
+      hanging_nodes_constraint_weights;
+
+    data_copy.hanging_nodes_constraint_coarse = hanging_nodes_constraint_coarse;
 
     data_copy.face2cell_id = is_boundary_face ? boundary_face2cell_id[color] :
                                                 inner_face2cell_id[color];
@@ -1540,59 +1655,8 @@ namespace PSMF
       is_boundary_face ? n_boundary_faces[color] : n_inner_faces[color];
 
     data_copy.n_cells = n_boundary_faces[color] + n_inner_faces[color] * 2;
-    data_copy.n_locally_owned_cells = data_copy.n_cells;
 
     data_copy.matrix_type = matrix_type;
-
-    data_copy.cell_face_shape_values    = cell_face_shape_values;
-    data_copy.cell_face_shape_gradients = cell_face_shape_gradients;
-
-    return data_copy;
-  }
-
-  template <int dim, typename Number>
-  MatrixFree<dim, Number>::Data
-  MatrixFree<dim, Number>::get_cell_face_data(unsigned int color) const
-  {
-    Data data_copy;
-    if (q_points.size() > 0)
-      data_copy.q_points = q_points[color];
-    if (inv_jacobian.size() > 0)
-      data_copy.inv_jacobian = inv_jacobian[color];
-    if (JxW.size() > 0)
-      data_copy.JxW = JxW[color];
-    data_copy.local_to_global       = local_to_global[color];
-    data_copy.l_to_g_coarse         = local_to_global[color];
-    data_copy.id                    = my_id;
-    data_copy.n_cells               = n_cells[color];
-    data_copy.n_locally_owned_cells = n_locally_owned_cells[color];
-    data_copy.padding_length        = padding_length;
-    data_copy.row_start             = row_start[color];
-    data_copy.use_coloring          = use_coloring;
-
-    data_copy.cell2face_id = cell2face_id[color];
-
-    if (face_q_points.size() > 0)
-      data_copy.face_q_points = face_q_points[color];
-    if (face_inv_jacobian.size() > 0)
-      data_copy.face_inv_jacobian = face_inv_jacobian[color];
-    if (face_JxW.size() > 0)
-      data_copy.face_JxW = face_JxW[color];
-    if (normal_vector.size() > 0)
-      data_copy.normal_vector = normal_vector[color];
-
-    // data_copy.n_faces = n_boundary_faces[color] + n_inner_faces[color];
-    data_copy.n_faces = n_boundary_faces[color] + n_inner_faces[color] * 2;
-    data_copy.n_inner_faces = n_inner_faces[color];
-
-    data_copy.face_number         = face_number[color];
-    data_copy.subface_number      = subface_number[color];
-    data_copy.face_padding_length = face_padding_length;
-
-    data_copy.face2cell_id = inner_face2cell_id[color];
-
-    data_copy.cell_face_shape_values    = cell_face_shape_values;
-    data_copy.cell_face_shape_gradients = cell_face_shape_gradients;
 
     return data_copy;
   }
@@ -1646,23 +1710,15 @@ namespace PSMF
                                            const VectorType &src,
                                            VectorType       &dst) const
   {
-    src.update_ghost_values();
-    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
-
     // Execute the loop on the boundary faces
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_inner_faces[i] > 0)
         {
           apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim_inner_face[i], block_dim_inner_face[i], shared_mem>>>(
-              func,
-              get_face_data<false>(i),
-              src.get_values(),
-              dst.get_values());
+            <<<grid_dim_inner_face[i], block_dim_inner_face[i]>>>(
+              func, i, src.get_values(), dst.get_values());
           AssertCudaKernel();
         }
-    dst.compress(dealii::VectorOperation::add);
-    src.zero_out_ghost_values();
   }
 
 
@@ -1674,48 +1730,15 @@ namespace PSMF
                                               const VectorType &src,
                                               VectorType       &dst) const
   {
-    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
-
     // Execute the loop on the boundary faces
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_boundary_faces[i] > 0)
         {
-          apply_kernel_shmem<dim, Number, Functor><<<grid_dim_boundary_face[i],
-                                                     block_dim_boundary_face[i],
-                                                     shared_mem>>>(
-            func, get_face_data<true>(i), src.get_values(), dst.get_values());
-          AssertCudaKernel();
-        }
-  }
-
-
-
-  template <int dim, typename Number>
-  template <typename Functor, typename VectorType>
-  void
-  MatrixFree<dim, Number>::cell_face_loop(const Functor    &func,
-                                          const VectorType &src,
-                                          VectorType       &dst) const
-  {
-    Util::adjust_ghost_range_if_necessary(src, partitioner);
-    Util::adjust_ghost_range_if_necessary(dst, partitioner);
-
-    src.update_ghost_values();
-    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
-
-    // Execute the loop on the boundary faces
-    for (unsigned int i = 0; i < n_colors; ++i)
-      if (n_cells[i] > 0)
-        {
           apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim[i], block_dim[i], shared_mem>>>(func,
-                                                        get_cell_face_data(i),
-                                                        src.get_values(),
-                                                        dst.get_values());
+            <<<grid_dim_boundary_face[i], block_dim_boundary_face[i]>>>(
+              func, i, src.get_values(), dst.get_values());
           AssertCudaKernel();
         }
-    dst.compress(dealii::VectorOperation::add);
-    src.zero_out_ghost_values();
   }
 
 
@@ -1792,6 +1815,7 @@ namespace PSMF
     this->overlap_communication_computation =
       additional_data.overlap_communication_computation;
     this->mg_level = additional_data.mg_level;
+    this->my_id    = additional_data.my_id;
 
     // TODO: only free if we actually need arrays of different length
     // free();
@@ -1800,22 +1824,25 @@ namespace PSMF
 
     const dealii::FiniteElement<dim> &fe = dof_handler->get_fe();
 
-    fe_degree = fe.degree;
+    fe_degree    = fe.degree;
+    is_primitive = fe.is_primitive();
+
     // TODO this should be a templated parameter
-    const unsigned int n_dofs_1d     = fe_degree + 1;
+    const unsigned int n_dofs_1d     = fe_degree + 1 + is_primitive;
     const unsigned int n_q_points_1d = quad.size();
 
     Assert(n_dofs_1d == n_q_points_1d,
-           dealii::ExcMessage("n_q_points_1d must be equal to fe_degree + 1."));
+           dealii::ExcMessage("n_q_points_1d must be equal to n_dofs_1d."));
 
     // Set padding length to the closest power of two larger than or equal to
     // the number of threads. But why padding?
-    padding_length = 1 << static_cast<unsigned int>(
-                       std::ceil(dim * std::log2(fe_degree + 1.)));
+    padding_length =
+      1 << static_cast<unsigned int>(std::ceil(dim * std::log2(n_dofs_1d)));
 
     face_padding_length = 1 << static_cast<unsigned int>(
-                            std::ceil((dim - 1) * std::log2(fe_degree + 1.)));
+                            std::ceil((dim - 1) * std::log2(n_dofs_1d)));
 
+    n_components      = fe.n_components();
     dofs_per_cell     = fe.n_dofs_per_cell();
     q_points_per_cell = std::pow(n_q_points_1d, dim);
     q_points_per_face = std::pow(n_q_points_1d, dim - 1);
@@ -1840,6 +1867,27 @@ namespace PSMF
     const dealii::internal::MatrixFreeFunctions::ShapeInfo<Number>
       sub_shape_info1(sub_quad1, fe);
 
+    std::array<
+      dealii::internal::MatrixFreeFunctions::UnivariateShapeData<Number>,
+      2>
+      shape_data;
+    std::array<
+      dealii::internal::MatrixFreeFunctions::UnivariateShapeData<Number>,
+      2>
+      sub_shape_data0;
+    std::array<
+      dealii::internal::MatrixFreeFunctions::UnivariateShapeData<Number>,
+      2>
+      sub_shape_data1;
+
+    for (auto d = 0U; d < 2; ++d)
+      {
+        shape_data[d]      = shape_info.get_shape_data(d, 0);
+        sub_shape_data0[d] = sub_shape_info0.get_shape_data(d, 0);
+        sub_shape_data1[d] = sub_shape_info1.get_shape_data(d, 0);
+      }
+    // todo sub shape info for RT
+
     unsigned int size_shape_values = n_dofs_1d * n_q_points_1d * sizeof(Number);
     unsigned int n_shape_values    = n_dofs_1d * n_q_points_1d;
 
@@ -1858,83 +1906,151 @@ namespace PSMF
     unsigned int size_co_shape_values =
       n_q_points_1d * n_q_points_1d * sizeof(Number);
 
-    // Check if we already a part of the constant memory allocated to us. If
-    // not, we try to get a block of memory.
-    bool found_id = false;
-    while (!found_id && (!is_LevelMG || my_id == -1))
-      {
-        ++my_id;
-        Assert(
-          my_id < static_cast<int>(mf_n_concurrent_objects),
-          dealii::ExcMessage(
-            "Maximum number of concurrent MatrixFree objects reached. Increase mf_n_concurrent_objects"));
-        bool f   = false;
-        found_id = used_objects[my_id].compare_exchange_strong(f, true);
-      }
+    // // Check if we already a part of the constant memory allocated to us. If
+    // // not, we try to get a block of memory.
+    // bool found_id = false;
+    // while (!found_id && (!is_LevelMG || my_id == -1))
+    //   {
+    //     ++my_id;
+    //     Assert(
+    //       my_id < static_cast<int>(mf_n_concurrent_objects),
+    //       dealii::ExcMessage(
+    //         "Maximum number of concurrent MatrixFree objects reached.
+    //         Increase mf_n_concurrent_objects"));
+    //     bool f   = false;
+    //     found_id = used_objects[my_id].compare_exchange_strong(f, true);
+    //   }
 
-    // todo
-    my_id = 0;
+    // // todo
+    // my_id = 0;
+
+    std::vector<Number> empty(n_shape_values * 6, 0.0);
+
+    // todo: should init all constant memory to avoid nan.
 
     cudaError_t cuda_error =
-      cudaMemcpyToSymbol(get_cell_shape_values<Number>(
-                           0), // todo check (0) or (my_id)
-                         shape_info.data.front().shape_values.data(),
-                         size_shape_values,
+      cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
+                         empty.data(),
+                         size_shape_values * 6,
                          my_id * data_array_size * sizeof(Number),
                          cudaMemcpyHostToDevice);
     AssertCuda(cuda_error);
 
-    // cuda_error =
-    //   cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
-    //                      sub_shape_info0.data.front().shape_values.data(),
-    //                      size_shape_values,
-    //                      (my_id * data_array_size + n_shape_values) *
-    //                        sizeof(Number),
-    //                      cudaMemcpyHostToDevice);
-    // AssertCuda(cuda_error);
+    cuda_error =
+      cudaMemcpyToSymbol(get_cell_shape_values<Number>(
+                           0), // todo check (0) or (my_id)
+                         shape_data[0].shape_values.data(),
+                         shape_data[0].shape_values.size() * sizeof(Number),
+                         my_id * data_array_size * sizeof(Number),
+                         cudaMemcpyHostToDevice);
+    AssertCuda(cuda_error);
 
-    // cuda_error =
-    //   cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
-    //                      sub_shape_info1.data.front().shape_values.data(),
-    //                      size_shape_values,
-    //                      (my_id * data_array_size + n_shape_values * 2) *
-    //                        sizeof(Number),
-    //                      cudaMemcpyHostToDevice);
-    // AssertCuda(cuda_error);
+    cuda_error = cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
+                                    sub_shape_data0[0].shape_values.data(),
+                                    sub_shape_data0[0].shape_values.size() *
+                                      sizeof(Number),
+                                    (my_id * data_array_size + n_shape_values) *
+                                      sizeof(Number),
+                                    cudaMemcpyHostToDevice);
+    AssertCuda(cuda_error);
+
+    cuda_error = cudaMemcpyToSymbol(
+      get_cell_shape_values<Number>(0),
+      sub_shape_data1[0].shape_values.data(),
+      sub_shape_data1[0].shape_values.size() * sizeof(Number),
+      (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
+      cudaMemcpyHostToDevice);
+    AssertCuda(cuda_error);
+
+    if (!is_primitive)
+      {
+        cuda_error =
+          cudaMemcpyToSymbol(get_cell_shape_values<Number>(0),
+                             shape_data[1].shape_values.data(),
+                             shape_data[1].shape_values.size() * sizeof(Number),
+                             (my_id * data_array_size + n_shape_values * 3) *
+                               sizeof(Number),
+                             cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
+
+        cuda_error = cudaMemcpyToSymbol(
+          get_cell_shape_values<Number>(0),
+          sub_shape_data0[1].shape_values.data(),
+          sub_shape_data0[1].shape_values.size() * sizeof(Number),
+          (my_id * data_array_size + n_shape_values * 4) * sizeof(Number),
+          cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
+
+        cuda_error = cudaMemcpyToSymbol(
+          get_cell_shape_values<Number>(0),
+          sub_shape_data1[1].shape_values.data(),
+          sub_shape_data1[1].shape_values.size() * sizeof(Number),
+          (my_id * data_array_size + n_shape_values * 5) * sizeof(Number),
+          cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
+      }
 
     if (update_flags & dealii::update_gradients)
       {
         cuda_error =
           cudaMemcpyToSymbol(get_cell_shape_gradients<Number>(0),
-                             shape_info.data.front().shape_gradients.data(),
-                             size_shape_values,
+                             empty.data(),
+                             size_shape_values * 6,
                              my_id * data_array_size * sizeof(Number),
                              cudaMemcpyHostToDevice);
         AssertCuda(cuda_error);
 
         cuda_error =
-          cudaMemcpyToSymbol(get_cell_shape_hessians<Number>(0),
-                             shape_info.data.front().shape_hessians.data(),
-                             size_shape_values,
+          cudaMemcpyToSymbol(get_cell_shape_gradients<Number>(0),
+                             shape_data[0].shape_gradients.data(),
+                             shape_data[0].shape_gradients.size() *
+                               sizeof(Number),
                              my_id * data_array_size * sizeof(Number),
                              cudaMemcpyHostToDevice);
         AssertCuda(cuda_error);
 
-        // cuda_error = cudaMemcpyToSymbol(
-        //   get_cell_shape_gradients<Number>(0),
-        //   sub_shape_info0.data.front().shape_gradients.data(),
-        //   size_shape_values,
-        //   (my_id * data_array_size + n_shape_values) * sizeof(Number),
-        //   cudaMemcpyHostToDevice);
-        // AssertCuda(cuda_error);
+        cuda_error = cudaMemcpyToSymbol(
+          get_cell_shape_gradients<Number>(0),
+          sub_shape_data0[0].shape_gradients.data(),
+          sub_shape_data0[0].shape_gradients.size() * sizeof(Number),
+          (my_id * data_array_size + n_shape_values) * sizeof(Number),
+          cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
 
-        // cuda_error = cudaMemcpyToSymbol(
-        //   get_cell_shape_gradients<Number>(0),
-        //   sub_shape_info1.data.front().shape_gradients.data(),
-        //   size_shape_values,
-        //   (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
-        //   cudaMemcpyHostToDevice);
-        // AssertCuda(cuda_error);
+        cuda_error = cudaMemcpyToSymbol(
+          get_cell_shape_gradients<Number>(0),
+          sub_shape_data1[0].shape_gradients.data(),
+          sub_shape_data1[0].shape_gradients.size() * sizeof(Number),
+          (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
+          cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
+
+        if (!is_primitive)
+          {
+            cuda_error = cudaMemcpyToSymbol(
+              get_cell_shape_gradients<Number>(0),
+              shape_data[1].shape_gradients.data(),
+              shape_data[1].shape_gradients.size() * sizeof(Number),
+              (my_id * data_array_size + n_shape_values * 3) * sizeof(Number),
+              cudaMemcpyHostToDevice);
+            AssertCuda(cuda_error);
+
+            cuda_error = cudaMemcpyToSymbol(
+              get_cell_shape_gradients<Number>(0),
+              sub_shape_data0[1].shape_gradients.data(),
+              sub_shape_data0[1].shape_gradients.size() * sizeof(Number),
+              (my_id * data_array_size + n_shape_values * 4) * sizeof(Number),
+              cudaMemcpyHostToDevice);
+            AssertCuda(cuda_error);
+
+            cuda_error = cudaMemcpyToSymbol(
+              get_cell_shape_gradients<Number>(0),
+              sub_shape_data1[1].shape_gradients.data(),
+              sub_shape_data1[1].shape_gradients.size() * sizeof(Number),
+              (my_id * data_array_size + n_shape_values * 5) * sizeof(Number),
+              cudaMemcpyHostToDevice);
+            AssertCuda(cuda_error);
+          }
 
         cuda_error =
           cudaMemcpyToSymbol(get_cell_co_shape_gradients<Number>(0),
@@ -1944,40 +2060,47 @@ namespace PSMF
                              cudaMemcpyHostToDevice);
         AssertCuda(cuda_error);
 
-        // cuda_error = cudaMemcpyToSymbol(
-        //   get_cell_co_shape_gradients<Number>(0),
-        //   sub_shape_info_co0.data.front().shape_gradients.data(),
-        //   size_co_shape_values,
-        //   (my_id * data_array_size + n_shape_values) * sizeof(Number),
-        //   cudaMemcpyHostToDevice);
-        // AssertCuda(cuda_error);
+        cuda_error = cudaMemcpyToSymbol(
+          get_cell_co_shape_gradients<Number>(0),
+          sub_shape_info_co0.data.front().shape_gradients.data(),
+          size_co_shape_values,
+          (my_id * data_array_size + n_shape_values) * sizeof(Number),
+          cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
 
-        // cuda_error = cudaMemcpyToSymbol(
-        //   get_cell_co_shape_gradients<Number>(0),
-        //   sub_shape_info_co1.data.front().shape_gradients.data(),
-        //   size_co_shape_values,
-        //   (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
-        //   cudaMemcpyHostToDevice);
-        // AssertCuda(cuda_error);
+        cuda_error = cudaMemcpyToSymbol(
+          get_cell_co_shape_gradients<Number>(0),
+          sub_shape_info_co1.data.front().shape_gradients.data(),
+          size_co_shape_values,
+          (my_id * data_array_size + n_shape_values * 2) * sizeof(Number),
+          cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
       }
 
     // todo: use less constant memory
-    std::vector<Number> face_shape_value;
     if (update_flags_inner_faces & dealii::update_values)
       {
-        face_shape_value.resize(2 * n_shape_values);
+        std::vector<Number> face_shape_value(2 * n_shape_values, 0.0);
+        // face_shape_value.resize(2 * n_shape_values);
         // point 0
         auto shape_value_on_face0 =
-          shape_info.data.front().shape_data_on_face[0];
+          shape_data[!is_primitive].shape_data_on_face[0];
         for (unsigned int i = 0; i < n_q_points_1d; ++i)
           face_shape_value[i * n_q_points_1d] = shape_value_on_face0[i];
         // point 1
         auto shape_value_on_face1 =
-          shape_info.data.front().shape_data_on_face[1];
+          shape_data[!is_primitive].shape_data_on_face[1];
         for (unsigned int i = 0; i < n_q_points_1d; ++i)
           face_shape_value[(i + n_q_points_1d) * n_q_points_1d] =
             shape_value_on_face1[i];
 
+        cuda_error =
+          cudaMemcpyToSymbol(get_face_shape_values<Number>(0),
+                             empty.data(),
+                             size_shape_values * 6,
+                             my_id * data_array_size * sizeof(Number),
+                             cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
 
         cuda_error =
           cudaMemcpyToSymbol(get_face_shape_values<Number>(0),
@@ -1988,22 +2111,30 @@ namespace PSMF
         AssertCuda(cuda_error);
       }
 
-    std::vector<Number> face_shape_gradients;
     if (update_flags_inner_faces & dealii::update_gradients)
       {
-        face_shape_gradients.resize(2 * n_shape_values);
+        std::vector<Number> face_shape_gradients(2 * n_shape_values, 0.0);
+        // face_shape_gradients.resize(2 * n_shape_values);
         // point 0
         auto shape_gradients_on_face0 =
-          shape_info.data.front().shape_data_on_face[0];
-        for (unsigned int i = 0; i < n_q_points_1d; ++i)
+          shape_data[!is_primitive].shape_data_on_face[0];
+        for (unsigned int i = 0; i < n_q_points_1d - 1; ++i)
           face_shape_gradients[i * n_q_points_1d] =
-            shape_gradients_on_face0[i + n_q_points_1d];
+            shape_gradients_on_face0[i + n_q_points_1d - !is_primitive];
         // point 1
         auto shape_gradients_on_face1 =
-          shape_info.data.front().shape_data_on_face[1].data();
-        for (unsigned int i = 0; i < n_q_points_1d; ++i)
+          shape_data[!is_primitive].shape_data_on_face[1];
+        for (unsigned int i = 0; i < n_q_points_1d - 1; ++i)
           face_shape_gradients[(i + n_q_points_1d) * n_q_points_1d] =
-            shape_gradients_on_face1[i + n_q_points_1d];
+            shape_gradients_on_face1[i + n_q_points_1d - !is_primitive];
+
+        cuda_error =
+          cudaMemcpyToSymbol(get_face_shape_gradients<Number>(0),
+                             empty.data(),
+                             size_shape_values * 6,
+                             my_id * data_array_size * sizeof(Number),
+                             cudaMemcpyHostToDevice);
+        AssertCuda(cuda_error);
 
         cuda_error =
           cudaMemcpyToSymbol(get_face_shape_gradients<Number>(0),
@@ -2039,46 +2170,10 @@ namespace PSMF
         AssertCuda(cuda_error);
       }
 
-    // copy shape data to global memory
-    {
-      std::vector<Number> cell_face_shape_value_host;
-      cell_face_shape_value_host.resize(3 * n_shape_values);
-
-      std::vector<Number> cell_face_shape_gradients_host;
-      cell_face_shape_gradients_host.resize(3 * n_shape_values);
-
-      for (unsigned int i = 0; i < n_shape_values; ++i)
-        {
-          cell_face_shape_value_host[i] =
-            shape_info.data.front().shape_values[i];
-          cell_face_shape_gradients_host[i] =
-            shape_info.data.front().shape_gradients[i];
-        }
-
-      for (unsigned int i = 0; i < 2 * n_shape_values; ++i)
-        {
-          cell_face_shape_value_host[n_shape_values + i] = face_shape_value[i];
-          cell_face_shape_gradients_host[n_shape_values + i] =
-            face_shape_gradients[i];
-        }
-
-      alloc_and_copy(
-        &cell_face_shape_values,
-        dealii::ArrayView<const Number>(cell_face_shape_value_host.data(),
-                                        cell_face_shape_value_host.size()),
-        3 * n_shape_values);
-
-      alloc_and_copy(
-        &cell_face_shape_gradients,
-        dealii::ArrayView<const Number>(cell_face_shape_gradients_host.data(),
-                                        cell_face_shape_gradients_host.size()),
-        3 * n_shape_values);
-    }
-
     // Setup the number of cells per CUDA thread block
     cells_per_block          = cells_per_block_shmem(dim, fe_degree);
-    inner_faces_per_block    = 1; // TODO:
-    boundary_faces_per_block = 1; // TODO:
+    inner_faces_per_block    = 1; // todo
+    boundary_faces_per_block = 1; // todo
 
     ReinitHelper<dim, Number> helper(this,
                                      mapping,
@@ -2086,6 +2181,7 @@ namespace PSMF
                                      quad,
                                      shape_info,
                                      *dof_handler,
+                                     constraints,
                                      update_flags,
                                      update_flags_inner_faces);
 
@@ -2107,13 +2203,8 @@ namespace PSMF
     CellIterator begin(iterator_filter, beginc);
     CellIterator end(iterator_filter, endc);
 
-    // TODO: Active Cells
-    CellIterator beginl(IteratorFilters::LevelEqualTo(mg_level), beginc);
-    CellIterator endl(IteratorFilters::LevelEqualTo(mg_level), endc);
-
     std::vector<std::vector<CellIterator>> graph;
 
-    unsigned int n_ghosts = 0;
     if (begin != end)
       {
         if (additional_data.use_coloring)
@@ -2128,8 +2219,6 @@ namespace PSMF
             graph.clear();
             if (additional_data.overlap_communication_computation)
               {
-                // TODO: Ghost cells
-
                 // We create one color (1) with the cells on the boundary of the
                 // local domain and two colors (0 and 2) with the interior
                 // cells.
@@ -2180,13 +2269,6 @@ namespace PSMF
                 graph.resize(1, std::vector<CellIterator>());
                 for (auto cell = begin; cell != end; ++cell)
                   graph[0].emplace_back(cell);
-
-                for (auto cell = beginl; cell != endl; ++cell)
-                  if (cell->is_ghost_on_level())
-                    {
-                      graph[0].emplace_back(cell);
-                      n_ghosts++;
-                    }
               }
           }
       }
@@ -2210,15 +2292,12 @@ namespace PSMF
           locally_owned_dofs, locally_relevant_dofs, *comm);
       }
 
-    Timer t1;
     for (unsigned int i = 0; i < n_colors; ++i)
       {
         helper.n_inner_faces    = 0;
         helper.n_boundary_faces = 0;
 
-        n_cells[i]               = graph[i].size();
-        n_locally_owned_cells[i] = graph[i].size() - n_ghosts;
-
+        n_cells[i] = graph[i].size();
         helper.setup_cell_arrays(i);
         typename std::vector<CellIterator>::iterator cell = graph[i].begin(),
                                                      end_cell = graph[i].end();
@@ -2232,8 +2311,6 @@ namespace PSMF
 
         helper.alloc_and_copy_arrays(i);
       }
-    // std::cout << t1.wall_time() << std::endl;
-    t1.restart();
 
     // Setup faces
     for (unsigned int i = 0; i < n_colors; ++i)
@@ -2249,7 +2326,6 @@ namespace PSMF
 
         helper.alloc_and_copy_face_arrays(i);
       }
-    // std::cout << t1.wall_time() << std::endl;
 
     // Setup row starts
     if (n_colors > 0)
@@ -2263,6 +2339,59 @@ namespace PSMF
 
     if (n_constrained_dofs != 0)
       {
+        // hanging node constraints
+        std::vector<dealii::types::global_dof_index> h_c;
+        std::vector<int>                             h_c_i;
+        std::vector<Number>                          h_c_w;
+
+        std::vector<dealii::types::global_dof_index> h_c_coarse;
+
+
+        auto lines = constraints.get_lines();
+        for (auto &l : lines)
+          if (l.entries.size() > 0)
+            for (auto e : l.entries)
+              {
+                if (e.second < -100)
+                  h_c_coarse.push_back(e.first);
+                else
+                  {
+                    h_c.push_back(l.index);
+                    h_c_i.push_back(e.first);
+                    h_c_w.push_back(e.second);
+                  }
+              }
+          else
+            {
+              h_c.push_back(l.index);
+              h_c_i.push_back(0);
+              h_c_w.push_back(0);
+            }
+
+        // for (auto h : h_c_coarse)
+        //   std::cout << h << " ";
+        // std::cout << std::endl << std::endl;
+
+        alloc_and_copy(&hanging_nodes_constraint,
+                       dealii::ArrayView<const dealii::types::global_dof_index>(
+                         h_c.data(), h_c.size()),
+                       h_c.size());
+
+        alloc_and_copy(&hanging_nodes_constraint_indicator,
+                       dealii::ArrayView<const int>(h_c_i.data(), h_c_i.size()),
+                       h_c_i.size());
+
+        alloc_and_copy(&hanging_nodes_constraint_weights,
+                       dealii::ArrayView<const Number>(h_c_w.data(),
+                                                       h_c_w.size()),
+                       h_c_w.size());
+
+
+        alloc_and_copy(&hanging_nodes_constraint_coarse,
+                       dealii::ArrayView<const dealii::types::global_dof_index>(
+                         h_c_coarse.data(), h_c_coarse.size()),
+                       h_c_coarse.size());
+
         const unsigned int constraint_n_blocks =
           std::ceil(static_cast<double>(n_constrained_dofs) /
                     static_cast<double>(block_size));
@@ -2334,17 +2463,15 @@ namespace PSMF
                                             const VectorType &src,
                                             VectorType       &dst) const
   {
-    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
-
     // Execute the loop on the cells
     for (unsigned int i = 0; i < n_colors; ++i)
       if (n_cells[i] > 0)
         {
           apply_kernel_shmem<dim, Number, Functor>
-            <<<grid_dim[i], block_dim[i], shared_mem>>>(func,
-                                                        get_data(i),
-                                                        src.get_values(),
-                                                        dst.get_values());
+            <<<grid_dim[i], block_dim[i]>>>(func,
+                                            i,
+                                            src.get_values(),
+                                            dst.get_values());
           AssertCudaKernel();
         }
   }
@@ -2363,11 +2490,6 @@ namespace PSMF
                                                dealii::MemorySpace::CUDA> &dst)
     const
   {
-    Util::adjust_ghost_range_if_necessary(src, partitioner);
-    Util::adjust_ghost_range_if_necessary(dst, partitioner);
-
-    auto shared_mem = allocate_shared_memory<dim, Number, Functor>();
-
     // in case we have compatible partitioners, we can simply use the provided
     // vectors
     if (src.get_partitioner().get() == partitioner.get() &&
@@ -2382,10 +2504,10 @@ namespace PSMF
             if (n_cells[0] > 0)
               {
                 apply_kernel_shmem<dim, Number, Functor>
-                  <<<grid_dim[0], block_dim[0], shared_mem>>>(func,
-                                                              get_data(0),
-                                                              src.get_values(),
-                                                              dst.get_values());
+                  <<<grid_dim[0], block_dim[0]>>>(func,
+                                                  0,
+                                                  src.get_values(),
+                                                  dst.get_values());
                 AssertCudaKernel();
               }
             src.update_ghost_values_finish();
@@ -2395,10 +2517,10 @@ namespace PSMF
             if (n_cells[1] > 0)
               {
                 apply_kernel_shmem<dim, Number, Functor>
-                  <<<grid_dim[1], block_dim[1], shared_mem>>>(func,
-                                                              get_data(1),
-                                                              src.get_values(),
-                                                              dst.get_values());
+                  <<<grid_dim[1], block_dim[1]>>>(func,
+                                                  1,
+                                                  src.get_values(),
+                                                  dst.get_values());
                 AssertCudaKernel();
                 // We need a synchronization point because we don't want
                 // CUDA-aware MPI to start the MPI communication until the
@@ -2412,10 +2534,10 @@ namespace PSMF
             if (n_cells[2] > 0)
               {
                 apply_kernel_shmem<dim, Number, Functor>
-                  <<<grid_dim[2], block_dim[2], shared_mem>>>(func,
-                                                              get_data(2),
-                                                              src.get_values(),
-                                                              dst.get_values());
+                  <<<grid_dim[2], block_dim[2]>>>(func,
+                                                  2,
+                                                  src.get_values(),
+                                                  dst.get_values());
                 AssertCudaKernel();
               }
             dst.compress_finish(dealii::VectorOperation::add);
@@ -2426,11 +2548,13 @@ namespace PSMF
 
             // Execute the loop on the cells
             for (unsigned int i = 0; i < n_colors; ++i)
-              if (n_locally_owned_cells[i] > 0)
+              if (n_cells[i] > 0)
                 {
                   apply_kernel_shmem<dim, Number, Functor>
-                    <<<grid_dim[i], block_dim[i], shared_mem>>>(
-                      func, get_data(i), src.get_values(), dst.get_values());
+                    <<<grid_dim[i], block_dim[i]>>>(func,
+                                                    i,
+                                                    src.get_values(),
+                                                    dst.get_values());
                 }
             dst.compress(dealii::VectorOperation::add);
           }
@@ -2453,11 +2577,10 @@ namespace PSMF
           if (n_cells[i] > 0)
             {
               apply_kernel_shmem<dim, Number, Functor>
-                <<<grid_dim[i], block_dim[i], shared_mem>>>(
-                  func,
-                  get_data(i),
-                  ghosted_src.get_values(),
-                  ghosted_dst.get_values());
+                <<<grid_dim[i], block_dim[i]>>>(func,
+                                                i,
+                                                ghosted_src.get_values(),
+                                                ghosted_dst.get_values());
               AssertCudaKernel();
             }
 
@@ -2513,4 +2636,4 @@ namespace PSMF
 
 } // namespace PSMF
 
-// #endif // CUDA_MATRIX_FREE_TEMPLATE_CUH
+  // #endif // CUDA_MATRIX_FREE_TEMPLATE_CUH

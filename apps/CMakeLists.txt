@@ -11,8 +11,7 @@ INCLUDE_DIRECTORIES(
 )
 
 SET( SOURCE_FILES
-        poisson.cu
-        poisson_adaptive.cu
+        stokes.cu
         benchmark_mg.cu
         )
 
@@ -20,6 +19,8 @@ FOREACH ( sourcefile ${SOURCE_FILES} )
     # string replace: cut off .cu from files
     STRING( REPLACE ".cu" "" testname ${sourcefile} )
     ADD_EXECUTABLE( ${testname} ${sourcefile})
-    DEAL_II_SETUP_TARGET(${testname})
+    TARGET_COMPILE_OPTIONS(${testname} PRIVATE -fopenmp)
     TARGET_LINK_LIBRARIES(${testname} GPUTPS)
+    TARGET_LINK_LIBRARIES(${testname} OpenMP::OpenMP_CXX)
+    DEAL_II_SETUP_TARGET(${testname})
 ENDFOREACH ( sourcefile ${APP_SOURCES} )

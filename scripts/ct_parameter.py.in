@@ -9,7 +9,6 @@ HEADER_ = """
 #define CT_PARAMETER_CUH
 
 #include "patch_base.cuh"
-#include "cuda_matrix_free.cuh"
 
 namespace CT
 {
@@ -41,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "-DIM",
         "--dimension",
-        default=3,
+        default=2,
         type=int,
         choices=[2, 3],
         help="spatial dimension of the domain",
@@ -55,22 +54,20 @@ def parse_args():
         help="spatial dimension of the domain",
     )
     parser.add_argument(
+        "-NSMO",
+        "--n_smooth_steps",
+        default=1,
+        type=int,
+        choices=range(1, 11),
+        help="spatial dimension of the domain",
+    )
+    parser.add_argument(
         "-PATCH_BLOCK",
         "--patch_per_block",
         default=1,
         type=int,
         choices=range(1, 65),
         help="number of shift elements",
-    )
-    parser.add_argument(
-        "-REP",
-        "--n_replicate",
-        default=1,
-        type=int,
-        help="number of triangulation in x coordinate axes",
-    )
-    parser.add_argument(
-        "-DIS", "--distort", default=0.1, type=float, help="desired distort factor"
     )
     parser.add_argument(
         "-REDUCE", "--reduce", default=1e-8, type=float, help="desired reduction factor"
@@ -81,14 +78,14 @@ def parse_args():
     parser.add_argument(
         "-MAXSIZE",
         "--max_sizes",
-        default=5000000,
+        default=500000,
         type=int,
         help="maximum number of dofs",
     )
     parser.add_argument(
         "-DLY",
         "--dof-layout",
-        default="DGQ",
+        default="RT",
         type=str,
         choices=["Q", "DGQ", "RT"],
         help="dof layout of finite element method",
@@ -97,19 +94,11 @@ def parse_args():
         "-LOG", "--log-directory", default=BUILD_DIR_, help="directory of the log file"
     )
     parser.add_argument(
-        "-FACE",
-        "--face_integral_type",
-        default="c",
-        nargs="+",
-        choices=["compact", "element_wise", "element_wise_partial"],
-        help="variant of the face integral",
-    )
-    parser.add_argument(
         "-LA",
         "--laplace_type",
         default="B",
         nargs="+",
-        choices=["Basic", "Cell", "ConflictFree", "TensorCore", "TensorCoreMMA"],
+        choices=["Basic", "Padding", "ConflictFree", "MatrixStruct"],
         help="variant of the Laplace operator kernel",
     )
     parser.add_argument(
@@ -117,31 +106,29 @@ def parse_args():
         "--smooth_vmult",
         default="B",
         nargs="+",
-        choices=["Basic", "ConflictFree", "TensorCore"],
+        choices=["Basic", "ConflictFree", "MatrixStruct"],
         help="variant of the Schwarz smoother vmult operator",
     )
     parser.add_argument(
         "-SMI",
         "--smooth_inv",
-        default="F",
+        default="G",
         nargs="+",
-        choices=[
-            "GLOBAL",
-            "FUSED_L",
-            "ConflictFree",
-            "TensorCore",
-            "ExactRes",
-            "Chebyshev",
-            "MCS",
-            "MCS_CG",
-            "MCS_PCG",
-        ],
+        choices=["GLOBAL", "FUSED_L", "ConflictFree"],
         help="variant of the Schwarz smoother inverse operator",
+    )
+    parser.add_argument(
+        "-SOL",
+        "--local_solver",
+        default="T",
+        nargs="+",
+        choices=["Direct", "SchurDirect", "SchurIter", "TensorProduct"],
+        help="variant of the local solver operator",
     )
     parser.add_argument(
         "-G",
         "--granularity",
-        default="multiple",
+        default="none",
         choices=["none", "user_define", "multiple"],
         help="thread-block granularity scheme",
     )
@@ -158,7 +145,7 @@ def parse_args():
         "--test_sets",
         default="error_analysis",
         type=str,
-        choices=["global", "quadrant", "error_analysis"],
+        choices=["none", "kernel", "error_analysis", "vnum"],
         help="sets of experiments used for comparsion",
     )
     args = parser.parse_args()
@@ -185,11 +172,11 @@ class Parameter:
         dim = options.dimension
         deg = options.fe_degree
         patch = options.patch_per_block
+        nsmo = options.n_smooth_steps
         self.dimension = ("constexpr unsigned int", dim)
         self.fe_degree = ("constexpr unsigned int", deg)
-        self.n_replicate = ("constexpr unsigned int", options.n_replicate)
+        self.n_smooth_steps = ("constexpr unsigned int", nsmo)
         self.patch_per_block = ("constexpr unsigned int", patch)
-        self.distort = ("constexpr double", options.distort)
         self.reduce = ("constexpr double", options.reduce)
         self.max_steps = ("constexpr unsigned int", options.max_steps)
         self.max_sizes = ("constexpr long long unsigned int", options.max_sizes)
@@ -200,110 +187,95 @@ class Parameter:
         self.vcycle_number = ("using", str(options.vcycle_number))
         self.log_dir = ("const std::string", rawstr(options.log_directory))
         self.sets = ("const std::string", rawstr(options.test_sets))
-        self.face_int_prm(options.face_integral_type)
         self.laplace_prm(options.laplace_type)
         self.smooth_vmult_prm(options.smooth_vmult)
         self.smooth_inv_prm(options.smooth_inv)
+        self.local_solver_prm(options.local_solver)
         self.granularity_prm(options.granularity)
-
-    def face_int_prm(self, variant):
-        """translate the variant into parameters"""
-        kernel_str = "{"
-        count = 0
-        for kernel in variant:
-            if kernel.startswith("c"):
-                kernel_str += r"PSMF::FaceIntegralType::compact, "
-                count += 1
-            elif kernel.endswith("element_wise"):
-                kernel_str += r"PSMF::FaceIntegralType::element_wise, "
-                count += 1
-            elif kernel.endswith("element_wise_partial"):
-                kernel_str += r"PSMF::FaceIntegralType::element_wise_partial, "
-                count += 1
-        self.face_integral_type = (
-            "constexpr std::array<PSMF::FaceIntegralType, " + str(count) + ">",
-            kernel_str + "}",
-        )
 
     def laplace_prm(self, variant):
         """translate the variant into parameters"""
-        kernel_str = "{"
+        kernel_str = "{{"
         count = 0
         for kernel in variant:
             if kernel.startswith("B"):
                 kernel_str += r"PSMF::LaplaceVariant::Basic, "
                 count += 1
-            elif kernel.endswith("Cell"):
-                kernel_str += r"PSMF::LaplaceVariant::BasicCell, "
+            elif kernel.startswith("Padding"):
+                kernel_str += r"PSMF::LaplaceVariant::BasicPadding, "
                 count += 1
             elif kernel.endswith("Free"):
                 kernel_str += r"PSMF::LaplaceVariant::ConflictFree, "
                 count += 1
-            elif kernel.endswith("Core"):
-                kernel_str += r"PSMF::LaplaceVariant::TensorCore, "
-                count += 1
-            elif kernel.endswith("MMA"):
-                kernel_str += r"PSMF::LaplaceVariant::TensorCoreMMA, "
+            elif kernel.startswith("Matrix"):
+                kernel_str += r"PSMF::LaplaceVariant::MatrixStruct, "
                 count += 1
         self.laplace_type = (
             "constexpr std::array<PSMF::LaplaceVariant, " + str(count) + ">",
-            kernel_str + "}",
+            kernel_str + "}}",
         )
 
     def smooth_vmult_prm(self, variant):
         """translate the variant into parameters"""
-        kernel_str = "{"
+        kernel_str = "{{"
         count = 0
         for kernel in variant:
             if kernel.startswith("B"):
                 kernel_str += r"PSMF::LaplaceVariant::Basic, "
                 count += 1
+            elif kernel.startswith("Padding"):
+                kernel_str += r"PSMF::LaplaceVariant::BasicPadding, "
+                count += 1
             elif kernel.endswith("Free"):
                 kernel_str += r"PSMF::LaplaceVariant::ConflictFree, "
                 count += 1
-            elif kernel.endswith("Core"):
-                kernel_str += r"PSMF::LaplaceVariant::TensorCore, "
+            elif kernel.startswith("Matrix"):
+                kernel_str += r"PSMF::LaplaceVariant::MatrixStruct, "
                 count += 1
         self.smooth_vmult = (
             "constexpr std::array<PSMF::LaplaceVariant, " + str(count) + ">",
-            kernel_str + "}",
+            kernel_str + "}}",
         )
 
     def smooth_inv_prm(self, variant):
         """translate the variant into parameters"""
-        kernel_str = "{"
+        kernel_str = "{{"
         count = 0
         for kernel in variant:
-            if kernel.startswith("GLO"):
+            if kernel.startswith("G"):
                 kernel_str += r"PSMF::SmootherVariant::GLOBAL, "
                 count += 1
-            elif kernel.startswith("F"):
+            if kernel.startswith("FUSED_L"):
                 kernel_str += r"PSMF::SmootherVariant::FUSED_L, "
                 count += 1
             elif kernel.endswith("Free"):
                 kernel_str += r"PSMF::SmootherVariant::ConflictFree, "
                 count += 1
-            elif kernel.endswith("Core"):
-                kernel_str += r"PSMF::SmootherVariant::TensorCore, "
-                count += 1
-            elif kernel.endswith("Res"):
-                kernel_str += r"PSMF::SmootherVariant::ExactRes, "
-                count += 1
-            elif kernel.endswith("Chebyshev"):
-                kernel_str += r"PSMF::SmootherVariant::Chebyshev, "
-                count += 1
-            elif kernel.endswith("MCS"):
-                kernel_str += r"PSMF::SmootherVariant::MCS, "
-                count += 1
-            elif kernel.endswith("MCS_CG"):
-                kernel_str += r"PSMF::SmootherVariant::MCS_CG, "
-                count += 1
-            elif kernel.endswith("MCS_PCG"):
-                kernel_str += r"PSMF::SmootherVariant::MCS_PCG, "
-                count += 1
         self.smooth_inv = (
             "constexpr std::array<PSMF::SmootherVariant, " + str(count) + ">",
-            kernel_str + "}",
+            kernel_str + "}}",
+        )
+
+    def local_solver_prm(self, variant):
+        """translate the variant into parameters"""
+        kernel_str = "{{"
+        count = 0
+        for kernel in variant:
+            if kernel.startswith("Direct"):
+                kernel_str += r"PSMF::LocalSolverVariant::Direct, "
+                count += 1
+            elif kernel.endswith("SchurDirect"):
+                kernel_str += r"PSMF::LocalSolverVariant::SchurDirect, "
+                count += 1
+            elif kernel.startswith("SchurIter"):
+                kernel_str += r"PSMF::LocalSolverVariant::SchurIter, "
+                count += 1
+            elif kernel.startswith("T"):
+                kernel_str += r"PSMF::LocalSolverVariant::SchurTensorProduct, "
+                count += 1
+        self.local_solver = (
+            "constexpr std::array<PSMF::LocalSolverVariant, " + str(count) + ">",
+            kernel_str + "}}",
         )
 
     def granularity_prm(self, variant):
