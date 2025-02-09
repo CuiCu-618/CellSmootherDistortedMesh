@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument(
         "-DEG",
         "--fe-degree",
-        default=4,
+        default=7,
         type=int,
         choices=range(1, 11),
         help="spatial dimension of the domain",
@@ -70,13 +70,16 @@ def parse_args():
         help="number of triangulation in x coordinate axes",
     )
     parser.add_argument(
-        "-DIS", "--distort", default=0.1, type=float, help="desired distort factor"
+        "-DIS", "--distort", default=0.0, type=float, help="desired distort factor"
     )
     parser.add_argument(
         "-REDUCE", "--reduce", default=1e-8, type=float, help="desired reduction factor"
     )
     parser.add_argument(
         "-MAXIT", "--max_steps", default=20, type=int, help="maximum number of steps"
+    )
+    parser.add_argument(
+        "-DAMPING", "--damping", default=1.0, type=float, help="damping factor"
     )
     parser.add_argument(
         "-MAXSIZE",
@@ -158,7 +161,7 @@ def parse_args():
         "--test_sets",
         default="error_analysis",
         type=str,
-        choices=["global", "quadrant", "error_analysis"],
+        choices=["none", "global", "quadrant", "error_analysis"],
         help="sets of experiments used for comparsion",
     )
     args = parser.parse_args()
@@ -191,6 +194,7 @@ class Parameter:
         self.patch_per_block = ("constexpr unsigned int", patch)
         self.distort = ("constexpr double", options.distort)
         self.reduce = ("constexpr double", options.reduce)
+        self.damping = ("constexpr double", options.damping)
         self.max_steps = ("constexpr unsigned int", options.max_steps)
         self.max_sizes = ("constexpr long long unsigned int", options.max_sizes)
         self.dof_layout = (
@@ -278,7 +282,7 @@ class Parameter:
                 kernel_str += r"PSMF::SmootherVariant::GLOBAL, "
                 count += 1
             elif kernel.startswith("F"):
-                kernel_str += r"PSMF::SmootherVariant::FUSED_L, "
+                kernel_str += r"PSMF::SmootherVariant::MCS, "
                 count += 1
             elif kernel.endswith("Free"):
                 kernel_str += r"PSMF::SmootherVariant::ConflictFree, "

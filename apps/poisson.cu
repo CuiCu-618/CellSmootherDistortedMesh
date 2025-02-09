@@ -197,7 +197,7 @@ namespace Step64
 
     PSMF::MGTransferCUDA<dim, vcycle_number> transfer;
 
-    LinearAlgebra::distributed::Vector<double, MemorySpace::Host>
+    LinearAlgebra::distributed::Vector<full_number, MemorySpace::Host>
       ghost_solution_host;
   };
 
@@ -341,7 +341,7 @@ namespace Step64
 
         {
           typename CellPatch::AdditionalData additional_data;
-          additional_data.relaxation         = 1.;
+          additional_data.relaxation         = CT::DAMPING_;
           additional_data.cell_per_block     = CT::PATCH_PER_BLOCK_;
           additional_data.granularity_scheme = CT::GRANULARITY_;
 
@@ -436,8 +436,8 @@ namespace Step64
              level_mfdata_sp,
              cell_data,
              transfer,
-             Solution<dim>(),
-             RightHandSide<dim>(),
+             Solution<dim, full_number>(),
+             RightHandSide<dim, full_number>(),
              pcout,
              1);
 
@@ -535,7 +535,8 @@ namespace Step64
       {
         auto solution = solver.get_solution();
 
-        LinearAlgebra::ReadWriteVector<double> rw_vector(locally_owned_dofs);
+        LinearAlgebra::ReadWriteVector<full_number> rw_vector(
+          locally_owned_dofs);
         rw_vector.import(solution, VectorOperation::insert);
 
         ghost_solution_host.import(rw_vector, VectorOperation::insert);
@@ -662,14 +663,14 @@ namespace Step64
   std::pair<double, double>
   LaplaceProblem<dim, fe_degree>::compute_error()
   {
-    if (dof_handler.n_dofs() > 1e7)
-      return std::make_pair(0, 0);
+    // if (dof_handler.n_dofs() > 1e7)
+    //   return std::make_pair(0, 0);
 
     Vector<double> cellwise_norm(triangulation.n_active_cells());
     VectorTools::integrate_difference(mapping,
                                       dof_handler,
                                       ghost_solution_host,
-                                      Solution<dim>(),
+                                      Solution<dim, full_number>(),
                                       cellwise_norm,
                                       QGauss<dim>(fe->degree + 1),
                                       VectorTools::L2_norm);
@@ -680,7 +681,7 @@ namespace Step64
     VectorTools::integrate_difference(mapping,
                                       dof_handler,
                                       ghost_solution_host,
-                                      Solution<dim>(),
+                                      Solution<dim, full_number>(),
                                       cellwise_h1norm,
                                       QGauss<dim>(fe->degree + 1),
                                       VectorTools::H1_seminorm);
@@ -741,7 +742,8 @@ namespace Step64
           // else if (dim == 3)
           //   n_dofs_1d = std::cbrt(CT::MAX_SIZES_);
           // auto n_refinement =
-          //   static_cast<unsigned int>(std::log2(n_dofs_1d / (fe_degree + 1)));
+          //   static_cast<unsigned int>(std::log2(n_dofs_1d / (fe_degree +
+          //   1)));
           // triangulation.refine_global(n_refinement + cycle);
 
           triangulation.refine_global(2 + cycle);

@@ -34,7 +34,7 @@ using namespace nvcuda;
 
 #define CONFLICTFREE
 
-#define TENSORCORE 2
+#define TENSORCORE 0
 // 0: CUDA Core
 // 1: WMMA API
 // 2: PTX MMA

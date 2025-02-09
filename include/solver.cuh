@@ -838,6 +838,99 @@ namespace PSMF
           //   dof_handler, *mg, transfer_dp);
         }
 
+      // timers
+      if (true)
+        {
+          all_mg_timers.resize((maxlevel - minlevel + 1));
+          for (unsigned int i = 0; i < all_mg_timers.size(); ++i)
+            all_mg_timers[i].resize(6);
+
+          const auto create_mg_timer_function = [&](const unsigned int i,
+                                                    const std::string &label) {
+            cudaEvent_t start, stop;
+            cudaEventCreate(&start);
+            cudaEventCreate(&stop);
+
+            return [i, label, start, stop, this](const bool         flag,
+                                                 const unsigned int level) {
+              if (false && flag)
+                std::cout << label << " " << level << std::endl;
+              if (flag)
+                {
+                  cudaEventRecord(start);
+                  // all_mg_timers[level - minlevel][i].second =
+                  // std::chrono::system_clock::now();
+                }
+              else
+                {
+                  cudaEventRecord(stop);
+                  cudaEventSynchronize(stop);
+                  float milliseconds = 0;
+                  cudaEventElapsedTime(&milliseconds, start, stop);
+                  all_mg_timers[level - minlevel][i].first +=
+                    milliseconds / 1e3;
+
+                  // all_mg_timers[level - minlevel][i].first +=
+                  //   std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  //     std::chrono::system_clock::now() -
+                  //     all_mg_timers[level - minlevel][i].second)
+                  //     .count() /
+                  //   1e9;
+                }
+            };
+          };
+
+          {
+            mg->connect_pre_smoother_step(
+              create_mg_timer_function(0, "pre_smoother_step"));
+            mg->connect_residual_step(
+              create_mg_timer_function(1, "residual_step"));
+            mg->connect_restriction(create_mg_timer_function(2, "restriction"));
+            mg->connect_coarse_solve(
+              create_mg_timer_function(3, "coarse_solve"));
+            mg->connect_prolongation(
+              create_mg_timer_function(4, "prolongation"));
+            mg->connect_post_smoother_step(
+              create_mg_timer_function(5, "post_smoother_step"));
+          }
+
+          all_mg_precon_timers.resize(2);
+
+          const auto create_mg_precon_timer_function =
+            [&](const unsigned int i) {
+              cudaEvent_t start, stop;
+              cudaEventCreate(&start);
+              cudaEventCreate(&stop);
+
+              return [i, start, stop, this](const bool flag) {
+                if (flag)
+                  cudaEventRecord(start);
+                // all_mg_precon_timers[i].second =
+                //   std::chrono::system_clock::now();
+                else
+                  {
+                    cudaEventRecord(stop);
+                    cudaEventSynchronize(stop);
+                    float milliseconds = 0;
+                    cudaEventElapsedTime(&milliseconds, start, stop);
+                    all_mg_precon_timers[i].first += milliseconds / 1e3;
+
+                    // all_mg_precon_timers[i].first +=
+                    //   std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    //     std::chrono::system_clock::now() -
+                    //     all_mg_precon_timers[i].second)
+                    //     .count() /
+                    //   1e9;
+                  }
+              };
+            };
+
+          preconditioner_mg->connect_transfer_to_mg(
+            create_mg_precon_timer_function(0));
+          preconditioner_mg->connect_transfer_to_global(
+            create_mg_precon_timer_function(1));
+        }
+
       size_t free_mem, total_mem;
       AssertCuda(cudaMemGetInfo(&free_mem, &total_mem));
 
@@ -919,13 +1012,94 @@ namespace PSMF
       preconditioner_mg->vmult(dst, src);
     }
 
+
+
+    void
+    print_timings() const
+    {
+      {
+        *pcout << " - #N of calls of multigrid: " << all_mg_counter << std::endl
+               << std::endl;
+        *pcout << " - Times of multigrid (levels):" << std::endl;
+
+        const auto print_line = [&](const auto &vector) {
+          for (const auto &i : vector)
+            *pcout << std::scientific << std::setprecision(2) << std::setw(10)
+                   << i.first;
+
+          double sum = 0;
+
+          for (const auto &i : vector)
+            sum += i.first;
+
+          *pcout << "   | " << std::scientific << std::setprecision(2)
+                 << std::setw(10) << sum;
+
+          *pcout << "\n";
+        };
+
+        for (unsigned int l = 0; l < all_mg_timers.size(); ++l)
+          {
+            *pcout << std::setw(4) << l << ": ";
+
+            print_line(all_mg_timers[l]);
+          }
+
+        std::vector<
+          std::pair<double, std::chrono::time_point<std::chrono::system_clock>>>
+          sums(all_mg_timers[0].size());
+
+        for (unsigned int i = 0; i < sums.size(); ++i)
+          for (unsigned int j = 0; j < all_mg_timers.size(); ++j)
+            sums[i].first += all_mg_timers[j][i].first;
+
+        std::vector<
+          std::pair<double, std::chrono::time_point<std::chrono::system_clock>>>
+          lL(all_mg_timers[0].size());
+
+        for (unsigned int i = 0; i < sums.size(); ++i)
+          for (unsigned int j = 0; j < all_mg_timers.size() - 1; ++j)
+            lL[i].first += all_mg_timers[j][i].first;
+
+        *pcout
+          << "   ------------------------------------------------------------------+-----------\n";
+        *pcout << "sum:  ";
+        print_line(sums);
+        *pcout << "l<L:  ";
+        print_line(lL);
+
+        *pcout << std::endl;
+
+        *pcout << " - Times of multigrid (solver <-> mg): ";
+
+        for (const auto &i : all_mg_precon_timers)
+          *pcout << i.first << " ";
+        *pcout << std::endl;
+        *pcout << std::endl;
+      }
+    }
+
+    void
+    clear_timings() const
+    {
+      for (auto &is : all_mg_timers)
+        for (auto &i : is)
+          i.first = 0.0;
+
+      for (auto &i : all_mg_precon_timers)
+        i.first = 0.0;
+
+      all_mg_counter = 0;
+    }
+
+
     // Solve with the conjugate gradient method preconditioned by the V-cycle
     // (invoking this->vmult) and return the number of iterations and the
     // reduction rate per GMRES iteration
     std::vector<SolverData>
     solve()
     {
-      *pcout << "Solving...\n";
+      *pcout << "Solving in DP...\n";
 
       std::string solver_name = "GMRES";
 
@@ -944,6 +1118,13 @@ namespace PSMF
       bool is_converged = true;
       try
         {
+          {
+            solution = 0;
+            solver.solve(matrix[maxlevel], solution, rhs, *this);
+            print_timings();
+            clear_timings();
+          }
+
           for (unsigned int i = 0; i < N; ++i)
             {
               time.reset();
@@ -1137,6 +1318,16 @@ namespace PSMF
     const Function<dim, Number> &analytic_solution;
 
     std::shared_ptr<ConditionalOStream> pcout;
+
+    mutable unsigned int all_mg_counter = 0;
+
+    mutable std::vector<std::vector<
+      std::pair<double, std::chrono::time_point<std::chrono::system_clock>>>>
+      all_mg_timers;
+
+    mutable std::vector<
+      std::pair<double, std::chrono::time_point<std::chrono::system_clock>>>
+      all_mg_precon_timers;
   };
 
 

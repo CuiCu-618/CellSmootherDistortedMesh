@@ -156,6 +156,7 @@ namespace Util
     oss << "_non";
 #endif
     oss << "_Dis" << std::lround(CT::DISTORT_ * 100);
+    oss << "_damp" << std::lround(CT::DAMPING_ * 100);
 
     return oss.str();
   }
@@ -263,6 +264,7 @@ namespace Util
 #endif
         << std::endl
         << "Distort factor:                 " << CT::DISTORT_ << std::endl
+        << "Damping factor:                 " << CT::DAMPING_ << std::endl
         << std::endl;
 
 

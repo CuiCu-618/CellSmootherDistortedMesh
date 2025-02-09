@@ -545,7 +545,7 @@ namespace PSMF
     FEEvaluation(const unsigned int       cell_id,
                  const data_type         *data,
                  SharedData<dim, Number> *shdata)
-    : n_cells(data->n_cells)
+    : n_cells(data -> n_cells)
     , padding_length(data->padding_length)
     , mf_object_id(data->id)
     , use_coloring(data->use_coloring)
@@ -571,7 +571,7 @@ namespace PSMF
     shape_gradients = data->cell_face_shape_gradients;
 #elif MEMORY_TYPE == 2
     {
-      const unsigned int idx  = compute_index<dim, n_q_points_1d>();
+      const unsigned int idx = compute_index<dim, n_q_points_1d>();
 #  if TENSORCORE == 2
       const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, 0);
 #  else
@@ -1001,7 +1001,7 @@ namespace PSMF
                      const data_type         *data,
                      SharedData<dim, Number> *shdata,
                      const bool               is_interior_face)
-    : n_faces(data->n_faces)
+    : n_faces(data -> n_faces)
     , n_cells(data->n_cells)
     , padding_length(data->padding_length)
     , face_padding_length(data->face_padding_length)
@@ -1063,7 +1063,7 @@ namespace PSMF
     shape_gradients = data->cell_face_shape_gradients;
 #elif MEMORY_TYPE == 2
     {
-      const unsigned int idx  = compute_index<dim, n_q_points_1d>();
+      const unsigned int idx = compute_index<dim, n_q_points_1d>();
 #  if TENSORCORE == 2
       const unsigned int idx1 = idx ^ get_base<n_q_points_1d>(threadIdx.y, 0);
 #  else
