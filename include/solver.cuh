@@ -1056,17 +1056,23 @@ namespace PSMF
         std::vector<
           std::pair<double, std::chrono::time_point<std::chrono::system_clock>>>
           lL(all_mg_timers[0].size());
-
+        
+        double ll_sum = 0;
         for (unsigned int i = 0; i < sums.size(); ++i)
           for (unsigned int j = 0; j < all_mg_timers.size() - 1; ++j)
-            lL[i].first += all_mg_timers[j][i].first;
+            ll_sum += all_mg_timers[j][i].first;
+            // lL[i].first += all_mg_timers[j][i].first;
 
         *pcout
           << "   ------------------------------------------------------------------+-----------\n";
         *pcout << "sum:  ";
         print_line(sums);
-        *pcout << "l<L:  ";
-        print_line(lL);
+
+        auto n_dofs = dof_handler->n_dofs();
+        *pcout << "smoother:  " << (sums[0].first + sums[5].first) / n_dofs * 1e9 << std::endl;
+        *pcout << "l < L:     " << ll_sum / n_dofs * 1e9 << std::endl;
+        *pcout << "mat-vec:   " << sums[1].first / n_dofs * 1e9 << std::endl;
+        *pcout << "trans:     " << (sums[2].first + sums[4].first) / n_dofs * 1e9 << std::endl;
 
         *pcout << std::endl;
 
