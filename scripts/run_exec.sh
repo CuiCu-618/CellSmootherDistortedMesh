@@ -7,29 +7,29 @@ cd -
 # DOF=16777216
 # DOF=134217728
 # for DOF in 4096 32768 262144 2097152 16777216 134217728
-# dis=("0" "0.1" "0.2" "0.3" "0.4" "0.5")
-dis=("0.0")
 
-for DOF in 100000000
+# variant="Basic ConflictFree"
+variant="TensorCore TensorCoreMMA TensorCoreMMACF"
+
+for DOF in 50000000
 do
-for d in "${dis[@]}"
+for p in 3 
 do
-for p in 2 3 4 5 6 7 8
+for v in $variant
 do
     echo "/////////////////////"
-    echo "Starting 3D degree=$p Dof=$DOF Dis=$d"
+    echo "Starting 3D degree=$p Dof=$DOF $v"
     echo "/////////////////////"
-    python3 ../scripts/ct_parameter.py -DIM 3 -DEG $p -MAXSIZE $DOF -REDUCE 1e-8 -MAXIT 20 \
-          -DIS $d -FACE element_wise -LA Basic -SMV Basic -SMI MCS \
-          -REP 1 -VNUM double -SETS error_analysis -G none 
+    python3 ../scripts/ct_parameter.py -DIM 3 -DEG $p -MAXSIZE $DOF -REDUCE 1e-8 -MAXIT 10 \
+          -LA $v -VNUM double -SETS none -G none 
     cd ..
-    make poisson 
+    make biharm 
     cd -
     echo "/////////////////////"
-    echo "Running 3D degree=$p Dof=$DOF"
+    echo "Running 3D degree=$p Dof=$DOF $v"
     echo "/////////////////////"
-    # ../apps/poisson -device=2
-    ncu -k regex:apply_kernel_shmem -s 1 -c 3 \
+    # ../apps/biharm -device=2
+    ncu -k regex:laplace_kernel -s 3 -c 2 \
       --metrics gpc__cycles_elapsed.avg.per_second,\
 gpu__time_duration.sum,\
 dram__bytes.sum,\
@@ -53,6 +53,7 @@ lts__t_sectors_lookup_miss.sum,\
 l1tex__t_sectors_lookup_hit.sum,\
 l1tex__t_sectors_lookup_miss.sum,\
 launch__registers_per_thread,\
+launch__grid_size,\
 launch__block_size,\
 launch__shared_mem_per_block_dynamic,\
 sm__warps_active.avg.pct_of_peak_sustained_active,\
@@ -61,9 +62,9 @@ smsp__sass_inst_executed_op_local_st.sum,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum.pct_of_peak_sustained_elapsed,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum.pct_of_peak_sustained_elapsed,\
 l1tex__data_pipe_lsu_wavefronts.avg.pct_of_peak_sustained_elapsed \
-        ../apps/poisson -device=2 >  Ax_element_Q${p}_CF_M2_dp
-    # ncu -f -o Ax_compact_Q${p}_Basic_M0_dp -k regex:apply_kernel_shmem -s 1 -c 3 --set full \
-    #     --import-source yes ../apps/poisson -device=2
+        ../apps/biharm -device=2 > ${v}.log 
+    # ncu -f -o ${v} -k regex:laplace_kernel -s 4 -c 2 --set full \
+    #     --import-source no ../apps/biharm -device=2
       
 done
 done

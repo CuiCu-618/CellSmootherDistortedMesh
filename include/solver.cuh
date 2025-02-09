@@ -342,11 +342,11 @@ namespace PSMF
       std::string comp_name = "";
 
       const unsigned int n_dofs = dof_handler->n_dofs();
-      const unsigned int n_mv   = n_dofs < 10000000 ? 20 : 4;
+      const unsigned int n_mv   = 1; // n_dofs < 10000000 ? 20 : 4;
 
       auto tester = [&](auto kernel) {
         Timer              time;
-        const unsigned int N         = 5;
+        const unsigned int N         = 1;
         double             best_time = 1e10;
         for (unsigned int i = 0; i < N; ++i)
           {
@@ -363,7 +363,7 @@ namespace PSMF
         comp_data.push_back(data);
       };
 
-      for (unsigned int s = 0; s < 3; ++s)
+      for (unsigned int s = 0; s < 2; ++s)
         {
           switch (s)
             {
@@ -1163,11 +1163,11 @@ namespace PSMF
       std::string comp_name = "";
 
       const unsigned int n_dofs = dof_handler->n_dofs();
-      const unsigned int n_mv   = n_dofs < 10000000 ? 10 : 4;
+      const unsigned int n_mv   = 1; // n_dofs < 10000000 ? 10 : 4;
 
       auto tester = [&](auto kernel) {
         Timer              time;
-        const unsigned int N         = 5;
+        const unsigned int N         = 1;
         double             best_time = 1e10;
         for (unsigned int i = 0; i < N; ++i)
           {
@@ -1184,7 +1184,7 @@ namespace PSMF
         comp_data.push_back(data);
       };
 
-      for (unsigned int s = 0; s < 2; ++s)
+      for (unsigned int s = 0; s < 1; ++s)
         {
           switch (s)
             {

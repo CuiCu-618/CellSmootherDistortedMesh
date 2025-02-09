@@ -27,7 +27,7 @@ using namespace dealii;
 // 1: AVS colored
 // 2: AVS atomic
 
-// #define TENSORCORE
+#define TENSORCORE
 
 /**
  * Namespace for the Patch Smoother Matrix-Free
